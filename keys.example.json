@@ -1,0 +1,15 @@
+{
+  "port": 8787,
+  "host": "127.0.0.1",
+  "upstream": "https://api.deepseek.com",
+  "cooldownMs": 60000,
+  "breakerThreshold": 5,
+  "maxRetries": 2,
+  "timeoutMs": 0,
+  "maxBodyBytes": 67108864,
+  "token": "",
+  "keys": [
+    { "name": "primary", "key": "sk-REPLACE-WITH-YOUR-KEY-1", "weight": 1 },
+    { "name": "backup", "key": "sk-REPLACE-WITH-YOUR-KEY-2", "weight": 1 }
+  ]
+}

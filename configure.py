@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Interactive configuration wizard for deepseek-gateway."""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import math
+import os
+from pathlib import Path
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from urllib.parse import urlparse
+
+
+ROOT = Path(__file__).resolve().parent
+DEFAULT_CONFIG = ROOT / "keys.json"
+DEFAULTS = {
+    "port": 8787,
+    "host": "127.0.0.1",
+    "upstream": "https://api.deepseek.com",
+    "cooldownMs": 60000,
+    "breakerThreshold": 5,
+    "maxRetries": 2,
+    "timeoutMs": 0,
+    "maxBodyBytes": 64 * 1024 * 1024,
+    "token": "",
+    "keys": [],
+}
+
+
+def confirm(label: str, default: bool) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    while True:
+        value = input(f"{label} [{suffix}]: ").strip().lower()
+        if not value:
+            return default
+        if value in {"y", "yes", "1", "true"}:
+            return True
+        if value in {"n", "no", "0", "false"}:
+            return False
+        print("请输入 y 或 n。")
+
+
+def prompt_text(label: str, current: str, validator=None) -> str:
+    while True:
+        value = input(f"{label} [{current}]: ").strip() or current
+        try:
+            return validator(value) if validator else value
+        except ValueError as exc:
+            print(f"无效输入：{exc}")
+
+
+def prompt_number(
+    label: str,
+    current,
+    *,
+    minimum: float,
+    maximum: float | None = None,
+    integer: bool = True,
+):
+    parser = int if integer else float
+    while True:
+        value = input(f"{label} [{current}]: ").strip()
+        try:
+            parsed = parser(value) if value else parser(current)
+            if isinstance(parsed, float) and not math.isfinite(parsed):
+                raise ValueError("必须是有限数值")
+            if parsed < minimum:
+                raise ValueError(f"必须大于或等于 {minimum:g}")
+            if maximum is not None and parsed > maximum:
+                raise ValueError(f"必须小于或等于 {maximum:g}")
+            return parsed
+        except (TypeError, ValueError) as exc:
+            print(f"无效输入：{exc}")
+
+
+def prompt_secret(label: str) -> str:
+    if sys.stdin.isatty():
+        return getpass.getpass(label)
+    return input(label)
+
+
+def validate_upstream(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("请输入完整的 http:// 或 https:// URL")
+    return value.rstrip("/")
+
+
+def load_existing(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"无法读取现有配置 {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"现有配置 {path} 的顶层必须是 JSON 对象")
+    return value
+
+
+def mask_secret(value: str) -> str:
+    if len(value) <= 7:
+        return "*" * len(value)
+    return f"{value[:3]}...{value[-4:]}"
+
+
+def configure_keys(existing) -> list[dict]:
+    keys = []
+    names = set()
+    invalid_existing = False
+    for index, item in enumerate(existing or []):
+        if not isinstance(item, dict) or not item.get("key"):
+            invalid_existing = True
+            continue
+        name = str(item.get("name") or f"key-{index + 1}")
+        try:
+            weight = float(item.get("weight", 1))
+            if not math.isfinite(weight) or weight <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            invalid_existing = True
+            continue
+        if name in names:
+            invalid_existing = True
+            continue
+        keys.append({
+            "name": name,
+            "key": str(item["key"]),
+            "weight": int(weight) if weight.is_integer() else weight,
+        })
+        names.add(name)
+    if invalid_existing:
+        print("现有 API Key 配置包含空值、重复名称或无效权重，需要重新输入。")
+        keys = []
+    if keys:
+        print("\n现有 API Key：")
+        for index, item in enumerate(keys, 1):
+            print(f"  {index}. {item['name']} ({mask_secret(item['key'])}, weight={item['weight']})")
+        if not confirm("重新输入全部 API Key", False):
+            return keys
+
+    keys = []
+    names = set()
+    print("\n配置 API Key（至少一个）：")
+    while True:
+        default_name = f"key-{len(keys) + 1}"
+        name = prompt_text("  名称", default_name)
+        if name in names:
+            print("该名称已存在，请换一个名称。")
+            continue
+        secret = prompt_secret("  API Key（隐藏输入）: ").strip()
+        if not secret:
+            print("API Key 不能为空。")
+            continue
+        weight = prompt_number("  权重", 1, minimum=0.000001, integer=False)
+        if float(weight).is_integer():
+            weight = int(weight)
+        keys.append({"name": name, "key": secret, "weight": weight})
+        names.add(name)
+        if not confirm("  继续添加 Key", False):
+            return keys
+
+
+def configure_token(existing: str) -> tuple[str, bool]:
+    enabled = confirm("启用网关访问密码", bool(existing))
+    if not enabled:
+        return "", False
+    hint = "（回车保留现有密码）" if existing else "（回车自动生成）"
+    value = prompt_secret(f"网关密码{hint}: ").strip()
+    if value:
+        return value, False
+    if existing:
+        return existing, False
+    return secrets.token_urlsafe(32), True
+
+
+def write_config(path: Path, config: dict) -> Path | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup = None
+    if path.exists():
+        backup_dir = path.parent / ".gateway-backups"
+        backup_dir.mkdir(mode=0o700, exist_ok=True)
+        backup_dir.chmod(0o700)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup = backup_dir / f"{path.name}.{stamp}"
+        shutil.copy2(path, backup)
+        backup.chmod(0o600)
+
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent, text=True)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(config, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.replace(temp_name, path)
+        path.chmod(0o600)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+    return backup
+
+
+def local_gateway_url(host: str, port: int) -> str:
+    target = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    if ":" in target and not target.startswith("["):
+        target = f"[{target}]"
+    return f"http://{target}:{port}"
+
+
+def run_codex_setup(config: dict) -> None:
+    env = os.environ.copy()
+    env["GATEWAY_URL"] = local_gateway_url(config["host"], config["port"])
+    env["GATEWAY_TOKEN"] = config["token"] or "gateway"
+    env["MODEL"] = prompt_text("Codex 默认模型", env.get("MODEL", "deepseek-v4-flash"))
+    result = subprocess.run([str(ROOT / "setup-codex.sh")], env=env, check=False)
+    if result.returncode:
+        raise RuntimeError(f"setup-codex.sh 退出码为 {result.returncode}")
+
+
+def configure(path: Path) -> dict:
+    existing = load_existing(path)
+    config = dict(existing)
+    current = {**DEFAULTS, **existing}
+
+    print(f"配置文件：{path}")
+    print("直接回车可接受方括号中的当前值。\n")
+    config["port"] = prompt_number("监听端口", current["port"], minimum=1, maximum=65535)
+    config["host"] = prompt_text("监听地址", str(current["host"]))
+    config["upstream"] = prompt_text("上游地址", str(current["upstream"]), validate_upstream)
+    config["cooldownMs"] = prompt_number("冷却时间（毫秒）", current["cooldownMs"], minimum=0)
+    config["breakerThreshold"] = prompt_number("熔断失败阈值", current["breakerThreshold"], minimum=1)
+    config["maxRetries"] = prompt_number("每次请求最大重试数", current["maxRetries"], minimum=0)
+    config["timeoutMs"] = prompt_number("上游超时（毫秒，0 表示不限）", current["timeoutMs"], minimum=0)
+    config["maxBodyBytes"] = prompt_number("请求体上限（字节）", current["maxBodyBytes"], minimum=1)
+    config["keys"] = configure_keys(current.get("keys"))
+    config["token"], generated = configure_token(str(current.get("token") or ""))
+    backup = write_config(path, config)
+
+    print(f"\n已写入 {path}（权限 600，{len(config['keys'])} 个 Key）")
+    if backup:
+        print(f"原配置备份：{backup}")
+    if generated:
+        print(f"自动生成的网关密码：{config['token']}")
+        print("请妥善保存；也可以稍后重新运行本脚本修改。")
+    print(f"面板地址：{local_gateway_url(config['host'], config['port'])}/")
+    return config
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="交互式配置 deepseek-gateway")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="配置文件路径（默认 ./keys.json）")
+    parser.add_argument("--no-codex", action="store_true", help="不询问 Codex CLI 接入")
+    parser.add_argument("--no-start", action="store_true", help="不询问立即启动网关")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    path = args.config.expanduser().resolve()
+    try:
+        config = configure(path)
+        if not args.no_codex and confirm("同步配置到 Codex CLI", True):
+            run_codex_setup(config)
+        if not args.no_start and confirm("立即启动网关", False):
+            print("按 Ctrl+C 停止网关。\n")
+            return subprocess.call(["node", str(ROOT / "gateway.mjs"), "--config", str(path)])
+        print(f"\n启动命令：node {ROOT / 'gateway.mjs'} --config {path}")
+        return 0
+    except (EOFError, KeyboardInterrupt):
+        print("\n已取消。", file=sys.stderr)
+        return 130
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

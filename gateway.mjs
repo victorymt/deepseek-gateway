@@ -63,16 +63,22 @@ Options:
   --host <addr>         listen host (default 127.0.0.1)
   --upstream <url>      upstream base URL (default https://api.deepseek.com)
   --token <t>           require Authorization: Bearer <t> on gateway requests
-  --cooldown-ms <n>     429/5xx cooldown duration (default 60000)
-  --breaker <n>         consecutive failures to open circuit (default 5)
+  --cooldown-ms <n>     429 cooldown duration (default 60000)
+  --blacklist-threshold <n>
+                        cumulative failures before disabling a key (default 3; 0 disables)
+  --breaker <n>         legacy alias for --blacklist-threshold
+  --balance-refresh-ms <n>
+                        key balance refresh interval (default 300000; 0 disables)
   --max-retries <n>     failover attempts per request (default 2)
   --max-body-bytes <n>  max request body size in bytes (default 67108864)
-  --mock                act as a fake upstream (key suffix ok/429/500/401/slow)
+  --mock                act as a fake upstream (key suffix ok/429/500/401/402/slow)
   --quiet               suppress request logging
   --help                show this help
 
 Env vars: DEEPSEEK_KEYS, DS_GATEWAY_PORT, DS_UPSTREAM, DS_GATEWAY_TOKEN,
-DS_GATEWAY_CONFIG, DS_COOLDOWN_MS, DS_BREAKER, DS_MAX_RETRIES, DS_MAX_BODY_BYTES
+DS_GATEWAY_CONFIG, DS_COOLDOWN_MS, DS_BLACKLIST_THRESHOLD,
+DS_BALANCE_REFRESH_MS, DS_MAX_RETRIES, DS_MAX_BODY_BYTES
+(DS_BREAKER remains as a legacy alias)
 
 Endpoints: / proxy (chat/completions, responses, any path), /health JSON,
 / dashboard (browser login via /login when token is set), /login, /logout`;
@@ -91,7 +97,9 @@ function parseArgs(argv) {
       case '--mock': opts.mock = true; break;
       case '--quiet': opts.quiet = true; break;
       case '--cooldown-ms': opts.cooldownMs = Number(argv[++i]); break;
-      case '--breaker': opts.breakerThreshold = Number(argv[++i]); break;
+      case '--blacklist-threshold':
+      case '--breaker': opts.blacklistThreshold = Number(argv[++i]); break;
+      case '--balance-refresh-ms': opts.balanceRefreshMs = Number(argv[++i]); break;
       case '--max-retries': opts.maxRetries = Number(argv[++i]); break;
       case '--max-body-bytes': opts.maxBodyBytes = Number(argv[++i]); break;
       case '--help':
@@ -127,7 +135,8 @@ function loadConfig(opts) {
     host: '127.0.0.1',
     upstream: DEFAULT_UPSTREAM,
     cooldownMs: 60000,
-    breakerThreshold: 5,
+    blacklistThreshold: 3,
+    balanceRefreshMs: 5 * 60 * 1000,
     maxRetries: 2,
     timeoutMs: 0,
     maxBodyBytes: 64 * 1024 * 1024,
@@ -139,6 +148,9 @@ function loadConfig(opts) {
   if (configPath) {
     try {
       const fileCfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (fileCfg.blacklistThreshold === undefined && fileCfg.breakerThreshold !== undefined) {
+        fileCfg.blacklistThreshold = fileCfg.breakerThreshold;
+      }
       Object.assign(cfg, fileCfg);
     } catch (err) {
       console.error(`failed to read config ${configPath}: ${err.message}`);
@@ -162,8 +174,11 @@ function loadConfig(opts) {
   if (opts.token) cfg.token = opts.token;
   if (process.env.DS_COOLDOWN_MS) cfg.cooldownMs = Number(process.env.DS_COOLDOWN_MS);
   if (opts.cooldownMs !== undefined) cfg.cooldownMs = opts.cooldownMs;
-  if (process.env.DS_BREAKER) cfg.breakerThreshold = Number(process.env.DS_BREAKER);
-  if (opts.breakerThreshold !== undefined) cfg.breakerThreshold = opts.breakerThreshold;
+  if (process.env.DS_BREAKER) cfg.blacklistThreshold = Number(process.env.DS_BREAKER);
+  if (process.env.DS_BLACKLIST_THRESHOLD) cfg.blacklistThreshold = Number(process.env.DS_BLACKLIST_THRESHOLD);
+  if (opts.blacklistThreshold !== undefined) cfg.blacklistThreshold = opts.blacklistThreshold;
+  if (process.env.DS_BALANCE_REFRESH_MS) cfg.balanceRefreshMs = Number(process.env.DS_BALANCE_REFRESH_MS);
+  if (opts.balanceRefreshMs !== undefined) cfg.balanceRefreshMs = opts.balanceRefreshMs;
   if (process.env.DS_MAX_RETRIES) cfg.maxRetries = Number(process.env.DS_MAX_RETRIES);
   if (opts.maxRetries !== undefined) cfg.maxRetries = opts.maxRetries;
   if (process.env.DS_MAX_BODY_BYTES) cfg.maxBodyBytes = Number(process.env.DS_MAX_BODY_BYTES);
@@ -177,10 +192,24 @@ function loadConfig(opts) {
 
 class KeyPool {
   constructor(keys, cfg) {
-    this.keys = keys.map(k => ({ ...k, inFlight: 0, success: 0, errors: 0, ratelimited: 0, consecutiveFailures: 0, invalid: false, throttleUntil: 0, lastUsed: 0, lastError: '' }));
+    this.keys = keys.map(k => ({
+      ...k,
+      inFlight: 0,
+      success: 0,
+      errors: 0,
+      ratelimited: 0,
+      failureCount: 0,
+      invalid: false,
+      throttleUntil: 0,
+      lastUsed: 0,
+      lastError: '',
+      balance: null,
+      balanceUpdatedAt: 0,
+      balanceError: '',
+    }));
     this.cursor = 0;
     this.cooldownMs = cfg.cooldownMs;
-    this.breakerThreshold = cfg.breakerThreshold;
+    this.blacklistThreshold = cfg.blacklistThreshold;
     this.total = { requests: 0, success: 0, errors: 0, ratelimited: 0, tokens: 0 };
     this._usageBuf = '';
   }
@@ -188,21 +217,13 @@ class KeyPool {
   pickKey(exclude = []) {
     const now = Date.now();
     const avail = this.keys.filter(k => !exclude.includes(k.name) && !k.invalid && now >= k.throttleUntil);
-    let candidates;
-    if (avail.length) {
-      candidates = avail;
-    } else {
-      candidates = this.keys
-        .filter(k => !exclude.includes(k.name) && !k.invalid)
-        .sort((a, b) => (a.consecutiveFailures - b.consecutiveFailures) || (a.throttleUntil - b.throttleUntil));
-      return candidates.length ? candidates[0] : null;
-    }
+    if (!avail.length) return null;
     let best = null;
     let bestScore = Infinity;
     let bestDist = Infinity;
     const n = this.keys.length;
-    for (let i = 0; i < candidates.length; i++) {
-      const k = candidates[i];
+    for (let i = 0; i < avail.length; i++) {
+      const k = avail[i];
       const idx = this.keys.indexOf(k);
       const score = k.inFlight / (k.weight || 1);
       const dist = (idx - this.cursor + n) % n;
@@ -216,10 +237,18 @@ class KeyPool {
     return best;
   }
 
-  openCircuit(key) {
-    key.throttleUntil = Date.now() + this.cooldownMs;
-    key.consecutiveFailures = 0;
-    key.lastError = 'circuit open';
+  markInvalid(key, reason) {
+    key.invalid = true;
+    key.throttleUntil = 0;
+    key.lastError = reason;
+  }
+
+  recordFailure(key, reason) {
+    key.failureCount++;
+    key.lastError = reason;
+    if (this.blacklistThreshold > 0 && key.failureCount >= this.blacklistThreshold) {
+      this.markInvalid(key, `blacklisted after ${key.failureCount} failures: ${reason}`);
+    }
   }
 
   recordResult(key, r) {
@@ -235,18 +264,17 @@ class KeyPool {
     if (r.networkError) {
       key.errors++;
       this.total.errors++;
-      key.consecutiveFailures++;
-      key.lastError = 'network error';
-      if (key.consecutiveFailures >= this.breakerThreshold) this.openCircuit(key);
+      this.recordFailure(key, 'network error');
       return;
     }
     const s = r.status;
     if (s < 400) {
       key.success++;
       this.total.success++;
-      key.consecutiveFailures = 0;
-      key.throttleUntil = 0;
-      key.lastError = '';
+      if (!key.invalid) {
+        key.throttleUntil = 0;
+        key.lastError = '';
+      }
       return;
     }
     key.errors++;
@@ -255,15 +283,12 @@ class KeyPool {
       key.ratelimited++;
       this.total.ratelimited++;
       key.throttleUntil = Date.now() + (r.retryAfterSec ? r.retryAfterSec * 1000 : this.cooldownMs);
-      key.consecutiveFailures = 0;
       key.lastError = '429 rate limited';
-    } else if (s === 401 || s === 403) {
-      key.invalid = true;
-      key.lastError = `${s} invalid key`;
+    } else if (s === 401 || s === 402 || s === 403) {
+      key.failureCount++;
+      this.markInvalid(key, `${s} invalid key`);
     } else if (s >= 500) {
-      key.consecutiveFailures++;
-      key.lastError = `http ${s}`;
-      if (key.consecutiveFailures >= this.breakerThreshold) this.openCircuit(key);
+      this.recordFailure(key, `http ${s}`);
     }
   }
 
@@ -279,7 +304,7 @@ class KeyPool {
 
   state(key) {
     if (key.invalid) return 'invalid';
-    if (key.throttleUntil > Date.now()) return key.lastError === 'circuit open' ? 'circuit-open' : 'cooldown';
+    if (key.throttleUntil > Date.now()) return 'cooldown';
     return 'healthy';
   }
 
@@ -296,14 +321,131 @@ class KeyPool {
         success: k.success,
         errors: k.errors,
         ratelimited: k.ratelimited,
-        consecutiveFailures: k.consecutiveFailures,
+        failureCount: k.failureCount,
         invalid: k.invalid,
         cooldownSec: k.throttleUntil > now ? Math.ceil((k.throttleUntil - now) / 1000) : 0,
         lastUsed: k.lastUsed,
         lastError: k.lastError,
+        balance: k.balance ? {
+          isAvailable: k.balance.isAvailable,
+          infos: k.balance.infos.map(info => ({ ...info })),
+        } : null,
+        balanceUpdatedAt: k.balanceUpdatedAt,
+        balanceError: k.balanceError,
       })),
     };
   }
+}
+
+function normalizeBalance(payload) {
+  if (!payload || !Array.isArray(payload.balance_infos)) throw new Error('invalid balance response');
+  return {
+    isAvailable: payload.is_available !== false,
+    infos: payload.balance_infos.map(info => ({
+      currency: String(info.currency || ''),
+      totalBalance: String(info.total_balance ?? ''),
+      grantedBalance: String(info.granted_balance ?? ''),
+      toppedUpBalance: String(info.topped_up_balance ?? ''),
+    })).filter(info => info.currency && info.totalBalance),
+  };
+}
+
+function readJsonResponse(res, maxBytes = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    res.on('data', chunk => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error('balance response too large'));
+        res.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    res.on('end', () => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        reject(new Error(`balance request returned ${res.statusCode}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      } catch {
+        reject(new Error('invalid balance response'));
+      }
+    });
+    res.on('error', reject);
+  });
+}
+
+async function fetchKeyBalance(cfg, key) {
+  if (cfg.mock) {
+    return normalizeBalance({
+      is_available: true,
+      balance_infos: [{
+        currency: 'CNY',
+        total_balance: '88.80',
+        granted_balance: '8.80',
+        topped_up_balance: '80.00',
+      }],
+    });
+  }
+
+  const url = new URL('/user/balance', cfg.upstream);
+  const mod = url.protocol === 'https:' ? https : http;
+  const payload = await new Promise((resolve, reject) => {
+    const req = mod.request(url, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${key.key}`, accept: 'application/json' },
+      agent: url.protocol === 'https:' ? cfg.agent : undefined,
+    }, res => readJsonResponse(res).then(resolve, reject));
+    req.setTimeout(10000, () => req.destroy(new Error('balance request timeout')));
+    req.on('error', reject);
+    req.end();
+  });
+  return normalizeBalance(payload);
+}
+
+function supportsBalanceQuery(cfg) {
+  if (cfg.mock) return true;
+  try {
+    const hostname = new URL(cfg.upstream).hostname.toLowerCase();
+    return hostname === 'api.deepseek.com' || hostname.endsWith('.api.deepseek.com');
+  } catch {
+    return false;
+  }
+}
+
+function startBalanceRefresh(cfg, pool, log) {
+  let refreshing = false;
+  const refresh = async () => {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      await Promise.all(pool.keys.map(async key => {
+        try {
+          key.balance = await fetchKeyBalance(cfg, key);
+          key.balanceUpdatedAt = Date.now();
+          key.balanceError = '';
+        } catch (err) {
+          key.balanceError = err.message;
+          log(`balance refresh failed key=${key.name}: ${err.message}`);
+        }
+      }));
+    } finally {
+      refreshing = false;
+    }
+  };
+
+  if (cfg.balanceRefreshMs <= 0) return () => {};
+  if (!supportsBalanceQuery(cfg)) {
+    for (const key of pool.keys) key.balanceError = 'balance is only supported for DeepSeek';
+    return () => {};
+  }
+  refresh();
+  const timer = setInterval(refresh, cfg.balanceRefreshMs);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 function retryAfterSec(res) {
@@ -357,7 +499,7 @@ async function relay(cfg, pool, clientReq, clientRes, body, log) {
       }
       const ra = retryAfterSec(r);
       pool.recordResult(k, { status, retryAfterSec: ra });
-      const retryable = status === 429 || status === 401 || status === 403 || status >= 500;
+      const retryable = status === 429 || status === 401 || status === 402 || status === 403 || status >= 500;
       if (retryable && attempt < maxRetries) {
         r.resume();
         r.on('error', () => {});
@@ -426,14 +568,14 @@ function mockResponse(key, body) {
     let behavior = 'ok';
     const parts = String(key.key).split('-');
     const suffix = parts[parts.length - 1];
-    if (['429', '500', '401', 'slow', 'drip', 'abort'].includes(suffix)) behavior = suffix;
+    if (['429', '500', '401', '402', 'slow', 'drip', 'abort'].includes(suffix)) behavior = suffix;
     let bodyObj = {};
     try { bodyObj = JSON.parse(body.toString('utf8') || '{}'); } catch {}
     const model = bodyObj.model || 'deepseek-v4-flash';
     const stream = !!bodyObj.stream;
     const delay = behavior === 'slow' ? 400 : 30;
     setTimeout(() => {
-      const statusMap = { 429: 429, 500: 500, 401: 401 };
+      const statusMap = { 429: 429, 500: 500, 401: 401, 402: 402 };
       const status = statusMap[behavior] || 200;
       const headers = {};
       if (stream && status === 200) {
@@ -523,15 +665,18 @@ function dashboardHtml() {
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
   .card .k { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
   .card .v { font-size: 22px; font-weight: 600; margin-top: 4px; }
-  table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  .table-wrap { width: 100%; overflow-x: auto; border: 1px solid #30363d; border-radius: 8px; }
+  table { width: 100%; min-width: 1080px; border-collapse: collapse; background: #161b22; }
   th, td { text-align: left; padding: 8px 12px; font-size: 13px; border-bottom: 1px solid #21262d; }
   th { color: #8b949e; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
   tr:last-child td { border-bottom: none; }
   .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
   .healthy { background: #12261d; color: #3fb950; border: 1px solid #238636; }
   .cooldown { background: #2d1b05; color: #d29922; border: 1px solid #9e6a03; }
-  .circuit-open { background: #3d0c0c; color: #f85149; border: 1px solid #da3633; }
   .invalid { background: #2d1b05; color: #f85149; border: 1px solid #9e6a03; }
+  .balance { min-width: 128px; }
+  .balance-line { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .balance-off { color: #f85149; font-size: 11px; }
   .dim { color: #8b949e; }
   .ok { color: #3fb950; } .bad { color: #f85149; }
 </style>
@@ -546,13 +691,29 @@ function dashboardHtml() {
   <div class="card"><div class="k">Rate limited</div><div class="v" id="c-rl">-</div></div>
   <div class="card"><div class="k">Tokens</div><div class="v" id="c-tok">-</div></div>
 </div>
-<table>
-  <thead><tr><th>Key</th><th>State</th><th>In-flight</th><th>Requests</th><th>Success</th><th>Errors</th><th>429s</th><th>Fails</th><th>Cooldown</th><th>Last used</th></tr></thead>
-  <tbody id="rows"></tbody>
-</table>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Key</th><th>State</th><th>Balance</th><th>In-flight</th><th>Requests</th><th>Success</th><th>Errors</th><th>429s</th><th>Failures</th><th>Cooldown</th><th>Last used</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
 <script>
 function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function balanceCell(k) {
+  if (!k.balance || !k.balance.infos.length) {
+    const title = k.balanceError || 'balance pending';
+    return '<td class="balance dim" title="' + esc(title) + '">—</td>';
+  }
+  const detail = k.balance.infos.map(info =>
+    info.currency + ': total ' + info.totalBalance + ', granted ' + info.grantedBalance + ', topped up ' + info.toppedUpBalance
+  ).join('\\n') + (k.balanceUpdatedAt ? '\\nupdated ' + new Date(k.balanceUpdatedAt).toLocaleString() : '');
+  const lines = k.balance.infos.map(info =>
+    '<div class="balance-line"><span class="dim">' + esc(info.currency) + '</span> ' + esc(info.totalBalance) + '</div>'
+  ).join('');
+  const unavailable = k.balance.isAvailable ? '' : '<div class="balance-off">unavailable</div>';
+  return '<td class="balance" title="' + esc(detail) + '">' + lines + unavailable + '</td>';
 }
 function renderLogin() {
   document.getElementById('meta').innerHTML = '未登录 · <a href="/login">登录</a> 后查看面板';
@@ -579,12 +740,13 @@ async function tick() {
       tr.innerHTML = '<td>' + esc(k.name) + '</td>' +
         '<td><span class="pill ' + esc(k.state) + '">' + esc(k.state) + '</span>' +
         (k.invalid ? ' <span class="dim">' + esc(k.lastError || '') + '</span>' : '') + '</td>' +
+        balanceCell(k) +
         '<td>' + k.inFlight + '</td>' +
         '<td>' + k.total + '</td>' +
         '<td class="ok">' + k.success + '</td>' +
         '<td class="bad">' + k.errors + '</td>' +
         '<td>' + k.ratelimited + '</td>' +
-        '<td>' + k.consecutiveFailures + '</td>' +
+        '<td>' + k.failureCount + '</td>' +
         '<td>' + (k.cooldownSec ? k.cooldownSec + 's' : '—') + '</td>' +
         '<td class="dim">' + (k.lastUsed ? new Date(k.lastUsed).toLocaleTimeString() : '—') + '</td>';
       rows.appendChild(tr);
@@ -726,7 +888,8 @@ function makeLog(quiet) {
   return quiet ? () => {} : msg => console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
 }
 
-function shutdown(server) {
+function shutdown(server, stopBalanceRefresh) {
+  stopBalanceRefresh();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();
 }
@@ -744,6 +907,7 @@ function main() {
   }
   const pool = new KeyPool(cfg.keys, cfg);
   const log = makeLog(cfg.quiet);
+  const stopBalanceRefresh = startBalanceRefresh(cfg, pool, log);
   const startedAt = Date.now();
   const server = http.createServer((req, res) => {
     handleRequest(cfg, pool, req, res, log, startedAt).catch(err => {
@@ -760,8 +924,8 @@ function main() {
     log(`upstream: ${cfg.mock ? 'mock' : cfg.upstream} · ${pool.keys.length} key(s): ${pool.keys.map(k => k.name).join(', ')}`);
     log(`dashboard: http://${addr.address}:${addr.port}/`);
   });
-  process.on('SIGINT', () => shutdown(server));
-  process.on('SIGTERM', () => shutdown(server));
+  process.on('SIGINT', () => shutdown(server, stopBalanceRefresh));
+  process.on('SIGTERM', () => shutdown(server, stopBalanceRefresh));
 }
 
 main();

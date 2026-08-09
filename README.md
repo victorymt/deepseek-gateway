@@ -1,6 +1,6 @@
 # deepseek-gateway
 
-本地 DeepSeek 多 Key 网关。它使用一个零依赖 Node.js 进程把多个 DeepSeek API Key 汇聚成统一入口，并提供负载均衡、限流冷却、熔断、失败切换、流式透传和状态面板，可直接接入 Codex CLI。
+本地 DeepSeek 多 Key 网关。它使用一个零依赖 Node.js 进程把多个 DeepSeek API Key 汇聚成统一入口，并提供负载均衡、余额监控、限流冷却、失败黑名单、故障切换、流式透传和状态面板，可直接接入 Codex CLI。
 
 ```text
 Codex / API client
@@ -8,7 +8,7 @@ Codex / API client
         |  http://127.0.0.1:8787
         v
 gateway.mjs  -- 最少并发 + 权重 + 轮询游标
-        |       429 冷却切换 / 5xx 熔断 / 401、403 剔除
+        |       429 冷却切换 / 5xx 累计失败拉黑 / 401、402、403 剔除
         v
 https://api.deepseek.com
 ```
@@ -32,7 +32,7 @@ cd deepseek-gateway
 
 向导会依次完成：
 
-1. 配置监听地址、上游、冷却、熔断、重试、超时和请求体上限。
+1. 配置监听地址、上游、冷却、黑名单阈值、重试、超时和请求体上限。
 2. 隐藏输入一个或多个 DeepSeek API Key，并为每个 Key 设置名称和权重。
 3. 可选启用网关访问密码。
 4. 安全写入 `keys.json`。
@@ -102,7 +102,8 @@ cp keys.example.json keys.json
   "host": "127.0.0.1",
   "upstream": "https://api.deepseek.com",
   "cooldownMs": 60000,
-  "breakerThreshold": 5,
+  "blacklistThreshold": 3,
+  "balanceRefreshMs": 300000,
   "maxRetries": 2,
   "timeoutMs": 0,
   "maxBodyBytes": 67108864,
@@ -185,16 +186,17 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 ## 调度策略
 
-每个 Key 会维护并发数、成功数、错误数、429 次数、连续失败数、冷却截止时间和失效状态。
+每个 Key 会维护并发数、成功数、错误数、429 次数、累计失败数、冷却截止时间和失效状态。累计失败的处理参考 `gpt-load`：普通业务请求成功不会清零失败数，达到阈值后将 Key 永久移出当前进程的调度池。
+
+当上游为 `api.deepseek.com` 时，网关启动后会立即通过 DeepSeek `/user/balance` 查询每个 Key 的余额，并按 `balanceRefreshMs` 在后台刷新。其他自定义或 OpenAI 兼容上游不会发起余额请求。查询失败只记录在面板和 `/health` 中，不计入 Key 的业务失败次数；设置为 `0` 可禁用余额查询。
 
 | 事件 | 处理 |
 | --- | --- |
-| 正常响应 | 记录成功，重置冷却和连续失败计数 |
+| 正常响应 | 记录成功并清除冷却状态，不清零累计失败数 |
 | `429` | 优先使用 `Retry-After`，否则按 `cooldownMs` 冷却，并切换 Key 重试 |
-| `5xx` / 网络错误 | 增加连续失败计数；达到 `breakerThreshold` 后熔断冷却 |
-| `401` / `403` | 标记为 `invalid`，永久移出调度池 |
-| 全部 Key 冷却 | 选择最早恢复的非失效 Key 降级服务 |
-| 全部 Key 失效 | 返回 `502 no keys available` |
+| `5xx` / 网络错误 | 增加累计失败数；达到 `blacklistThreshold` 后标记为 `invalid` |
+| `401` / `402` / `403` | 立即标记为 `invalid`，永久移出当前进程的调度池 |
+| 全部 Key 冷却或失效 | 返回 `502 no keys available`，不再强行调度不可用 Key |
 
 正常情况下，调度器先排除冷却和失效 Key，再选择 `inFlight / weight` 最小的 Key，平分时使用轮询游标。`inFlight` 会保持到响应体完整结束，因此长时间 SSE 请求也参与并发均衡。
 
@@ -210,12 +212,15 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `host` | `--host` | - | `127.0.0.1` | 监听地址 |
 | `upstream` | `--upstream` | `DS_UPSTREAM` | `https://api.deepseek.com` | 上游基础 URL |
 | `keys[]` | `--keys` | `DEEPSEEK_KEYS` | - | Key 的 `name`、`key`、`weight` |
-| `cooldownMs` | `--cooldown-ms` | `DS_COOLDOWN_MS` | `60000` | 429 和熔断冷却时间 |
-| `breakerThreshold` | `--breaker` | `DS_BREAKER` | `5` | 连续失败熔断阈值 |
+| `cooldownMs` | `--cooldown-ms` | `DS_COOLDOWN_MS` | `60000` | 429 冷却时间 |
+| `blacklistThreshold` | `--blacklist-threshold` | `DS_BLACKLIST_THRESHOLD` | `3` | 累计失败黑名单阈值；0 表示禁用 |
+| `balanceRefreshMs` | `--balance-refresh-ms` | `DS_BALANCE_REFRESH_MS` | `300000` | Key 余额后台刷新间隔；0 表示禁用 |
 | `maxRetries` | `--max-retries` | `DS_MAX_RETRIES` | `2` | 每次请求最多切换次数 |
 | `timeoutMs` | - | - | `0` | 上游超时；0 表示不限 |
 | `maxBodyBytes` | `--max-body-bytes` | `DS_MAX_BODY_BYTES` | `67108864` | 请求体大小上限；超限返回 413 |
 | `token` | `--token` | `DS_GATEWAY_TOKEN` | 空 | 网关访问密码 |
+
+旧配置中的 `breakerThreshold`、命令行参数 `--breaker` 和环境变量 `DS_BREAKER` 仍可使用，并按相同优先级映射到累计失败黑名单阈值。
 
 指定其他配置文件：
 
@@ -261,4 +266,4 @@ node --test test/smoke.mjs
 | `-drip` | 分段流式响应 |
 | `-abort` | 流式传输中断 |
 
-测试覆盖轮询与并发调度、429 切换、401 永久剔除、5xx 熔断、SSE 透传、流式生命周期、上游中断、token/Cookie 权限隔离、请求体上限、面板转义、交互式配置、Codex 配置幂等和备份恢复。
+测试覆盖轮询与并发调度、逐 Key 余额、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、上游中断、token/Cookie 权限隔离、请求体上限、面板脚本与转义、交互式配置、Codex 配置幂等和备份恢复。

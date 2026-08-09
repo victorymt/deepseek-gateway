@@ -25,7 +25,8 @@ DEFAULTS = {
     "host": "127.0.0.1",
     "upstream": "https://api.deepseek.com",
     "cooldownMs": 60000,
-    "breakerThreshold": 5,
+    "blacklistThreshold": 3,
+    "balanceRefreshMs": 5 * 60 * 1000,
     "maxRetries": 2,
     "timeoutMs": 0,
     "maxBodyBytes": 64 * 1024 * 1024,
@@ -229,6 +230,8 @@ def run_codex_setup(config: dict) -> None:
 
 def configure(path: Path) -> dict:
     existing = load_existing(path)
+    if "blacklistThreshold" not in existing and "breakerThreshold" in existing:
+        existing["blacklistThreshold"] = existing.pop("breakerThreshold")
     config = dict(existing)
     current = {**DEFAULTS, **existing}
 
@@ -238,7 +241,8 @@ def configure(path: Path) -> dict:
     config["host"] = prompt_text("监听地址", str(current["host"]))
     config["upstream"] = prompt_text("上游地址", str(current["upstream"]), validate_upstream)
     config["cooldownMs"] = prompt_number("冷却时间（毫秒）", current["cooldownMs"], minimum=0)
-    config["breakerThreshold"] = prompt_number("熔断失败阈值", current["breakerThreshold"], minimum=1)
+    config["blacklistThreshold"] = prompt_number("累计失败黑名单阈值（0 表示禁用）", current["blacklistThreshold"], minimum=0)
+    config["balanceRefreshMs"] = prompt_number("余额刷新间隔（毫秒，0 表示禁用）", current["balanceRefreshMs"], minimum=0)
     config["maxRetries"] = prompt_number("每次请求最大重试数", current["maxRetries"], minimum=0)
     config["timeoutMs"] = prompt_number("上游超时（毫秒，0 表示不限）", current["timeoutMs"], minimum=0)
     config["maxBodyBytes"] = prompt_number("请求体上限（字节）", current["maxBodyBytes"], minimum=1)

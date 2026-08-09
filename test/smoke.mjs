@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
@@ -30,10 +31,14 @@ async function waitFor(fn, timeout = 8000) {
   }
 }
 
-async function startGateway(keys, extra = [], env = {}) {
+async function startGateway(keys, extra = [], env = {}, config = {}, options = {}) {
   const port = await freePort();
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-run-'));
+  const configPath = path.join(runDir, 'keys.json');
+  fs.writeFileSync(configPath, JSON.stringify(config));
+  const mockArgs = options.mock === false ? [] : ['--mock'];
   const child = spawn(process.execPath, [
-    GATEWAY, '--mock', '--port', String(port), '--keys', keys, '--quiet', ...extra,
+    GATEWAY, ...mockArgs, '--config', configPath, '--port', String(port), '--keys', keys, '--quiet', ...extra,
   ], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
   let stderr = '';
   child.stderr.on('data', d => { stderr += d; });
@@ -54,6 +59,7 @@ async function startGateway(keys, extra = [], env = {}) {
     async stop() {
       child.kill('SIGKILL');
       await new Promise(r => child.on('exit', r));
+      fs.rmSync(runDir, { recursive: true, force: true });
       if (stderr) throw new Error(`gateway stderr: ${stderr}`);
     },
   };
@@ -107,8 +113,8 @@ test('401 marks key invalid permanently', async () => {
   }
 });
 
-test('consecutive 5xx opens circuit after threshold', async () => {
-  const gw = await startGateway('alice=sk-a-500,bob=sk-b-500,carol=sk-c-ok', ['--breaker', '3']);
+test('cumulative 5xx failures blacklist keys after threshold', async () => {
+  const gw = await startGateway('alice=sk-a-500,bob=sk-b-500,carol=sk-c-ok', ['--blacklist-threshold', '3']);
   try {
     for (let i = 0; i < 4; i++) {
       const { status, text } = await gw.chat();
@@ -117,9 +123,52 @@ test('consecutive 5xx opens circuit after threshold', async () => {
     }
     const h = await gw.health();
     const alice = h.keys.find(k => k.name === 'alice');
-    assert.equal(alice.state, 'circuit-open');
-    assert.match(alice.lastError, /circuit/);
-    assert.equal(h.keys.find(k => k.name === 'bob').state, 'circuit-open');
+    assert.equal(alice.state, 'invalid');
+    assert.equal(alice.failureCount, 3);
+    assert.match(alice.lastError, /blacklisted after 3 failures/);
+    assert.equal(h.keys.find(k => k.name === 'bob').state, 'invalid');
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('blacklisted key is removed from scheduling even when it is the only key', async () => {
+  const gw = await startGateway('alice=sk-a-500', ['--blacklist-threshold', '3']);
+  try {
+    for (let i = 0; i < 3; i++) assert.equal((await gw.chat()).status, 500);
+    const h = await gw.health();
+    assert.equal(h.keys[0].state, 'invalid');
+    assert.equal(h.keys[0].failureCount, 3);
+    const afterBlacklist = await gw.chat();
+    assert.equal(afterBlacklist.status, 502);
+    assert.match(afterBlacklist.text, /no keys available/);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('legacy breakerThreshold config still controls the blacklist threshold', async () => {
+  const gw = await startGateway('alice=sk-a-500', [], {}, { breakerThreshold: 2 });
+  try {
+    assert.equal((await gw.chat()).status, 500);
+    assert.equal((await gw.chat()).status, 500);
+    assert.equal((await gw.chat()).status, 502);
+    const h = await gw.health();
+    assert.equal(h.keys[0].state, 'invalid');
+    assert.equal(h.keys[0].failureCount, 2);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('402 marks a key invalid and fails over', async () => {
+  const gw = await startGateway('alice=sk-a-402,bob=sk-b-ok');
+  try {
+    const { status, text } = await gw.chat();
+    assert.equal(status, 200);
+    assert.equal(JSON.parse(text).gateway_key_name, 'bob');
+    const h = await gw.health();
+    assert.equal(h.keys.find(k => k.name === 'alice').state, 'invalid');
   } finally {
     await gw.stop();
   }
@@ -165,6 +214,61 @@ test('health endpoint reports totals', async () => {
     assert.equal(h.keys[0].state, 'healthy');
   } finally {
     await gw.stop();
+  }
+});
+
+test('health and dashboard report every key balance', async () => {
+  const gw = await startGateway('alice=sk-a-ok,bob=sk-b-ok');
+  try {
+    await waitFor(async () => (await gw.health()).keys.every(k => k.balanceUpdatedAt));
+    const h = await gw.health();
+    assert.equal(h.keys.length, 2);
+    for (const key of h.keys) {
+      assert.equal(key.balance.isAvailable, true);
+      assert.deepEqual(key.balance.infos, [{
+        currency: 'CNY',
+        totalBalance: '88.80',
+        grantedBalance: '8.80',
+        toppedUpBalance: '80.00',
+      }]);
+      assert.equal(key.balanceError, '');
+    }
+    const html = await fetch(`${gw.base}/`).then(r => r.text());
+    assert.match(html, /<th>Balance<\/th>/);
+    assert.match(html, /balanceCell\(k\)/);
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    assert.ok(script, 'dashboard script must exist');
+    assert.doesNotThrow(() => new Function(script), 'rendered dashboard script must be valid JavaScript');
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('non-DeepSeek upstream is never queried for key balance', async () => {
+  const upstreamPort = await freePort();
+  const paths = [];
+  const upstream = http.createServer((req, res) => {
+    paths.push(req.url);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const gw = await startGateway(
+    'alice=sk-a-ok',
+    ['--upstream', `http://127.0.0.1:${upstreamPort}`, '--balance-refresh-ms', '20'],
+    {},
+    {},
+    { mock: false },
+  );
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual(paths, []);
+    const h = await gw.health();
+    assert.equal(h.keys[0].balance, null);
+    assert.match(h.keys[0].balanceError, /only supported for DeepSeek/);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
   }
 });
 
@@ -425,6 +529,7 @@ test('interactive configure writes a validated private config', () => {
     '',
     '',
     '',
+    '',
     'primary',
     'sk-test-secret',
     '2',
@@ -442,6 +547,8 @@ test('interactive configure writes a validated private config', () => {
   assert.equal(config.port, 8790);
   assert.equal(config.host, '127.0.0.1');
   assert.equal(config.upstream, 'https://api.deepseek.com');
+  assert.equal(config.blacklistThreshold, 3);
+  assert.equal(config.balanceRefreshMs, 300000);
   assert.equal(config.token, 'gateway-secret');
   assert.deepEqual(config.keys, [
     { name: 'primary', key: 'sk-test-secret', weight: 2 },
@@ -450,7 +557,7 @@ test('interactive configure writes a validated private config', () => {
   assert.ok(!result.stdout.includes('sk-test-secret'), 'API key must not be echoed');
 
   const keepAnswers = [
-    '', '', '', '', '', '', '', '',
+    '', '', '', '', '', '', '', '', '',
     'n',
     '',
     '',

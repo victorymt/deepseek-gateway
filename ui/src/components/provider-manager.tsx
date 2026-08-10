@@ -72,6 +72,7 @@ type KeyDraft = {
   name: string
   key: string
   weight: number
+  enabled: boolean
   maskedKey?: string
   fingerprint?: string
 }
@@ -99,6 +100,7 @@ const copy = {
     alias: "Codex alias",
     upstream: "Upstream model",
     weight: "Weight",
+    keyEnabled: "Key enabled",
     fingerprint: "Fingerprint",
     edit: "Edit provider",
     test: "Test connection",
@@ -129,7 +131,8 @@ const copy = {
     save: "Save provider",
     create: "Create provider",
     deleteTitle: "Delete provider?",
-    deleteDescription: "This removes the provider, its model aliases, and its key pool.",
+    deleteDescription:
+      "This removes the provider, its model aliases, and its key pool.",
     delete: "Delete",
     connected: "Connection succeeded",
     failed: "Request failed",
@@ -148,6 +151,7 @@ const copy = {
     alias: "Codex 别名",
     upstream: "上游模型",
     weight: "权重",
+    keyEnabled: "启用密钥",
     fingerprint: "指纹",
     edit: "编辑 Provider",
     test: "测试连接",
@@ -191,7 +195,7 @@ const emptyDraft = (): ProviderDraft => ({
   baseUrl: "https://",
   enabled: true,
   models: [{ id: "", name: "", upstreamModel: "" }],
-  keys: [{ name: "primary", key: "", weight: 1 }],
+  keys: [{ name: "primary", key: "", weight: 1, enabled: true }],
 })
 
 function providerDraft(provider: Provider): ProviderDraft {
@@ -205,7 +209,11 @@ function providerDraft(provider: Provider): ProviderDraft {
       name,
       upstreamModel,
     })),
-    keys: provider.keys.map((key) => ({ ...key, key: "" })),
+    keys: provider.keys.map((key) => ({
+      ...key,
+      key: "",
+      enabled: key.enabled !== false,
+    })),
   }
 }
 
@@ -284,11 +292,18 @@ export function ProviderManager({ locale }: { locale: Locale }) {
     try {
       const payload = {
         ...draft,
-        keys: draft.keys.map(({ name, key, weight }) => ({ name, key, weight })),
+        keys: draft.keys.map(({ name, key, weight, enabled }) => ({
+          name,
+          key,
+          weight,
+          enabled,
+        })),
       }
       const next = await api<ProviderConfig>(
-        editingId ? `/api/providers/${encodeURIComponent(editingId)}` : "/api/providers",
-        { method: editingId ? "PATCH" : "POST", body: JSON.stringify(payload) },
+        editingId
+          ? `/api/providers/${encodeURIComponent(editingId)}`
+          : "/api/providers",
+        { method: editingId ? "PATCH" : "POST", body: JSON.stringify(payload) }
       )
       setConfig(next)
       setDialogOpen(false)
@@ -305,7 +320,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
     try {
       const next = await api<ProviderConfig>(
         `/api/providers/${encodeURIComponent(id)}`,
-        { method: "PATCH", body: JSON.stringify(payload) },
+        { method: "PATCH", body: JSON.stringify(payload) }
       )
       setConfig(next)
     } catch (cause) {
@@ -318,7 +333,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
     try {
       const next = await api<ProviderConfig>(
         `/api/providers/${encodeURIComponent(id)}`,
-        { method: "DELETE" },
+        { method: "DELETE" }
       )
       setConfig(next)
     } catch (cause) {
@@ -369,7 +384,9 @@ export function ProviderManager({ locale }: { locale: Locale }) {
 
   function addFetchedModel(model: FetchedModel) {
     setDraft((value) => {
-      if (value.models.some((item) => item.upstreamModel === model.upstreamModel)) {
+      if (
+        value.models.some((item) => item.upstreamModel === model.upstreamModel)
+      ) {
         return value
       }
       const usedIds = new Set(value.models.map((item) => item.id))
@@ -379,7 +396,11 @@ export function ProviderManager({ locale }: { locale: Locale }) {
         const tail = `-${suffix++}`
         id = `${model.id.slice(0, 63 - tail.length)}${tail}`
       }
-      const nextModel = { id, name: model.name, upstreamModel: model.upstreamModel }
+      const nextModel = {
+        id,
+        name: model.name,
+        upstreamModel: model.upstreamModel,
+      }
       const hasOnlyEmptyModel =
         value.models.length === 1 &&
         !value.models[0].id &&
@@ -450,7 +471,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                   </Badge>
                   {isDefault && <Badge>{t.default}</Badge>}
                 </CardTitle>
-                <CardDescription className="break-all font-mono">
+                <CardDescription className="font-mono break-all">
                   {provider.baseUrl}
                 </CardDescription>
                 <CardAction className="flex items-center gap-1">
@@ -508,7 +529,10 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                 </CardAction>
               </CardHeader>
               <CardContent className="flex flex-col gap-5">
-                <Field orientation="horizontal" data-disabled={isDefault || undefined}>
+                <Field
+                  orientation="horizontal"
+                  data-disabled={isDefault || undefined}
+                >
                   <FieldContent>
                     <FieldTitle>{t.enabled}</FieldTitle>
                     <FieldDescription>{provider.id}</FieldDescription>
@@ -544,7 +568,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                     >
                       <div className="min-w-0">
                         <p className="font-medium">{model.name}</p>
-                        <p className="break-all font-mono text-xs text-muted-foreground">
+                        <p className="font-mono text-xs break-all text-muted-foreground">
                           {model.alias} → {model.upstreamModel}
                         </p>
                       </div>
@@ -583,9 +607,14 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                           {key.maskedKey} · {t.fingerprint} {key.fingerprint}
                         </p>
                       </div>
-                      <Badge variant="outline">
-                        {t.weight} {key.weight}
-                      </Badge>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Badge variant="outline">
+                          {t.weight} {key.weight}
+                        </Badge>
+                        <Badge variant={key.enabled ? "secondary" : "outline"}>
+                          {key.enabled ? t.enabled : t.disabled}
+                        </Badge>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -613,7 +642,10 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                     required
                     pattern="[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
                     onChange={(event) =>
-                      setDraft((value) => ({ ...value, id: event.target.value }))
+                      setDraft((value) => ({
+                        ...value,
+                        id: event.target.value,
+                      }))
                     }
                   />
                   <FieldDescription>{t.providerIdHint}</FieldDescription>
@@ -625,7 +657,10 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                     value={draft.name}
                     required
                     onChange={(event) =>
-                      setDraft((value) => ({ ...value, name: event.target.value }))
+                      setDraft((value) => ({
+                        ...value,
+                        name: event.target.value,
+                      }))
                     }
                   />
                 </Field>
@@ -638,7 +673,10 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                   value={draft.baseUrl}
                   required
                   onChange={(event) =>
-                    setDraft((value) => ({ ...value, baseUrl: event.target.value }))
+                    setDraft((value) => ({
+                      ...value,
+                      baseUrl: event.target.value,
+                    }))
                   }
                 />
               </Field>
@@ -702,7 +740,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                     <div className="max-h-52 divide-y overflow-y-auto">
                       {fetchedModels.map((model) => {
                         const added = draft.models.some(
-                          (item) => item.upstreamModel === model.upstreamModel,
+                          (item) => item.upstreamModel === model.upstreamModel
                         )
                         return (
                           <div
@@ -758,7 +796,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                             models: value.models.map((item, itemIndex) =>
                               itemIndex === index
                                 ? { ...item, id: event.target.value }
-                                : item,
+                                : item
                             ),
                           }))
                         }
@@ -778,7 +816,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                             models: value.models.map((item, itemIndex) =>
                               itemIndex === index
                                 ? { ...item, name: event.target.value }
-                                : item,
+                                : item
                             ),
                           }))
                         }
@@ -798,7 +836,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                             models: value.models.map((item, itemIndex) =>
                               itemIndex === index
                                 ? { ...item, upstreamModel: event.target.value }
-                                : item,
+                                : item
                             ),
                           }))
                         }
@@ -814,7 +852,9 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                       onClick={() =>
                         setDraft((value) => ({
                           ...value,
-                          models: value.models.filter((_, itemIndex) => itemIndex !== index),
+                          models: value.models.filter(
+                            (_, itemIndex) => itemIndex !== index
+                          ),
                         }))
                       }
                     >
@@ -836,7 +876,12 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                       ...value,
                       keys: [
                         ...value.keys,
-                        { name: `key-${value.keys.length + 1}`, key: "", weight: 1 },
+                        {
+                          name: `key-${value.keys.length + 1}`,
+                          key: "",
+                          weight: 1,
+                          enabled: true,
+                        },
                       ],
                     }))
                   }
@@ -847,7 +892,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                 {draft.keys.map((key, index) => (
                   <div
                     key={`key-${index}`}
-                    className="grid items-start gap-3 sm:grid-cols-[1fr_1.4fr_7rem_auto]"
+                    className="grid items-start gap-3 sm:grid-cols-[1fr_1.4fr_7rem_7rem_auto]"
                   >
                     <Field>
                       <FieldLabel htmlFor={`key-name-${index}`}>
@@ -863,7 +908,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                             keys: value.keys.map((item, itemIndex) =>
                               itemIndex === index
                                 ? { ...item, name: event.target.value }
-                                : item,
+                                : item
                             ),
                           }))
                         }
@@ -886,12 +931,14 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                             keys: value.keys.map((item, itemIndex) =>
                               itemIndex === index
                                 ? { ...item, key: event.target.value }
-                                : item,
+                                : item
                             ),
                           }))
                         }
                       />
-                      {key.maskedKey && <FieldDescription>{t.keepKey}</FieldDescription>}
+                      {key.maskedKey && (
+                        <FieldDescription>{t.keepKey}</FieldDescription>
+                      )}
                     </Field>
                     <Field>
                       <FieldLabel htmlFor={`key-weight-${index}`}>
@@ -909,8 +956,41 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                             ...value,
                             keys: value.keys.map((item, itemIndex) =>
                               itemIndex === index
-                                ? { ...item, weight: Number(event.target.value) }
-                                : item,
+                                ? {
+                                    ...item,
+                                    weight: Number(event.target.value),
+                                  }
+                                : item
+                            ),
+                          }))
+                        }
+                      />
+                    </Field>
+                    <Field
+                      data-disabled={
+                        key.enabled &&
+                        draft.keys.filter((item) => item.enabled).length === 1
+                          ? true
+                          : undefined
+                      }
+                    >
+                      <FieldLabel htmlFor={`key-enabled-${index}`}>
+                        {t.keyEnabled}
+                      </FieldLabel>
+                      <Switch
+                        id={`key-enabled-${index}`}
+                        checked={key.enabled}
+                        disabled={
+                          key.enabled &&
+                          draft.keys.filter((item) => item.enabled).length === 1
+                        }
+                        onCheckedChange={(checked) =>
+                          setDraft((value) => ({
+                            ...value,
+                            keys: value.keys.map((item, itemIndex) =>
+                              itemIndex === index
+                                ? { ...item, enabled: checked }
+                                : item
                             ),
                           }))
                         }
@@ -923,11 +1003,18 @@ export function ProviderManager({ locale }: { locale: Locale }) {
                       className="self-end"
                       aria-label={t.remove}
                       title={t.remove}
-                      disabled={draft.keys.length === 1}
+                      disabled={
+                        draft.keys.length === 1 ||
+                        (key.enabled &&
+                          draft.keys.filter((item) => item.enabled).length ===
+                            1)
+                      }
                       onClick={() =>
                         setDraft((value) => ({
                           ...value,
-                          keys: value.keys.filter((_, itemIndex) => itemIndex !== index),
+                          keys: value.keys.filter(
+                            (_, itemIndex) => itemIndex !== index
+                          ),
                         }))
                       }
                     >

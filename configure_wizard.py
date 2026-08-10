@@ -180,6 +180,7 @@ def configure_keys(existing) -> list[dict]:
             "name": name,
             "key": secret,
             "weight": int(weight) if weight.is_integer() else weight,
+            "enabled": item.get("enabled", True) is not False,
         })
         names.add(name)
         secrets_seen.add(secret)
@@ -213,7 +214,7 @@ def configure_keys(existing) -> list[dict]:
         weight = prompt_number("  权重", 1, minimum=0.000001, integer=False)
         if float(weight).is_integer():
             weight = int(weight)
-        keys.append({"name": name, "key": secret, "weight": weight})
+        keys.append({"name": name, "key": secret, "weight": weight, "enabled": True})
         names.add(name)
         secrets_seen.add(secret)
         if not confirm("  继续添加 Key", False):

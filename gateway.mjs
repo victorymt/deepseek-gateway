@@ -174,7 +174,12 @@ function loadConfig(opts) {
   const externalKeys = [];
   const addExternalKey = (name, secret, weight = 1) => {
     if (!secret) return;
-    externalKeys.push({ name: name || `key-${externalKeys.length + 1}`, key: secret, weight });
+    externalKeys.push({
+      name: name || `key-${externalKeys.length + 1}`,
+      key: secret,
+      weight,
+      enabled: true,
+    });
   };
   if (process.env.DEEPSEEK_KEYS) process.env.DEEPSEEK_KEYS.split(',').forEach(token => { const parsed = splitKeyToken(token); if (parsed) addExternalKey(parsed.name, parsed.secret); });
   if (opts.keys) opts.keys.split(',').forEach(token => { const parsed = splitKeyToken(token); if (parsed) addExternalKey(parsed.name, parsed.secret); });
@@ -285,6 +290,7 @@ class KeyPool {
       existing.name = key.name;
       existing.key = key.key;
       existing.weight = key.weight;
+      existing.enabled = key.enabled;
       return existing;
     });
 
@@ -297,7 +303,7 @@ class KeyPool {
 
   pickKey(exclude = []) {
     const now = Date.now();
-    const avail = this.keys.filter(k => !exclude.includes(k.name) && !k.invalid && now >= k.throttleUntil);
+    const avail = this.keys.filter(k => k.enabled && !exclude.includes(k.name) && !k.invalid && now >= k.throttleUntil);
     if (!avail.length) return null;
     let best = null;
     let bestScore = Infinity;
@@ -383,6 +389,7 @@ class KeyPool {
   }
 
   state(key) {
+    if (!key.enabled) return 'disabled';
     if (key.invalid) return 'invalid';
     if (key.throttleUntil > Date.now()) return 'cooldown';
     return 'healthy';
@@ -396,6 +403,7 @@ class KeyPool {
         name: k.name,
         state: this.state(k),
         weight: k.weight,
+        enabled: k.enabled,
         inFlight: k.inFlight,
         total: k.success + k.errors,
         success: k.success,
@@ -504,7 +512,7 @@ function startBalanceRefresh(runtime, log) {
     if (refreshing) return;
     refreshing = true;
     try {
-      await Promise.all(pool.keys.map(async key => {
+      await Promise.all(pool.keys.filter(key => key.enabled).map(async key => {
         try {
           key.balance = await fetchKeyBalance(runtime, key);
           key.balanceUpdatedAt = Date.now();
@@ -951,7 +959,8 @@ async function relay(route, clientReq, clientRes, log) {
     runtime.release();
   };
   try {
-    const maxRetries = Math.min(settings.maxRetries, pool.keys.length - 1);
+    const enabledKeyCount = pool.keys.filter(key => key.enabled).length;
+    const maxRetries = Math.min(settings.maxRetries, enabledKeyCount - 1);
     const attempted = [];
     let res = null;
     let key = null;
@@ -1162,7 +1171,13 @@ function buildHealth(cfg, registry, uptime) {
 function maskedKey(key) {
   const fingerprint = crypto.createHash('sha256').update(key.key).digest('hex').slice(0, 12);
   const suffix = key.key.slice(-4);
-  return { name: key.name, weight: key.weight, maskedKey: `****${suffix}`, fingerprint };
+  return {
+    name: key.name,
+    weight: key.weight,
+    enabled: key.enabled,
+    maskedKey: `****${suffix}`,
+    fingerprint,
+  };
 }
 
 function publicProvider(provider) {
@@ -1336,11 +1351,37 @@ function managementValidation(operation, statusCode = 400) {
   }
 }
 
-async function testProviderConnection(runtime) {
+function resolveProviderKey(cfg, providerId, keyName) {
+  const provider = cfg.providers.find(item => item.id === providerId);
+  if (!provider) {
+    throw Object.assign(new Error(`provider ${providerId} not found`), { statusCode: 404 });
+  }
+  const key = provider.keys.find(item => item.name === keyName);
+  if (!key) {
+    throw Object.assign(new Error(`key ${keyName} not found in provider ${providerId}`), { statusCode: 404 });
+  }
+  return { provider, key };
+}
+
+function commitProviderKeys(cfg, registry, provider, keys, statusCode = 400) {
+  const updated = managementValidation(
+    () => normalizeProvider({ ...provider, keys }, provider),
+    statusCode,
+  );
+  const providers = cfg.providers.map(item => item.id === provider.id ? updated : item);
+  const next = managementValidation(
+    () => nextProviderConfig(cfg, providers),
+    statusCode,
+  );
+  commitProviderConfig(cfg, registry, next);
+  return publicProviderConfig(cfg);
+}
+
+async function testKeyConnection(runtime, key) {
   const started = Date.now();
-  if (runtime.settings.mock) return { ok: true, status: 200, latencyMs: 0 };
-  const key = runtime.pool.pickKey() || runtime.pool.keys[0];
-  if (!key) throw Object.assign(new Error('provider has no available key'), { statusCode: 409 });
+  if (runtime.settings.mock) {
+    return { ok: true, status: 200, latencyMs: 0, key: key.name };
+  }
   const url = upstreamRequestUrl(runtime.provider.baseUrl, '/v1/models');
   const mod = url.protocol === 'https:' ? https : http;
   const status = await new Promise((resolve, reject) => {
@@ -1357,7 +1398,22 @@ async function testProviderConnection(runtime) {
     request.on('error', reject);
     request.end();
   });
-  return { ok: status >= 200 && status < 400, status, latencyMs: Date.now() - started };
+  const ok = status >= 200 && status < 400;
+  return {
+    ok,
+    status,
+    latencyMs: Date.now() - started,
+    key: key.name,
+    ...(ok ? {} : { error: { message: `upstream returned HTTP ${status}` } }),
+  };
+}
+
+async function testProviderConnection(runtime) {
+  const key = runtime.pool.pickKey()
+    || runtime.pool.keys.find(item => item.enabled)
+    || runtime.pool.keys[0];
+  if (!key) throw Object.assign(new Error('provider has no available key'), { statusCode: 409 });
+  return testKeyConnection(runtime, key);
 }
 
 function resolveModelFetchInput(cfg, registry, payload) {
@@ -1470,6 +1526,53 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
       const next = managementValidation(() => nextProviderConfig(cfg, providers, changes), 409);
       commitProviderConfig(cfg, registry, next);
       writeJson(res, 200, publicProviderConfig(cfg));
+      return true;
+    }
+  }
+
+  if (parts.length >= 5 && parts[1] === 'providers' && parts[3] === 'keys') {
+    const providerId = parts[2];
+    const keyName = parts[4];
+    const { provider, key } = resolveProviderKey(cfg, providerId, keyName);
+
+    if (parts.length === 6 && parts[5] === 'test' && req.method === 'POST') {
+      const runtime = registry.get(providerId);
+      const runtimeKey = runtime?.pool.keys.find(item => item.name === keyName);
+      if (!runtime || !runtimeKey) {
+        throw Object.assign(new Error(`key ${keyName} is not active in provider ${providerId}`), { statusCode: 409 });
+      }
+      const result = await testKeyConnection(runtime, runtimeKey);
+      writeJson(res, result.ok ? 200 : 502, result);
+      return true;
+    }
+
+    if (parts.length === 5 && req.method === 'PATCH') {
+      const payload = await readJsonBody(req);
+      const allowed = new Set(['enabled', 'weight']);
+      const unknown = Object.keys(payload).filter(field => !allowed.has(field));
+      if (unknown.length) {
+        throw Object.assign(new Error(`unknown key settings: ${unknown.join(', ')}`), { statusCode: 400 });
+      }
+      if (Object.hasOwn(payload, 'enabled') && typeof payload.enabled !== 'boolean') {
+        throw Object.assign(new Error('key enabled must be a boolean'), { statusCode: 400 });
+      }
+      if (Object.hasOwn(payload, 'weight') && typeof payload.weight !== 'number') {
+        throw Object.assign(new Error('key weight must be a number'), { statusCode: 400 });
+      }
+      const updatedKey = {
+        ...key,
+        ...(Object.hasOwn(payload, 'enabled') ? { enabled: payload.enabled } : {}),
+        ...(Object.hasOwn(payload, 'weight') ? { weight: payload.weight } : {}),
+      };
+      const keys = provider.keys.map(item => item.name === keyName ? updatedKey : item);
+      const statusCode = payload.enabled === false ? 409 : 400;
+      writeJson(res, 200, commitProviderKeys(cfg, registry, provider, keys, statusCode));
+      return true;
+    }
+
+    if (parts.length === 5 && req.method === 'DELETE') {
+      const keys = provider.keys.filter(item => item.name !== keyName);
+      writeJson(res, 200, commitProviderKeys(cfg, registry, provider, keys, 409));
       return true;
     }
   }

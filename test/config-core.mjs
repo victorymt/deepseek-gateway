@@ -22,6 +22,7 @@ test('legacy config normalizes and serializes as canonical v2', () => {
   assert.equal(stored.blacklistThreshold, 4);
   assert.equal(stored.providers[0].baseUrl, 'https://legacy.example/v1');
   assert.equal(stored.providers[0].keys[0].key, 'sk-legacy');
+  assert.equal(stored.providers[0].keys[0].enabled, true);
   assert.deepEqual(stored.customField, { keep: true });
   assert.equal(stored.upstream, undefined);
   assert.equal(stored.keys, undefined);
@@ -45,4 +46,20 @@ test('config validation rejects duplicate key secrets', () => {
       ],
     }],
   }), /duplicate key secret/);
+});
+
+test('config validation rejects providers with every key disabled', () => {
+  assert.throws(() => normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      id: 'alpha',
+      name: 'Alpha',
+      baseUrl: 'https://alpha.example/v1',
+      enabled: true,
+      models: [{ id: 'chat', name: 'Chat', upstreamModel: 'chat' }],
+      keys: [{ name: 'one', key: 'sk-one', weight: 1, enabled: false }],
+    }],
+  }), /at least one enabled key/);
 });

@@ -81,10 +81,13 @@ export function normalizeProvider(input, existing = null) {
     let secret = typeof key.key === 'string' ? key.key.trim() : '';
     if (!secret && existingKeys.has(keyName)) secret = existingKeys.get(keyName).key;
     const weight = Number(key.weight ?? 1);
+    const enabled = key.enabled === undefined
+      ? (existingKeys.get(keyName)?.enabled ?? true)
+      : key.enabled === true;
     if (!keyName || keyName.length > 100) throw new Error(`provider ${id} key name is invalid`);
     if (!secret) throw new Error(`provider ${id} key ${keyName} secret is required`);
     if (!Number.isFinite(weight) || weight <= 0) throw new Error(`provider ${id} key ${keyName} weight must be greater than zero`);
-    return { name: keyName, key: secret, weight };
+    return { name: keyName, key: secret, weight, enabled };
   });
 
   return { id, name, baseUrl, enabled, models, keys };
@@ -109,13 +112,16 @@ export function validateProviderConfig(config) {
     }
     const keyNames = new Set();
     const keyFingerprints = new Set();
+    let enabledKeyCount = 0;
     for (const key of provider.keys) {
       if (keyNames.has(key.name)) throw new Error(`duplicate key name ${key.name} in provider ${provider.id}`);
       keyNames.add(key.name);
       const fingerprint = keyFingerprint(key.key);
       if (keyFingerprints.has(fingerprint)) throw new Error(`duplicate key secret in provider ${provider.id}`);
       keyFingerprints.add(fingerprint);
+      if (key.enabled) enabledKeyCount++;
     }
+    if (!enabledKeyCount) throw new Error(`provider ${provider.id} must have at least one enabled key`);
   }
   if (!enabledCount) throw new Error('at least one provider must be enabled');
   const defaultProvider = config.providers.find(provider => provider.id === config.defaultProvider);
@@ -215,7 +221,12 @@ export function serializableConfig(config) {
     providers: config.providers.map(provider => ({
       ...provider,
       models: provider.models.map(model => ({ ...model })),
-      keys: provider.keys.map(key => ({ name: key.name, key: key.key, weight: key.weight })),
+      keys: provider.keys.map(key => ({
+        name: key.name,
+        key: key.key,
+        weight: key.weight,
+        enabled: key.enabled,
+      })),
     })),
   };
 }

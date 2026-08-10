@@ -144,7 +144,7 @@ cp keys.example.json keys.json
         { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash" }
       ],
       "keys": [
-        { "name": "primary", "key": "sk-你的Key", "weight": 1 }
+        { "name": "primary", "key": "sk-你的Key", "weight": 1, "enabled": true }
       ]
     }
   ]
@@ -238,9 +238,9 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `401` / `402` / `403` | 立即标记为 `invalid`，永久移出当前进程的调度池 |
 | 全部 Key 冷却或失效 | 返回 `502 no keys available`，不再强行调度不可用 Key |
 
-正常情况下，调度器先排除冷却和失效 Key，再选择 `inFlight / weight` 最小的 Key，平分时使用轮询游标。`inFlight` 会保持到响应体完整结束，因此长时间 SSE 请求也参与并发均衡。
+正常情况下，调度器先排除停用、冷却和失效 Key，再选择 `inFlight / weight` 最小的 Key，平分时使用轮询游标。`inFlight` 会保持到响应体完整结束，因此长时间 SSE 请求也参与并发均衡。每个 Provider 至少需要保留一个 `enabled: true` 的 Key。
 
-每个请求最多切换 `min(maxRetries, Key 数量 - 1)` 次。失败切换发生在向客户端写出响应头之前；流式传输开始后的上游中断会记录为该 Key 的网络错误。
+每个请求最多切换 `min(maxRetries, 已启用 Key 数量 - 1)` 次。失败切换发生在向客户端写出响应头之前；流式传输开始后的上游中断会记录为该 Key 的网络错误。
 
 ## 配置参考
 
@@ -284,6 +284,8 @@ node gateway.mjs --config /path/to/keys.json
 - `GET /health`：JSON 健康状态，适合脚本和监控。
 - `GET/POST /api/providers`：读取脱敏配置或添加 Provider。
 - `PATCH/DELETE /api/providers/:id`：修改或删除 Provider。
+- `PATCH/DELETE /api/providers/:id/keys/:name`：热更新 Key 的启用状态或权重，或删除 Key。
+- `POST /api/providers/:id/keys/:name/test`：使用指定 Key 测试上游连接，包括已停用 Key。
 - `GET/PATCH /api/settings`：读取或修改脱敏的 Gateway 标量设置；响应只返回 `tokenConfigured`，不会返回令牌内容。
 - `POST /api/models`：通过 Provider 的 Base URL 和 Key 获取上游模型列表；支持 `/v1/models`、`/models` 及兼容子路径回退，不会自动写入配置。
 - `POST /api/providers/:id/test`：测试 Provider 连接。

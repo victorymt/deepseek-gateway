@@ -143,7 +143,14 @@ class ConfigureWizardTests(unittest.TestCase):
                     "models": [
                         {"id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-chat"}
                     ],
-                    "keys": [{"name": "primary", "key": "sk-deepseek", "weight": 1}],
+                    "keys": [
+                        {
+                            "name": "primary",
+                            "key": "sk-deepseek",
+                            "weight": 1,
+                            "enabled": True,
+                        }
+                    ],
                 },
                 {
                     "id": "openrouter",
@@ -153,7 +160,14 @@ class ConfigureWizardTests(unittest.TestCase):
                     "models": [
                         {"id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-chat"}
                     ],
-                    "keys": [{"name": "secondary", "key": "sk-openrouter", "weight": 2}],
+                    "keys": [
+                        {
+                            "name": "secondary",
+                            "key": "sk-openrouter",
+                            "weight": 2,
+                            "enabled": True,
+                        }
+                    ],
                 },
             ],
             "customField": {"keep": True},

@@ -8,6 +8,7 @@ export type BalanceInfo = {
 export type GatewayKey = {
   name: string
   weight: number
+  enabled: boolean
   state: "healthy" | "cooldown" | "invalid" | string
   invalid: boolean
   lastError: string
@@ -64,6 +65,7 @@ export type ProviderModel = {
 export type MaskedProviderKey = {
   name: string
   weight: number
+  enabled: boolean
   maskedKey: string
   fingerprint: string
 }

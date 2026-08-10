@@ -22,8 +22,8 @@
         { "id": "v4-pro", "name": "V4 Pro", "upstreamModel": "deepseek-v4-pro" }
       ],
       "keys": [
-        { "name": "primary", "key": "sk-REPLACE-WITH-YOUR-KEY-1", "weight": 1 },
-        { "name": "backup", "key": "sk-REPLACE-WITH-YOUR-KEY-2", "weight": 1 }
+        { "name": "primary", "key": "sk-REPLACE-WITH-YOUR-KEY-1", "weight": 1, "enabled": true },
+        { "name": "backup", "key": "sk-REPLACE-WITH-YOUR-KEY-2", "weight": 1, "enabled": true }
       ]
     }
   ]

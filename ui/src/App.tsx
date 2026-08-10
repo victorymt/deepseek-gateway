@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useId, useState, type FormEvent } from "react"
 import {
   ActivityIcon,
   CircleDotIcon,
@@ -6,11 +6,14 @@ import {
   KeyRoundIcon,
   LanguagesIcon,
   MoonIcon,
+  PencilIcon,
+  PlugZapIcon,
   ServerCogIcon,
   ServerCrashIcon,
   Settings2Icon,
   SunIcon,
   TerminalSquareIcon,
+  Trash2Icon,
 } from "lucide-react"
 
 import { CodexSetup } from "@/components/codex-setup"
@@ -19,6 +22,17 @@ import { useLanguage, type Locale } from "@/components/language-provider"
 import { ProviderManager } from "@/components/provider-manager"
 import { useTheme } from "@/components/theme-provider"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import {
   Card,
@@ -29,6 +43,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import {
   Empty,
   EmptyDescription,
@@ -45,6 +67,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
+import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Tooltip,
@@ -117,6 +140,23 @@ const translations = {
       `${keys} ${keys === 1 ? "key" : "keys"} · ${requests} requests`,
     enabledProvider: "Enabled",
     disabledProvider: "Disabled",
+    keyEnabled: "Enabled",
+    keyDisabled: "Disabled",
+    editWeight: "Edit weight",
+    testKey: "Test key",
+    deleteKey: "Delete key",
+    saveWeight: "Save weight",
+    weightInvalid: "Weight must be greater than zero.",
+    cancel: "Cancel",
+    deleteKeyTitle: "Delete key?",
+    deleteKeyDescription: (name: string) =>
+      `The key ${name} will be removed from this provider immediately.`,
+    actionFailed: "Key action failed",
+    keyUpdated: "Key updated and applied",
+    keyDeleted: "Key deleted",
+    keyConnected: (status: number, latencyMs: number) =>
+      `Connection succeeded · HTTP ${status} · ${latencyMs} ms`,
+    lastEnabledKey: "At least one key must remain enabled",
     topUp: "Top-up",
     granted: "Granted",
     weight: "Weight",
@@ -142,6 +182,7 @@ const translations = {
       healthy: "healthy",
       cooldown: "cooldown",
       invalid: "invalid",
+      disabled: "disabled",
     },
     autoRefresh: "Auto-refresh every 2 seconds",
   },
@@ -204,6 +245,23 @@ const translations = {
       `${keys} 个密钥 · ${requests} 次请求`,
     enabledProvider: "已启用",
     disabledProvider: "已停用",
+    keyEnabled: "已启用",
+    keyDisabled: "已停用",
+    editWeight: "编辑权重",
+    testKey: "测试密钥",
+    deleteKey: "删除密钥",
+    saveWeight: "保存权重",
+    weightInvalid: "权重必须大于 0。",
+    cancel: "取消",
+    deleteKeyTitle: "删除密钥？",
+    deleteKeyDescription: (name: string) =>
+      `密钥 ${name} 将立即从当前 Provider 中移除。`,
+    actionFailed: "密钥操作失败",
+    keyUpdated: "密钥已更新并生效",
+    keyDeleted: "密钥已删除",
+    keyConnected: (status: number, latencyMs: number) =>
+      `连接成功 · HTTP ${status} · ${latencyMs} 毫秒`,
+    lastEnabledKey: "至少需要保留一个已启用密钥",
     topUp: "充值",
     granted: "赠送",
     weight: "权重",
@@ -228,6 +286,7 @@ const translations = {
       healthy: "健康",
       cooldown: "冷却中",
       invalid: "无效",
+      disabled: "已停用",
     },
     autoRefresh: "每 2 秒自动刷新",
   },
@@ -240,6 +299,32 @@ const numberFormatters: Record<Locale, Intl.NumberFormat> = {
 
 function formatNumber(value: number, locale: Locale) {
   return numberFormatters[locale].format(value)
+}
+
+type KeyTestResult = {
+  ok: boolean
+  status: number
+  latencyMs: number
+  key: string
+}
+
+async function managementApi<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    ...init,
+    headers: {
+      accept: "application/json",
+      ...(init?.body ? { "content-type": "application/json" } : {}),
+      ...init?.headers,
+    },
+  })
+  const payload = (await response.json().catch(() => ({}))) as {
+    error?: { message?: string }
+  }
+  if (!response.ok) {
+    throw new Error(payload.error?.message || `HTTP ${response.status}`)
+  }
+  return payload as T
 }
 
 function ThemeToggle() {
@@ -432,8 +517,34 @@ function KeyBalance({
   )
 }
 
-function KeyCard({ keyInfo, locale }: { keyInfo: GatewayKey; locale: Locale }) {
+type KeyFeedback = { kind: "success" | "error"; message: string } | null
+
+function KeyCard({
+  providerId,
+  keyInfo,
+  locale,
+  cannotDisable,
+  cannotDelete,
+  onRefresh,
+  onFeedback,
+}: {
+  providerId: string
+  keyInfo: GatewayKey
+  locale: Locale
+  cannotDisable: boolean
+  cannotDelete: boolean
+  onRefresh: () => Promise<void>
+  onFeedback: (feedback: KeyFeedback) => void
+}) {
   const t = translations[locale]
+  const weightInputId = useId()
+  const enabled = keyInfo.enabled !== false
+  const [pending, setPending] = useState<
+    "toggle" | "test" | "weight" | "delete" | null
+  >(null)
+  const [weightOpen, setWeightOpen] = useState(false)
+  const [weightDraft, setWeightDraft] = useState(String(keyInfo.weight))
+  const [weightError, setWeightError] = useState("")
   const metrics = [
     [t.columns.requests, keyInfo.total],
     [t.columns.success, keyInfo.success],
@@ -442,74 +553,288 @@ function KeyCard({ keyInfo, locale }: { keyInfo: GatewayKey; locale: Locale }) {
     [t.columns.inFlight, keyInfo.inFlight],
     [t.columns.failures, keyInfo.failureCount],
   ] as const
+  const keyUrl = `/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyInfo.name)}`
+
+  async function runAction(
+    action: Exclude<typeof pending, null>,
+    request: () => Promise<unknown>,
+    successMessage: string
+  ) {
+    setPending(action)
+    onFeedback(null)
+    try {
+      await request()
+      await onRefresh()
+      onFeedback({ kind: "success", message: successMessage })
+      return true
+    } catch (cause) {
+      onFeedback({
+        kind: "error",
+        message: cause instanceof Error ? cause.message : t.actionFailed,
+      })
+      return false
+    } finally {
+      setPending(null)
+    }
+  }
+
+  async function handleToggle(checked: boolean) {
+    await runAction(
+      "toggle",
+      () =>
+        managementApi(keyUrl, {
+          method: "PATCH",
+          body: JSON.stringify({ enabled: checked }),
+        }),
+      t.keyUpdated
+    )
+  }
+
+  async function handleTest() {
+    setPending("test")
+    onFeedback(null)
+    try {
+      const result = await managementApi<KeyTestResult>(`${keyUrl}/test`, {
+        method: "POST",
+        body: "{}",
+      })
+      onFeedback({
+        kind: "success",
+        message: t.keyConnected(result.status, result.latencyMs),
+      })
+    } catch (cause) {
+      onFeedback({
+        kind: "error",
+        message: cause instanceof Error ? cause.message : t.actionFailed,
+      })
+    } finally {
+      setPending(null)
+    }
+  }
+
+  async function handleWeightSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const weight = Number(weightDraft)
+    if (!Number.isFinite(weight) || weight <= 0) {
+      setWeightError(t.weightInvalid)
+      return
+    }
+    setWeightError("")
+    const updated = await runAction(
+      "weight",
+      () =>
+        managementApi(keyUrl, {
+          method: "PATCH",
+          body: JSON.stringify({ weight }),
+        }),
+      t.keyUpdated
+    )
+    if (updated) setWeightOpen(false)
+  }
+
+  async function handleDelete() {
+    await runAction(
+      "delete",
+      () => managementApi(keyUrl, { method: "DELETE" }),
+      t.keyDeleted
+    )
+  }
 
   return (
-    <Card size="sm" className="min-h-72">
-      <CardHeader>
-        <CardTitle className="font-mono">{keyInfo.name}</CardTitle>
-        <CardDescription>
-          {t.weight} {keyInfo.weight}
-        </CardDescription>
-        <CardAction>
-          <StatusBadge keyInfo={keyInfo} locale={locale} />
-        </CardAction>
-      </CardHeader>
-      <CardContent className="flex flex-1 flex-col gap-5">
-        <KeyBalance keyInfo={keyInfo} locale={locale} />
-        <div className="grid grid-cols-3 gap-x-4 gap-y-4">
-          {metrics.map(([label, value]) => (
-            <div key={label} className="flex min-w-0 flex-col gap-1">
-              <p
-                className="truncate text-xs text-muted-foreground"
-                title={label}
+    <>
+      <Card size="sm" className="min-h-80">
+        <CardHeader>
+          <CardTitle className="font-mono">{keyInfo.name}</CardTitle>
+          <CardDescription>
+            {t.weight} {keyInfo.weight}
+          </CardDescription>
+          <CardAction>
+            <StatusBadge keyInfo={keyInfo} locale={locale} />
+          </CardAction>
+        </CardHeader>
+        <CardContent className="flex flex-1 flex-col gap-5">
+          <KeyBalance keyInfo={keyInfo} locale={locale} />
+          <div className="grid grid-cols-3 gap-x-4 gap-y-4">
+            {metrics.map(([label, value]) => (
+              <div key={label} className="flex min-w-0 flex-col gap-1">
+                <p
+                  className="truncate text-xs text-muted-foreground"
+                  title={label}
+                >
+                  {label}
+                </p>
+                <p className="font-mono text-base font-medium tabular-nums">
+                  {formatNumber(value, locale)}
+                </p>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+        <CardFooter className="flex-col items-stretch gap-3">
+          <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs">
+            <span className="text-muted-foreground">
+              {t.columns.cooldown}{" "}
+              <span className="font-mono text-foreground">
+                {keyInfo.cooldownSec ? `${keyInfo.cooldownSec}s` : "—"}
+              </span>
+            </span>
+            <span className="text-muted-foreground">
+              {t.columns.lastUsed}{" "}
+              <span className="font-mono text-foreground">
+                {keyInfo.lastUsed
+                  ? new Date(keyInfo.lastUsed).toLocaleTimeString(locale)
+                  : "—"}
+              </span>
+            </span>
+          </div>
+          {keyInfo.lastError && (
+            <p
+              className="truncate text-xs text-destructive"
+              title={keyInfo.lastError}
+            >
+              {keyInfo.lastError}
+            </p>
+          )}
+          <div className="flex items-center justify-between gap-3">
+            <Field orientation="horizontal" className="w-auto gap-2">
+              <Switch
+                id={`${weightInputId}-enabled`}
+                size="sm"
+                checked={enabled}
+                disabled={pending !== null || cannotDisable}
+                aria-label={enabled ? t.keyEnabled : t.keyDisabled}
+                title={cannotDisable ? t.lastEnabledKey : undefined}
+                onCheckedChange={(checked) => void handleToggle(checked)}
+              />
+              <FieldLabel htmlFor={`${weightInputId}-enabled`}>
+                {enabled ? t.keyEnabled : t.keyDisabled}
+              </FieldLabel>
+            </Field>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={t.testKey}
+                title={t.testKey}
+                disabled={pending !== null}
+                onClick={() => void handleTest()}
               >
-                {label}
-              </p>
-              <p className="font-mono text-base font-medium tabular-nums">
-                {formatNumber(value, locale)}
-              </p>
+                {pending === "test" ? <Spinner /> : <PlugZapIcon />}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={t.editWeight}
+                title={t.editWeight}
+                disabled={pending !== null}
+                onClick={() => {
+                  setWeightDraft(String(keyInfo.weight))
+                  setWeightError("")
+                  setWeightOpen(true)
+                }}
+              >
+                <PencilIcon />
+              </Button>
+              <AlertDialog>
+                <AlertDialogTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={t.deleteKey}
+                      title={cannotDelete ? t.lastEnabledKey : t.deleteKey}
+                      disabled={pending !== null || cannotDelete}
+                    />
+                  }
+                >
+                  <Trash2Icon />
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t.deleteKeyTitle}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t.deleteKeyDescription(keyInfo.name)}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
+                    <AlertDialogAction
+                      variant="destructive"
+                      onClick={() => void handleDelete()}
+                    >
+                      <Trash2Icon data-icon="inline-start" />
+                      {t.deleteKey}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             </div>
-          ))}
-        </div>
-      </CardContent>
-      <CardFooter className="flex-col items-stretch gap-2">
-        <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs">
-          <span className="text-muted-foreground">
-            {t.columns.cooldown}{" "}
-            <span className="font-mono text-foreground">
-              {keyInfo.cooldownSec ? `${keyInfo.cooldownSec}s` : "—"}
-            </span>
-          </span>
-          <span className="text-muted-foreground">
-            {t.columns.lastUsed}{" "}
-            <span className="font-mono text-foreground">
-              {keyInfo.lastUsed
-                ? new Date(keyInfo.lastUsed).toLocaleTimeString(locale)
-                : "—"}
-            </span>
-          </span>
-        </div>
-        {keyInfo.lastError && (
-          <p
-            className="truncate text-xs text-destructive"
-            title={keyInfo.lastError}
-          >
-            {keyInfo.lastError}
-          </p>
-        )}
-      </CardFooter>
-    </Card>
+          </div>
+        </CardFooter>
+      </Card>
+
+      <Dialog open={weightOpen} onOpenChange={setWeightOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t.editWeight}</DialogTitle>
+            <DialogDescription>
+              {providerId} · {keyInfo.name}
+            </DialogDescription>
+          </DialogHeader>
+          <form className="flex flex-col gap-4" onSubmit={handleWeightSubmit}>
+            <FieldGroup>
+              <Field data-invalid={Boolean(weightError) || undefined}>
+                <FieldLabel htmlFor={weightInputId}>{t.weight}</FieldLabel>
+                <Input
+                  id={weightInputId}
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  required
+                  value={weightDraft}
+                  aria-invalid={Boolean(weightError)}
+                  onChange={(event) => {
+                    setWeightDraft(event.target.value)
+                    setWeightError("")
+                  }}
+                />
+                {weightError && <FieldError>{weightError}</FieldError>}
+              </Field>
+            </FieldGroup>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setWeightOpen(false)}
+              >
+                {t.cancel}
+              </Button>
+              <Button type="submit" disabled={pending !== null}>
+                {pending === "weight" && <Spinner data-icon="inline-start" />}
+                {t.saveWeight}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 
 function ProviderKeySection({
   provider,
   locale,
+  onRefresh,
 }: {
   provider: ProviderHealth
   locale: Locale
+  onRefresh: () => Promise<void>
 }) {
   const t = translations[locale]
+  const [feedback, setFeedback] = useState<KeyFeedback>(null)
+  const enabledKeyCount = provider.keys.filter(
+    (keyInfo) => keyInfo.enabled !== false
+  ).length
 
   return (
     <section
@@ -537,12 +862,30 @@ function ProviderKeySection({
           {t.providerSummary(provider.keys.length, provider.total.requests)}
         </p>
       </header>
+      {feedback && (
+        <Alert variant={feedback.kind === "error" ? "destructive" : "default"}>
+          <AlertTitle>
+            {feedback.kind === "error" ? t.actionFailed : feedback.message}
+          </AlertTitle>
+          {feedback.kind === "error" && (
+            <AlertDescription>{feedback.message}</AlertDescription>
+          )}
+        </Alert>
+      )}
       <div className="grid items-stretch gap-3 md:grid-cols-2">
         {provider.keys.map((keyInfo) => (
           <KeyCard
             key={`${provider.id}:${keyInfo.name}`}
+            providerId={provider.id}
             keyInfo={keyInfo}
             locale={locale}
+            cannotDisable={keyInfo.enabled !== false && enabledKeyCount === 1}
+            cannotDelete={
+              provider.keys.length === 1 ||
+              (keyInfo.enabled !== false && enabledKeyCount === 1)
+            }
+            onRefresh={onRefresh}
+            onFeedback={setFeedback}
           />
         ))}
       </div>
@@ -675,11 +1018,13 @@ function Dashboard({
   connection,
   loading,
   error,
+  onRefresh,
 }: {
   health: Health | null
   connection: ConnectionState
   loading: boolean
   error: string
+  onRefresh: () => Promise<void>
 }) {
   const { locale } = useLanguage()
   const t = translations[locale]
@@ -871,6 +1216,7 @@ function Dashboard({
                   key={provider.id}
                   provider={provider}
                   locale={locale}
+                  onRefresh={onRefresh}
                 />
               ))}
             </section>
@@ -945,6 +1291,7 @@ export function App() {
       connection={connection}
       loading={loading}
       error={error}
+      onRefresh={refresh}
     />
   )
 }

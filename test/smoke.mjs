@@ -712,6 +712,80 @@ test('adding a key live preserves existing key state and schedules the new key i
   }
 });
 
+test('key API updates routing state, tests one key, and deletes live', async () => {
+  const config = multiProviderConfig({ maxRetries: 0 });
+  config.providers[0].keys.push({
+    name: 'alpha-backup',
+    key: 'sk-alpha-backup-ok',
+    weight: 1,
+  });
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
+  try {
+    const disable = await fetch(`${gw.base}/api/providers/alpha/keys/alpha-key`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ enabled: false }),
+    });
+    const disableText = await disable.text();
+    assert.equal(disable.status, 200, disableText);
+    const publicConfig = JSON.parse(disableText);
+    const publicKey = publicConfig.providers
+      .find(provider => provider.id === 'alpha').keys
+      .find(key => key.name === 'alpha-key');
+    assert.equal(publicKey.enabled, false);
+    assert.equal(publicKey.key, undefined);
+
+    const disabledHealth = await gw.health();
+    const disabledKey = disabledHealth.providers
+      .find(provider => provider.id === 'alpha').keys
+      .find(key => key.name === 'alpha-key');
+    assert.equal(disabledKey.state, 'disabled');
+    assert.equal(disabledKey.enabled, false);
+
+    const routed = await gw.chat({ model: 'alpha--shared' });
+    assert.equal(routed.status, 200);
+    assert.equal(JSON.parse(routed.text).gateway_key_name, 'alpha-backup');
+
+    const tested = await fetch(`${gw.base}/api/providers/alpha/keys/alpha-key/test`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: '{}',
+    });
+    const testedText = await tested.text();
+    assert.equal(tested.status, 200, testedText);
+    assert.equal(JSON.parse(testedText).key, 'alpha-key');
+
+    const update = await fetch(`${gw.base}/api/providers/alpha/keys/alpha-key`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ enabled: true, weight: 3 }),
+    });
+    assert.equal(update.status, 200, await update.text());
+
+    const remove = await fetch(`${gw.base}/api/providers/alpha/keys/alpha-backup`, {
+      method: 'DELETE',
+      headers: { origin: gw.base },
+    });
+    assert.equal(remove.status, 200, await remove.text());
+
+    const rejectLastDisable = await fetch(`${gw.base}/api/providers/alpha/keys/alpha-key`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(rejectLastDisable.status, 409);
+    assert.match(await rejectLastDisable.text(), /at least one enabled key/);
+
+    const persisted = JSON.parse(fs.readFileSync(gw.configPath, 'utf8'));
+    const persistedKeys = persisted.providers.find(provider => provider.id === 'alpha').keys;
+    assert.deepEqual(persistedKeys.map(key => key.name), ['alpha-key']);
+    assert.equal(persistedKeys[0].enabled, true);
+    assert.equal(persistedKeys[0].weight, 3);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('provider update rejects duplicate key secrets without changing the live pool', async () => {
   const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
   try {
@@ -1194,7 +1268,7 @@ test('interactive configure writes a validated private config', async () => {
   assert.equal(config.token, 'gateway-secret');
   assert.equal(config.providers[0].baseUrl, 'https://api.deepseek.com');
   assert.deepEqual(config.providers[0].keys, [
-    { name: 'primary', key: 'sk-test-secret', weight: 2 },
+    { name: 'primary', key: 'sk-test-secret', weight: 2, enabled: true },
   ]);
   assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
   assert.ok(!result.stdout.includes('sk-test-secret'), 'API key must not be echoed');

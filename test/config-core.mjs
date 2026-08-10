@@ -63,3 +63,46 @@ test('config validation rejects providers with every key disabled', () => {
     }],
   }), /at least one enabled key/);
 });
+
+test('explicit setup config normalizes only when setup mode is allowed', () => {
+  const input = {
+    schemaVersion: 2,
+    setupPending: true,
+    port: 8787,
+    providers: [],
+    defaultProvider: '',
+    defaultModel: '',
+  };
+
+  assert.throws(() => normalizeConfig(input), /setup is incomplete/);
+  const normalized = normalizeConfig(input, { allowSetup: true });
+  const stored = serializableConfig(normalized);
+  assert.equal(stored.setupPending, true);
+  assert.deepEqual(stored.providers, []);
+  assert.equal(stored.defaultProvider, '');
+  assert.equal(stored.defaultModel, '');
+});
+
+test('setup config rejects partial provider state', () => {
+  assert.throws(() => normalizeConfig({
+    schemaVersion: 2,
+    setupPending: true,
+    defaultProvider: 'alpha',
+    defaultModel: '',
+    providers: [],
+  }, { allowSetup: true }), /must not define defaultProvider/);
+});
+
+test('setup config requires authentication on non-loopback hosts', () => {
+  for (const host of ['0.0.0.0', '127.999.0.1']) {
+    assert.throws(() => normalizeConfig({
+      schemaVersion: 2,
+      setupPending: true,
+      host,
+      token: '',
+      defaultProvider: '',
+      defaultModel: '',
+      providers: [],
+    }, { allowSetup: true }), /requires a gateway token/);
+  }
+});

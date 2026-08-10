@@ -291,6 +291,99 @@ test('health endpoint reports totals', async () => {
   }
 });
 
+test('setup mode serves management UI and activates the first provider atomically', async () => {
+  const gw = await startGateway('', [], {}, {
+    schemaVersion: 2,
+    setupPending: true,
+    defaultProvider: '',
+    defaultModel: '',
+    providers: [],
+  }, { keysArg: false });
+  try {
+    const initialHealth = await gw.health();
+    assert.equal(initialHealth.setupRequired, true);
+    assert.equal(initialHealth.upstream, 'mock');
+    assert.deepEqual(initialHealth.providers, []);
+
+    const initialProviders = await gw.providers();
+    assert.equal(initialProviders.setupPending, true);
+    assert.deepEqual(initialProviders.providers, []);
+
+    const blockedProxy = await gw.chat({ model: 'alpha--chat' });
+    assert.equal(blockedProxy.status, 503);
+    assert.match(blockedProxy.text, /gateway setup required/);
+
+    const blockedCodex = await fetch(`${gw.base}/api/codex/config`);
+    assert.equal(blockedCodex.status, 409);
+    assert.match(await blockedCodex.text(), /complete gateway setup/);
+
+    const settings = await gw.settings({
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ cooldownMs: 4000 }),
+    });
+    assert.equal(settings.status, 200, await settings.text());
+
+    const invalidProvider = await fetch(`${gw.base}/api/providers`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        id: 'incomplete',
+        name: 'Incomplete',
+        baseUrl: 'https://incomplete.example/v1',
+        enabled: true,
+        models: [{ id: 'chat', name: 'Chat', upstreamModel: 'chat' }],
+        keys: [],
+      }),
+    });
+    assert.equal(invalidProvider.status, 400);
+    assert.equal((await gw.health()).setupRequired, true);
+    assert.equal(JSON.parse(fs.readFileSync(gw.configPath, 'utf8')).setupPending, true);
+
+    const created = await fetch(`${gw.base}/api/providers`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        id: 'alpha',
+        name: 'Alpha',
+        baseUrl: 'https://alpha.example/v1',
+        enabled: true,
+        models: [{ id: 'chat', name: 'Chat', upstreamModel: 'alpha-chat' }],
+        keys: [{ name: 'primary', key: 'sk-alpha-ok', weight: 1, enabled: true }],
+      }),
+    });
+    const createdText = await created.text();
+    assert.equal(created.status, 201, createdText);
+    const publicConfig = JSON.parse(createdText);
+    assert.equal(publicConfig.setupPending, false);
+    assert.equal(publicConfig.defaultProvider, 'alpha');
+    assert.equal(publicConfig.defaultModel, 'alpha--chat');
+
+    const readyHealth = await gw.health();
+    assert.equal(readyHealth.setupRequired, false);
+    assert.equal(readyHealth.defaultProvider, 'alpha');
+    assert.equal(readyHealth.providers.length, 1);
+
+    const routed = await gw.chat({ model: 'alpha--chat' });
+    assert.equal(routed.status, 200, routed.text);
+    assert.equal(JSON.parse(routed.text).gateway_key_name, 'primary');
+
+    const deleteLastProvider = await fetch(`${gw.base}/api/providers/alpha`, {
+      method: 'DELETE',
+      headers: { origin: gw.base },
+    });
+    assert.equal(deleteLastProvider.status, 409);
+    assert.match(await deleteLastProvider.text(), /at least one provider/);
+
+    const persisted = JSON.parse(fs.readFileSync(gw.configPath, 'utf8'));
+    assert.equal(persisted.setupPending, false);
+    assert.equal(persisted.cooldownMs, 4000);
+    assert.equal(persisted.providers[0].keys[0].key, 'sk-alpha-ok');
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('provider-scoped aliases route identical upstream model names without crossing pools', async () => {
   const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
   try {
@@ -1224,7 +1317,7 @@ with open(sys.argv[1], 'rb') as f: tomllib.load(f)
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('interactive configure writes a validated private config', async () => {
+test('interactive configure writes a private web setup config', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-configure-'));
   const configPath = path.join(tmp, 'keys.json');
   const port = await freePort();
@@ -1237,14 +1330,8 @@ test('interactive configure writes a validated private config', async () => {
     '',
     '',
     '',
-    '',
-    'primary',
-    'sk-test-secret',
-    '2',
-    'n',
     'y',
     'gateway-secret',
-    '',
   ].join('\n');
   const result = spawnSync('python3', [
     CONFIGURE, '--config', configPath, '--no-codex', '--no-start',
@@ -1259,27 +1346,22 @@ test('interactive configure writes a validated private config', async () => {
   assert.equal(config.schemaVersion, 2);
   assert.equal(config.port, port);
   assert.equal(config.host, '127.0.0.1');
-  assert.equal(config.defaultProvider, 'deepseek');
-  assert.equal(config.defaultModel, 'deepseek--v4-flash');
+  assert.equal(config.setupPending, true);
+  assert.equal(config.defaultProvider, '');
+  assert.equal(config.defaultModel, '');
   assert.equal(config.upstream, undefined);
   assert.equal(config.keys, undefined);
   assert.equal(config.blacklistThreshold, 3);
   assert.equal(config.balanceRefreshMs, 300000);
   assert.equal(config.token, 'gateway-secret');
-  assert.equal(config.providers[0].baseUrl, 'https://api.deepseek.com');
-  assert.deepEqual(config.providers[0].keys, [
-    { name: 'primary', key: 'sk-test-secret', weight: 2, enabled: true },
-  ]);
+  assert.deepEqual(config.providers, []);
   assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
-  assert.ok(!result.stdout.includes('sk-test-secret'), 'API key must not be echoed');
+  assert.doesNotMatch(result.stdout, /API Key/);
 
   const keepAnswers = [
     '', '', '', '', '', '', '', '', '',
-    'n',
     '',
-    '',
-    '',
-  ].join('\n');
+  ].join('\n') + '\n';
   const second = spawnSync('python3', [
     CONFIGURE, '--config', configPath, '--no-codex', '--no-start',
   ], {
@@ -1289,10 +1371,10 @@ test('interactive configure writes a validated private config', async () => {
   });
   assert.equal(second.status, 0, second.stderr || second.stdout);
   const kept = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  assert.deepEqual(kept.providers[0].keys, config.providers[0].keys);
+  assert.equal(kept.setupPending, true);
+  assert.deepEqual(kept.providers, []);
   assert.equal(kept.token, 'gateway-secret');
   const backups = fs.readdirSync(path.join(tmp, '.gateway-backups'));
   assert.equal(backups.length, 1);
-  assert.ok(!second.stdout.includes('sk-test-secret'), 'existing API key must stay masked');
   fs.rmSync(tmp, { recursive: true, force: true });
 });

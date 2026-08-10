@@ -73,9 +73,41 @@ test('gatewayctl validates config and doctor accepts an offline gateway', () => 
   }
 });
 
+test('gatewayctl validate and doctor recognize setup-pending config', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gatewayctl-setup-'));
+  const configPath = path.join(directory, 'keys.json');
+  fs.writeFileSync(configPath, JSON.stringify({
+    schemaVersion: 2,
+    setupPending: true,
+    port: 0,
+    host: '127.0.0.1',
+    defaultProvider: '',
+    defaultModel: '',
+    providers: [],
+  }));
+  try {
+    const validate = spawnSync(GATEWAYCTL, ['validate', '--config', configPath], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    });
+    assert.equal(validate.status, 0, validate.stderr);
+    assert.match(validate.stdout, /引导配置有效/);
+
+    const doctor = spawnSync(GATEWAYCTL, ['doctor', '--config', configPath], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    });
+    assert.equal(doctor.status, 0, doctor.stderr);
+    assert.match(doctor.stdout, /等待通过 Web UI/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('configure.py remains a compatible gatewayctl init entry point', () => {
   const result = spawnSync(CONFIGURE, ['--help'], { cwd: ROOT, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /交互式配置 deepseek-gateway/);
   assert.match(result.stdout, /--no-ui/);
+  assert.match(result.stdout, /--cli-provider/);
 });

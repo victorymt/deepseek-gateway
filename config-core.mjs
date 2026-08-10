@@ -14,6 +14,15 @@ export const DEFAULT_MODELS = [
 
 const PROVIDER_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
+function isLoopbackHost(value) {
+  const host = String(value || '').toLowerCase();
+  if (host === 'localhost' || host === '::1' || host === '[::1]') return true;
+  const octets = host.split('.');
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
 export function providerModelAlias(providerId, modelId) {
   return `${providerId}--${modelId}`;
 }
@@ -93,7 +102,17 @@ export function normalizeProvider(input, existing = null) {
   return { id, name, baseUrl, enabled, models, keys };
 }
 
-export function validateProviderConfig(config) {
+export function validateProviderConfig(config, { allowSetup = false } = {}) {
+  if (config.setupPending === true) {
+    if (!allowSetup) throw new Error('gateway setup is incomplete');
+    if (!Array.isArray(config.providers) || config.providers.length) {
+      throw new Error('setupPending config must not contain providers');
+    }
+    if (config.defaultProvider || config.defaultModel) {
+      throw new Error('setupPending config must not define defaultProvider or defaultModel');
+    }
+    return;
+  }
   if (!Array.isArray(config.providers) || !config.providers.length) throw new Error('at least one provider is required');
   const providerIds = new Set();
   const aliases = new Set();
@@ -163,12 +182,18 @@ export function migrateConfig(raw) {
   };
 }
 
-export function normalizeConfig(raw) {
+export function normalizeConfig(raw, { allowSetup = false } = {}) {
   const migrated = migrateConfig(raw);
+  const setupPending = migrated.setupPending === true;
+  if (setupPending && (String(migrated.defaultProvider || '').trim() || String(migrated.defaultModel || '').trim())) {
+    throw new Error('setupPending config must not define defaultProvider or defaultModel');
+  }
   const providers = migrated.providers.map(provider => normalizeProvider(provider));
-  const defaultProvider = normalizeIdentifier(migrated.defaultProvider || providers.find(provider => provider.enabled)?.id, 'defaultProvider');
+  const defaultProvider = setupPending
+    ? ''
+    : normalizeIdentifier(migrated.defaultProvider || providers.find(provider => provider.enabled)?.id, 'defaultProvider');
   const defaultEntry = providers.find(provider => provider.id === defaultProvider);
-  let defaultModel = String(migrated.defaultModel || '').trim();
+  let defaultModel = setupPending ? '' : String(migrated.defaultModel || '').trim();
   if (!defaultModel && defaultEntry) defaultModel = providerModelAlias(defaultEntry.id, defaultEntry.models[0].id);
   if (defaultModel && !defaultModel.includes('--') && defaultEntry) {
     const model = defaultEntry.models.find(item => item.upstreamModel === defaultModel || item.id === defaultModel);
@@ -177,6 +202,7 @@ export function normalizeConfig(raw) {
   const config = {
     ...migrated,
     schemaVersion: 2,
+    setupPending,
     port: normalizeNumber(migrated.port ?? 8787, 'port', { min: 0, max: 65535, integer: true }),
     host: String(migrated.host || '127.0.0.1'),
     cooldownMs: normalizeNumber(migrated.cooldownMs ?? 60000, 'cooldownMs'),
@@ -190,7 +216,10 @@ export function normalizeConfig(raw) {
     defaultModel,
     providers,
   };
-  validateProviderConfig(config);
+  if (setupPending && !isLoopbackHost(config.host) && config.token.length < 16) {
+    throw new Error('setupPending on a non-loopback host requires a gateway token of at least 16 characters');
+  }
+  validateProviderConfig(config, { allowSetup });
   return config;
 }
 
@@ -207,6 +236,7 @@ export function serializableConfig(config) {
   return {
     ...stored,
     schemaVersion: 2,
+    setupPending: config.setupPending === true,
     port: config.port,
     host: config.host,
     cooldownMs: config.cooldownMs,
@@ -253,13 +283,18 @@ export function persistConfig(configPath, config) {
 }
 
 function runCli() {
-  if (process.argv.length !== 3 || !['--migrate-stdin', '--normalize-stdin'].includes(process.argv[2])) {
-    throw new Error('usage: node config-core.mjs <--migrate-stdin|--normalize-stdin>');
+  const modes = ['--migrate-stdin', '--normalize-stdin', '--normalize-setup-stdin'];
+  if (process.argv.length !== 3 || !modes.includes(process.argv[2])) {
+    throw new Error('usage: node config-core.mjs <--migrate-stdin|--normalize-stdin|--normalize-setup-stdin>');
   }
   const raw = JSON.parse(fs.readFileSync(0, 'utf8'));
-  const result = process.argv[2] === '--migrate-stdin'
-    ? migrateConfig(raw)
-    : serializableConfig(normalizeConfig(raw));
+  let result;
+  if (process.argv[2] === '--migrate-stdin') result = migrateConfig(raw);
+  else {
+    result = serializableConfig(normalizeConfig(raw, {
+      allowSetup: process.argv[2] === '--normalize-setup-stdin',
+    }));
+  }
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 

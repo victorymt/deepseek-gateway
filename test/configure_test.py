@@ -55,6 +55,7 @@ class ConfigureWizardTests(unittest.TestCase):
             "no_ui": True,
             "no_codex": True,
             "no_start": False,
+            "cli_provider": False,
         })()
         config = {"host": "127.0.0.1", "port": 8787, "token": "gateway-token"}
 
@@ -77,6 +78,7 @@ class ConfigureWizardTests(unittest.TestCase):
             "no_ui": True,
             "no_codex": True,
             "no_start": False,
+            "cli_provider": False,
         })()
         config = {"host": "127.0.0.1", "port": 8787, "token": "gateway-token"}
 
@@ -126,7 +128,7 @@ class ConfigureWizardTests(unittest.TestCase):
         self.assertEqual(migrated["providers"][0]["baseUrl"], "https://legacy.example/v1")
         self.assertEqual(migrated["providers"][0]["keys"][0]["name"], "legacy")
 
-    def test_v2_edits_default_provider_without_flattening_config(self):
+    def test_v2_preserves_providers_without_prompting_for_keys(self):
         original = {
             "schemaVersion": 2,
             "port": 8787,
@@ -177,14 +179,9 @@ class ConfigureWizardTests(unittest.TestCase):
             path = Path(temp_dir) / "keys.json"
             path.write_text(json.dumps(original), encoding="utf-8")
 
-            def prompt_text(label, current, validator=None):
-                if label == "上游地址":
-                    return validator("https://gateway.example.com") if validator else "https://gateway.example.com"
-                return current
-
             with patch.object(configure_module, "prompt_number", side_effect=lambda _label, current, **_kwargs: current), \
-                 patch.object(configure_module, "prompt_text", side_effect=prompt_text), \
-                 patch.object(configure_module, "configure_keys", side_effect=lambda keys: keys), \
+                 patch.object(configure_module, "prompt_text", side_effect=lambda _label, current, _validator=None: current), \
+                 patch.object(configure_module, "configure_keys") as configure_keys, \
                  patch.object(configure_module, "configure_token", return_value=("gateway-token", False)):
                 result = configure_module.configure(path)
 
@@ -192,11 +189,43 @@ class ConfigureWizardTests(unittest.TestCase):
             self.assertEqual(result, saved)
             self.assertNotIn("upstream", saved)
             self.assertNotIn("keys", saved)
-            self.assertEqual(saved["providers"][0]["baseUrl"], "https://gateway.example.com")
+            self.assertEqual(saved["providers"][0]["baseUrl"], original["providers"][0]["baseUrl"])
             self.assertEqual(saved["providers"][0]["keys"], original["providers"][0]["keys"])
             self.assertEqual(saved["providers"][1], original["providers"][1])
             self.assertEqual(saved["providers"][0]["models"], original["providers"][0]["models"])
             self.assertEqual(saved["customField"], original["customField"])
+            configure_keys.assert_not_called()
+
+    def test_new_init_writes_setup_config_without_prompting_for_provider(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "keys.json"
+            with patch.object(configure_module, "prompt_number", side_effect=lambda _label, current, **_kwargs: current), \
+                 patch.object(configure_module, "prompt_text", side_effect=lambda _label, current, _validator=None: current), \
+                 patch.object(configure_module, "configure_keys") as configure_keys, \
+                 patch.object(configure_module, "configure_token", return_value=("", False)):
+                result = configure_module.configure(path, {})
+
+            self.assertTrue(result["setupPending"])
+            self.assertEqual(result["providers"], [])
+            self.assertEqual(result["defaultProvider"], "")
+            self.assertEqual(result["defaultModel"], "")
+            configure_keys.assert_not_called()
+
+    def test_cli_provider_mode_retains_terminal_provider_setup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "keys.json"
+            with patch.object(configure_module, "prompt_number", side_effect=lambda _label, current, **_kwargs: current), \
+                 patch.object(configure_module, "prompt_text", side_effect=lambda _label, current, validator=None: validator(current) if validator else current), \
+                 patch.object(configure_module, "configure_keys", return_value=[
+                     {"name": "primary", "key": "sk-terminal", "weight": 1, "enabled": True}
+                 ]) as configure_keys, \
+                 patch.object(configure_module, "configure_token", return_value=("", False)):
+                result = configure_module.configure(path, {}, cli_provider=True)
+
+            self.assertFalse(result["setupPending"])
+            self.assertEqual(result["defaultProvider"], "deepseek")
+            self.assertEqual(result["providers"][0]["keys"][0]["key"], "sk-terminal")
+            configure_keys.assert_called_once()
 
     def test_v2_missing_default_provider_selects_first_enabled_provider(self):
         config = {

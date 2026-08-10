@@ -60,7 +60,7 @@ function readConfig(configPath) {
     throw new Error(`cannot read config ${configPath}: ${error.message}`);
   }
   try {
-    return normalizeConfig(parsed);
+    return normalizeConfig(parsed, { allowSetup: true });
   } catch (error) {
     throw new Error(`invalid config ${configPath}: ${error.message}`);
   }
@@ -141,8 +141,13 @@ function validate(args) {
   assertConfigOnlyArgs(args);
   const configPath = configOption(args);
   const config = readConfig(configPath);
-  console.log(`OK: 配置有效 ${configPath}`);
-  console.log(`    ${config.providers.length} provider(s), 默认模型 ${config.defaultModel}`);
+  if (config.setupPending) {
+    console.log(`OK: Gateway 引导配置有效 ${configPath}`);
+    console.log('    等待通过 Web UI 添加首个 Provider');
+  } else {
+    console.log(`OK: 配置有效 ${configPath}`);
+    console.log(`    ${config.providers.length} provider(s), 默认模型 ${config.defaultModel}`);
+  }
   return 0;
 }
 
@@ -154,8 +159,13 @@ async function doctor(args) {
   console.log(`OK: Node.js ${process.version}`);
 
   const config = readConfig(configPath);
-  console.log(`OK: 配置有效 ${configPath}`);
-  console.log(`OK: ${config.providers.length} provider(s), 默认模型 ${config.defaultModel}`);
+  if (config.setupPending) {
+    console.log(`OK: Gateway 引导配置有效 ${configPath}`);
+    console.log('WARN: 等待通过 Web UI 添加首个 Provider');
+  } else {
+    console.log(`OK: 配置有效 ${configPath}`);
+    console.log(`OK: ${config.providers.length} provider(s), 默认模型 ${config.defaultModel}`);
+  }
 
   const dashboard = path.join(ROOT, 'ui', 'dist', 'index.html');
   console.log(`${fs.existsSync(dashboard) ? 'OK' : 'WARN'}: ${fs.existsSync(dashboard) ? 'Dashboard 已构建' : 'Dashboard 尚未构建，将使用兼容面板'}`);

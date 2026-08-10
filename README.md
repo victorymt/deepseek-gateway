@@ -44,12 +44,14 @@ cd deepseek-gateway
 向导会依次完成：
 
 1. 配置监听地址、冷却、黑名单阈值、重试、超时和请求体上限。
-2. 配置初始 Provider 的上游地址，隐藏输入一个或多个 API Key，并设置名称和权重。
-3. 可选启用网关访问密码。
-4. 通过网关共用的配置校验器生成并安全写入 v2 `keys.json`。
-5. 自动安装依赖并构建 shadcn 状态面板（可通过 `--no-ui` 跳过）。
-6. 可选同步 Codex CLI 配置。
-7. 检查监听地址：已有可访问的网关则直接复用，端口空闲时可选立即启动。
+2. 可选启用网关访问密码；引导模式监听非本机地址时必须使用至少 16 个字符的密码，未填写则自动生成。
+3. 通过网关共用的配置校验器生成并安全写入 `setupPending: true` 的 v2 `keys.json`，此时不要求 Provider 或 API Key。
+4. 自动安装依赖并构建 shadcn 状态面板（可通过 `--no-ui` 跳过）。
+5. 检查监听地址：已有可访问的网关则直接复用，端口空闲时默认立即启动并继续 Web 配置。
+6. 在状态面板中填写首个 Provider、模型和 API Key。保存成功后会原子退出引导模式，并将它设为默认 Provider 和默认模型。
+7. 在面板的“Codex 配置”页签预览和下载配置，或运行 `./gatewayctl codex` 接入 Codex CLI。
+
+默认 `init` 不会在终端询问 Provider 或 API Key。需要纯终端流程时使用 `./gatewayctl init --cli-provider`，它会保留原有的 Provider、Key 和 Codex 配置步骤。已有完整 Provider 配置再次运行 `init` 时会被保留，不会重置为引导模式。
 
 启动后可在面板的“Provider 管理”中添加、编辑、测试或删除其他上游，并在“Gateway 设置”中管理监听参数、运行策略和访问令牌。手工创建的旧版 `{ upstream, keys }` 配置仍可加载，并会在首次通过面板修改时以 v2 结构原子写回。
 
@@ -89,13 +91,22 @@ cd deepseek-gateway
 ./gatewayctl init
 ```
 
-直接回车会接受当前值。再次运行向导时，可以保留现有 API Key，也可以重新录入全部 Key。
+直接回车会接受当前值。默认流程只配置 Gateway 本身，Provider 和 API Key 在网关启动后通过状态面板录入。
+
+需要在终端中同时配置首个 Provider 和 API Key 时运行：
+
+```bash
+./gatewayctl init --cli-provider
+```
+
+再次使用 `--cli-provider` 运行向导时，可以保留现有 API Key，也可以重新录入全部 Key。
 
 向导会先检查目标地址。检测到网关正在运行时不会直接改写离线配置，而是引导到状态面板；需要修改监听参数时，应先停止网关再运行向导。
 
 向导具有以下安全行为：
 
-- API Key 和网关密码在终端中隐藏输入。
+- 网关密码在终端中隐藏输入；使用 `--cli-provider` 时，API Key 也会隐藏输入。
+- 监听 `0.0.0.0` 或其他非本机地址的引导配置必须设置至少 16 个字符的 Gateway token；未提供时自动生成强随机 token。
 - 旧配置会迁移为 v2，并使用与网关运行时相同的规则完成规范化和校验。
 - `keys.json` 通过原子替换写入，文件权限设置为 `600`。
 - 修改现有配置前，会备份到 `.gateway-backups/`。
@@ -121,6 +132,7 @@ cd deepseek-gateway
 --no-codex     不询问 Codex CLI 接入
 --no-start     不询问立即启动网关
 --no-ui        跳过 shadcn 状态面板构建
+--cli-provider 在终端中配置 Provider 和 API Key
 ```
 
 旧入口 `./configure.py` 会兼容转发到 `gatewayctl init`。新脚本和自动化应直接使用 `gatewayctl`。
@@ -178,7 +190,7 @@ DEEPSEEK_KEYS="main=sk-xxx,backup=sk-yyy" node gateway.mjs
 
 ## 接入 Codex
 
-推荐在 `gatewayctl init` 中选择“同步配置到 Codex CLI”，或在面板的“Codex 配置”中预览和下载生成物。
+推荐先在 Web UI 中完成首个 Provider 配置，再在面板的“Codex 配置”中预览和下载生成物。默认 `gatewayctl init` 在引导完成前不会生成 Codex 配置；使用 `gatewayctl init --cli-provider` 时仍可在向导中选择同步到 Codex CLI。
 
 也可以单独运行：
 
@@ -265,12 +277,20 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 标量配置优先级为：命令行 > 环境变量 > `keys.json` > 默认值。`--keys`、`DEEPSEEK_KEYS` 和 `--upstream` 作为兼容入口作用于默认 Provider；旧版 `{ upstream, keys }` 配置会在内存中迁移为 `deepseek` Provider。
 
+`gatewayctl init` 首次生成的配置带有 `setupPending: true`，并使用空 `providers`、空 `defaultProvider` 和空 `defaultModel` 表示 Web 引导尚未完成。该结构只在显式引导模式下有效，普通配置仍必须包含可用 Provider。引导期间：
+
+- `GET /health` 返回 `setupRequired: true`，状态面板和 Settings API 保持可用。
+- 代理请求返回 `503 gateway setup required`，`GET /api/codex/config` 返回 `409`。
+- 首个合法 Provider 保存成功后，网关一次性写入 Provider、默认 Provider 和默认模型，并清除 `setupPending`；失败的保存不会留下部分配置。
+- 完成引导后不能删除最后一个 Provider。
+
 环境变量和命令行参数只影响本次运行，不会通过管理 API 回写到 `keys.json`。当 `--keys`、`DEEPSEEK_KEYS`、`--upstream` 或 `DS_UPSTREAM` 覆盖 Provider 配置时，Provider 管理写操作会返回 `409`；移除覆盖并重启后即可恢复写入。这可以避免运行时传入的 Key 被意外持久化。
 
 “Gateway 设置”会显示持久化值、当前生效值和覆盖来源。`cooldownMs`、`blacklistThreshold`、`balanceRefreshMs`、`maxRetries`、`timeoutMs`、`maxBodyBytes` 和 `token` 在没有运行时覆盖时热生效；`host` 和 `port` 保存后需要重启。被命令行或环境变量接管的字段在面板中为只读，覆盖值不会写入配置文件。
 
 | JSON 字段 | 命令行 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
+| `setupPending` | - | - | `false` | `true` 表示等待通过 Web UI 配置首个 Provider |
 | `port` | `--port` | `DS_GATEWAY_PORT` | `8787` | 监听端口 |
 | `host` | `--host` | - | `127.0.0.1` | 监听地址 |
 | `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`models`、`keys` 和启用状态 |
@@ -344,4 +364,4 @@ npm run build --prefix ui
 | `-drip` | 分段流式响应 |
 | `-abort` | 流式传输中断 |
 
-测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、重复 secret 拒绝、上游模型发现与 ID 归一化、切换上游时的请求排空、逐 Key 余额、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl`、交互式配置和备份恢复。
+测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、重复 secret 拒绝、上游模型发现与 ID 归一化、切换上游时的请求排空、逐 Key 余额、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl`、交互式配置和备份恢复。

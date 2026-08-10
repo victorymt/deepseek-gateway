@@ -149,6 +149,10 @@ def normalize_config(config: dict) -> dict:
     return run_config_core(config, "--normalize-stdin")
 
 
+def normalize_setup_config(config: dict) -> dict:
+    return run_config_core(config, "--normalize-setup-stdin")
+
+
 def mask_secret(value: str) -> str:
     if len(value) <= 7:
         return "*" * len(value)
@@ -294,6 +298,16 @@ def local_gateway_url(host: str, port: int) -> str:
     return f"http://{target}:{port}"
 
 
+def is_loopback_host(host: str) -> bool:
+    value = host.strip().lower()
+    if value in {"localhost", "::1", "[::1]"}:
+        return True
+    parts = value.split(".")
+    return len(parts) == 4 and parts[0] == "127" and all(
+        part.isdigit() and 0 <= int(part) <= 255 for part in parts
+    )
+
+
 def is_gateway_health(payload) -> bool:
     if not (
         isinstance(payload, dict)
@@ -393,9 +407,52 @@ def run_codex_setup(config: dict, config_path: Path, *, skip_ui: bool = False) -
     print("启动 Codex 前请设置：export DEEPSEEK_GATEWAY_TOKEN='<网关密码>'")
 
 
-def configure(path: Path, existing: dict | None = None) -> dict:
+def new_setup_config() -> dict:
+    return {
+        "schemaVersion": 2,
+        "setupPending": True,
+        "port": DEFAULTS["port"],
+        "host": DEFAULTS["host"],
+        "cooldownMs": DEFAULTS["cooldownMs"],
+        "blacklistThreshold": DEFAULTS["blacklistThreshold"],
+        "balanceRefreshMs": DEFAULTS["balanceRefreshMs"],
+        "maxRetries": DEFAULTS["maxRetries"],
+        "timeoutMs": DEFAULTS["timeoutMs"],
+        "maxBodyBytes": DEFAULTS["maxBodyBytes"],
+        "token": "",
+        "defaultProvider": "",
+        "defaultModel": "",
+        "providers": [],
+    }
+
+
+def ensure_cli_provider(config: dict) -> dict:
+    if config.get("providers"):
+        return config
+    scalar_config = {
+        key: value
+        for key, value in config.items()
+        if key not in {
+            "schemaVersion",
+            "setupPending",
+            "defaultProvider",
+            "defaultModel",
+            "providers",
+        }
+    }
+    return migrate_to_v2(scalar_config)
+
+
+def configure(
+    path: Path,
+    existing: dict | None = None,
+    *,
+    cli_provider: bool = False,
+) -> dict:
     existing = load_existing(path) if existing is None else existing
-    config = migrate_to_v2(existing)
+    config = migrate_to_v2(existing) if existing else new_setup_config()
+    if cli_provider:
+        config = ensure_cli_provider(config)
     current = {**DEFAULTS, **config}
 
     print(f"配置文件：{path}")
@@ -408,17 +465,30 @@ def configure(path: Path, existing: dict | None = None) -> dict:
     config["maxRetries"] = prompt_number("每次请求最大重试数", current["maxRetries"], minimum=0)
     config["timeoutMs"] = prompt_number("上游超时（毫秒，0 表示不限）", current["timeoutMs"], minimum=0)
     config["maxBodyBytes"] = prompt_number("请求体上限（字节）", current["maxBodyBytes"], minimum=1)
-    provider_index, provider = default_provider_entry(config)
-    provider = dict(provider)
-    provider_name = str(provider.get("name") or provider.get("id") or "default")
-    provider_url = provider.get("baseUrl") or provider.get("upstream") or DEFAULTS["upstream"]
-    print(f"\n编辑默认 Provider：{provider_name}")
-    provider["baseUrl"] = prompt_text("上游地址", str(provider_url), validate_upstream)
-    provider["keys"] = configure_keys(provider.get("keys"))
-    config["providers"] = list(config["providers"])
-    config["providers"][provider_index] = provider
+    if cli_provider:
+        provider_index, provider = default_provider_entry(config)
+        provider = dict(provider)
+        provider_name = str(provider.get("name") or provider.get("id") or "default")
+        provider_url = provider.get("baseUrl") or provider.get("upstream") or DEFAULTS["upstream"]
+        print(f"\n编辑默认 Provider：{provider_name}")
+        provider["baseUrl"] = prompt_text("上游地址", str(provider_url), validate_upstream)
+        provider["keys"] = configure_keys(provider.get("keys"))
+        config["providers"] = list(config["providers"])
+        config["providers"][provider_index] = provider
+        config["setupPending"] = False
     config["token"], generated = configure_token(str(current.get("token") or ""))
-    config = normalize_config(config)
+    if config.get("setupPending") and not is_loopback_host(config["host"]):
+        if config["token"] and len(config["token"]) < 16:
+            raise ValueError("外部地址上的 Gateway 引导密码至少需要 16 个字符")
+        if not config["token"]:
+            config["token"] = secrets.token_urlsafe(32)
+            generated = True
+            print("外部地址上的 Gateway 引导必须启用访问密码，已自动生成。")
+    config = (
+        normalize_setup_config(config)
+        if config.get("setupPending") is True
+        else normalize_config(config)
+    )
     backup = write_config(path, config)
 
     key_count = sum(
@@ -426,7 +496,10 @@ def configure(path: Path, existing: dict | None = None) -> dict:
         for provider in config["providers"]
         if isinstance(provider, dict)
     )
-    print(f"\n已写入 {path}（权限 600，{key_count} 个 Key）")
+    if config.get("setupPending"):
+        print(f"\n已写入 Gateway 引导配置 {path}（权限 600）")
+    else:
+        print(f"\n已写入 {path}（权限 600，{key_count} 个 Key）")
     if backup:
         print(f"原配置备份：{backup}")
     if generated:
@@ -442,6 +515,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-codex", action="store_true", help="不询问 Codex CLI 接入")
     parser.add_argument("--no-start", action="store_true", help="不询问立即启动网关")
     parser.add_argument("--no-ui", action="store_true", help="跳过 shadcn 状态面板构建")
+    parser.add_argument("--cli-provider", action="store_true", help="在终端中配置 Provider 和 API Key")
     return parser.parse_args()
 
 
@@ -456,11 +530,14 @@ def main() -> int:
             print(f"检测到网关已在运行：{gateway_url}/")
             print("Provider 请通过状态面板管理；修改离线配置前请先停止网关。")
             return 0
-        config = configure(path, existing)
+        config = configure(path, existing, cli_provider=args.cli_provider)
         if not args.no_ui:
             run_ui_build()
-        if not args.no_codex and confirm("同步配置到 Codex CLI", True):
-            run_codex_setup(config, path, skip_ui=args.no_ui)
+        if not args.no_codex:
+            if config.get("setupPending"):
+                print("Provider 配置完成前不会生成 Codex 配置；请稍后使用面板的“Codex 配置”页签。")
+            elif confirm("同步配置到 Codex CLI", True):
+                run_codex_setup(config, path, skip_ui=args.no_ui)
         if not args.no_start:
             status = gateway_status(config)
             gateway_url = local_gateway_url(config["host"], config["port"])
@@ -468,7 +545,12 @@ def main() -> int:
                 print(f"\n检测到网关已在运行：{gateway_url}/")
                 print("若本次修改了配置，请先停止现有进程，再重新启动以加载新配置。")
                 return 0
-            if confirm("立即启动网关", False):
+            start_label = (
+                "立即启动 Gateway 并继续 Web 配置"
+                if config.get("setupPending")
+                else "立即启动网关"
+            )
+            if confirm(start_label, bool(config.get("setupPending"))):
                 if status == GATEWAY_OCCUPIED:
                     raise RuntimeError(
                         f"{config['host']}:{config['port']} 已被占用，"

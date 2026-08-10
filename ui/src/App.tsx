@@ -93,6 +93,7 @@ const translations = {
       connecting: "Connecting to gateway…",
       unreachable: "Gateway unreachable",
       refreshed: "refreshed",
+      setupRequired: "waiting for provider setup",
     },
     alertTitle: "Gateway unreachable",
     metricsLabel: "Gateway totals",
@@ -199,6 +200,7 @@ const translations = {
       connecting: "正在连接 Gateway…",
       unreachable: "Gateway 无法连接",
       refreshed: "更新于",
+      setupRequired: "等待 Provider 配置",
     },
     alertTitle: "Gateway 无法连接",
     metricsLabel: "网关统计",
@@ -522,21 +524,23 @@ function Dashboard({
     tokens: 0,
   }
   const refreshedAt = new Date().toLocaleTimeString(locale)
-  const providers = health
-    ? health.providers?.length
-      ? health.providers
-      : [
-          {
-            id: health.defaultProvider,
-            name: health.defaultProvider,
-            baseUrl: health.upstream,
-            enabled: true,
-            modelCount: 0,
-            total: health.total,
-            keys: health.keys,
-          },
-        ]
-    : []
+  const providers = health?.setupRequired
+    ? []
+    : health
+      ? health.providers?.length
+        ? health.providers
+        : [
+            {
+              id: health.defaultProvider,
+              name: health.defaultProvider,
+              baseUrl: health.upstream || "",
+              enabled: true,
+              modelCount: 0,
+              total: health.total,
+              keys: health.keys,
+            },
+          ]
+      : []
   const keyCount = providers.reduce(
     (count, provider) => count + provider.keys.length,
     0
@@ -568,7 +572,9 @@ function Dashboard({
         <div className="flex flex-wrap items-center justify-between gap-3 font-mono text-xs text-muted-foreground">
           <span>
             {health
-              ? `${t.meta.upstream} ${health.upstream} · ${t.meta.port} ${health.port} · ${t.meta.uptime} ${health.uptime}s · ${t.meta.gateway} v${health.version}`
+              ? health.setupRequired
+                ? `${t.meta.setupRequired} · ${t.meta.port} ${health.port} · ${t.meta.gateway} v${health.version}`
+                : `${t.meta.upstream} ${health.upstream} · ${t.meta.port} ${health.port} · ${t.meta.uptime} ${health.uptime}s · ${t.meta.gateway} v${health.version}`
               : connection === "connecting"
                 ? t.meta.connecting
                 : t.meta.unreachable}
@@ -584,145 +590,155 @@ function Dashboard({
           </Alert>
         )}
 
-        <Tabs defaultValue="dashboard" className="flex flex-col gap-5">
-          <TabsList
-            variant="line"
-            className="w-full justify-start overflow-x-auto"
-          >
-            <TabsTrigger
-              value="dashboard"
-              aria-label={t.navigation.dashboard}
-              title={t.navigation.dashboard}
+        {health?.setupRequired ? (
+          <ProviderManager locale={locale} setupMode onConfigured={onRefresh} />
+        ) : (
+          <Tabs defaultValue="dashboard" className="flex flex-col gap-5">
+            <TabsList
+              variant="line"
+              className="w-full justify-start overflow-x-auto"
             >
-              <LayoutDashboardIcon data-icon="inline-start" />
-              <span className="hidden sm:inline">{t.navigation.dashboard}</span>
-            </TabsTrigger>
-            <TabsTrigger
-              value="providers"
-              aria-label={t.navigation.providers}
-              title={t.navigation.providers}
-            >
-              <ServerCogIcon data-icon="inline-start" />
-              <span className="hidden sm:inline">{t.navigation.providers}</span>
-            </TabsTrigger>
-            <TabsTrigger
-              value="settings"
-              aria-label={t.navigation.settings}
-              title={t.navigation.settings}
-            >
-              <Settings2Icon data-icon="inline-start" />
-              <span className="hidden sm:inline">{t.navigation.settings}</span>
-            </TabsTrigger>
-            <TabsTrigger
-              value="codex"
-              aria-label={t.navigation.codex}
-              title={t.navigation.codex}
-            >
-              <TerminalSquareIcon data-icon="inline-start" />
-              <span className="hidden sm:inline">{t.navigation.codex}</span>
-            </TabsTrigger>
-          </TabsList>
+              <TabsTrigger
+                value="dashboard"
+                aria-label={t.navigation.dashboard}
+                title={t.navigation.dashboard}
+              >
+                <LayoutDashboardIcon data-icon="inline-start" />
+                <span className="hidden sm:inline">
+                  {t.navigation.dashboard}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="providers"
+                aria-label={t.navigation.providers}
+                title={t.navigation.providers}
+              >
+                <ServerCogIcon data-icon="inline-start" />
+                <span className="hidden sm:inline">
+                  {t.navigation.providers}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="settings"
+                aria-label={t.navigation.settings}
+                title={t.navigation.settings}
+              >
+                <Settings2Icon data-icon="inline-start" />
+                <span className="hidden sm:inline">
+                  {t.navigation.settings}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="codex"
+                aria-label={t.navigation.codex}
+                title={t.navigation.codex}
+              >
+                <TerminalSquareIcon data-icon="inline-start" />
+                <span className="hidden sm:inline">{t.navigation.codex}</span>
+              </TabsTrigger>
+            </TabsList>
 
-          <TabsContent value="dashboard" className="flex flex-col gap-8 pt-2">
-            <section
-              className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"
-              aria-label={t.metricsLabel}
-            >
-              <MetricCard
-                label={t.metrics.requests}
-                value={totals.requests}
-                note={t.metrics.lifetime}
-                badge={t.metrics.total}
-                loading={loading}
-                locale={locale}
-              />
-              <MetricCard
-                label={t.metrics.success}
-                value={totals.success}
-                note={t.metrics.lifetime}
-                badge={t.metrics.ok}
-                loading={loading}
-                locale={locale}
-              />
-              <MetricCard
-                label={t.metrics.errors}
-                value={totals.errors}
-                note={t.metrics.lifetime}
-                badge={t.metrics.fail}
-                loading={loading}
-                locale={locale}
-              />
-              <MetricCard
-                label={t.metrics.rateLimited}
-                value={totals.ratelimited}
-                note={t.metrics.upstream}
-                badge="HTTP 429"
-                loading={loading}
-                locale={locale}
-              />
-              <MetricCard
-                label={t.metrics.tokens}
-                value={totals.tokens}
-                note={t.metrics.lifetime}
-                badge={t.metrics.usage}
-                loading={loading}
-                locale={locale}
-              />
-            </section>
-
-            <section className="flex flex-col gap-6" aria-label={t.keyPool}>
-              <header className="flex flex-wrap items-end justify-between gap-3">
-                <div className="flex flex-col gap-1">
-                  <p className="font-mono text-xs text-muted-foreground">
-                    {t.keyPool}
-                  </p>
-                  <h2 className="text-xl font-semibold">
-                    {t.connectionHealth}
-                  </h2>
-                </div>
-                <p className="font-mono text-xs text-muted-foreground">
-                  {health ? t.keysSynced(keyCount) : t.waitingForKeys}
-                </p>
-              </header>
-
-              {loading && !health ? <LoadingKeyCards /> : null}
-              {!loading && keyCount === 0 ? (
-                <Empty className="border">
-                  <EmptyHeader>
-                    <EmptyMedia variant="icon">
-                      <KeyRoundIcon />
-                    </EmptyMedia>
-                    <EmptyTitle>{t.noKeys}</EmptyTitle>
-                    <EmptyDescription>{t.noKeysDescription}</EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              ) : null}
-              {providers.map((provider) => (
-                <ProviderKeySection
-                  key={provider.id}
-                  provider={provider}
+            <TabsContent value="dashboard" className="flex flex-col gap-8 pt-2">
+              <section
+                className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"
+                aria-label={t.metricsLabel}
+              >
+                <MetricCard
+                  label={t.metrics.requests}
+                  value={totals.requests}
+                  note={t.metrics.lifetime}
+                  badge={t.metrics.total}
+                  loading={loading}
                   locale={locale}
-                  copy={t}
-                  onRefresh={onRefresh}
                 />
-              ))}
-            </section>
+                <MetricCard
+                  label={t.metrics.success}
+                  value={totals.success}
+                  note={t.metrics.lifetime}
+                  badge={t.metrics.ok}
+                  loading={loading}
+                  locale={locale}
+                />
+                <MetricCard
+                  label={t.metrics.errors}
+                  value={totals.errors}
+                  note={t.metrics.lifetime}
+                  badge={t.metrics.fail}
+                  loading={loading}
+                  locale={locale}
+                />
+                <MetricCard
+                  label={t.metrics.rateLimited}
+                  value={totals.ratelimited}
+                  note={t.metrics.upstream}
+                  badge="HTTP 429"
+                  loading={loading}
+                  locale={locale}
+                />
+                <MetricCard
+                  label={t.metrics.tokens}
+                  value={totals.tokens}
+                  note={t.metrics.lifetime}
+                  badge={t.metrics.usage}
+                  loading={loading}
+                  locale={locale}
+                />
+              </section>
 
-            <footer className="flex justify-between gap-4 font-mono text-xs text-muted-foreground">
-              <span>{t.autoRefresh}</span>
-              <span>Codex Provider Gateway</span>
-            </footer>
-          </TabsContent>
-          <TabsContent value="providers" className="pt-2">
-            <ProviderManager locale={locale} />
-          </TabsContent>
-          <TabsContent value="settings" className="pt-2">
-            <GatewaySettingsPanel locale={locale} />
-          </TabsContent>
-          <TabsContent value="codex" className="pt-2">
-            <CodexSetup locale={locale} />
-          </TabsContent>
-        </Tabs>
+              <section className="flex flex-col gap-6" aria-label={t.keyPool}>
+                <header className="flex flex-wrap items-end justify-between gap-3">
+                  <div className="flex flex-col gap-1">
+                    <p className="font-mono text-xs text-muted-foreground">
+                      {t.keyPool}
+                    </p>
+                    <h2 className="text-xl font-semibold">
+                      {t.connectionHealth}
+                    </h2>
+                  </div>
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {health ? t.keysSynced(keyCount) : t.waitingForKeys}
+                  </p>
+                </header>
+
+                {loading && !health ? <LoadingKeyCards /> : null}
+                {!loading && keyCount === 0 ? (
+                  <Empty className="border">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon">
+                        <KeyRoundIcon />
+                      </EmptyMedia>
+                      <EmptyTitle>{t.noKeys}</EmptyTitle>
+                      <EmptyDescription>{t.noKeysDescription}</EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
+                ) : null}
+                {providers.map((provider) => (
+                  <ProviderKeySection
+                    key={provider.id}
+                    provider={provider}
+                    locale={locale}
+                    copy={t}
+                    onRefresh={onRefresh}
+                  />
+                ))}
+              </section>
+
+              <footer className="flex justify-between gap-4 font-mono text-xs text-muted-foreground">
+                <span>{t.autoRefresh}</span>
+                <span>Codex Provider Gateway</span>
+              </footer>
+            </TabsContent>
+            <TabsContent value="providers" className="pt-2">
+              <ProviderManager locale={locale} />
+            </TabsContent>
+            <TabsContent value="settings" className="pt-2">
+              <GatewaySettingsPanel locale={locale} />
+            </TabsContent>
+            <TabsContent value="codex" className="pt-2">
+              <CodexSetup locale={locale} />
+            </TabsContent>
+          </Tabs>
+        )}
       </div>
     </main>
   )

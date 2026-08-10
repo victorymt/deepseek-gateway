@@ -186,7 +186,7 @@ function loadConfig(opts) {
 
   let persistedConfig = null;
   try {
-    persistedConfig = normalizeConfig(fileConfig);
+    persistedConfig = normalizeConfig(fileConfig, { allowSetup: true });
   } catch (error) {
     const noLegacyFileKeys = !hasProviderConfig && (!Array.isArray(fileConfig.keys) || !fileConfig.keys.length);
     if (!(noLegacyFileKeys && (externalKeys.length || opts.mock))) throw error;
@@ -221,20 +221,25 @@ function loadConfig(opts) {
   if (opts.maxBodyBytes !== undefined) applyScalarOverride('maxBodyBytes', opts.maxBodyBytes, '--max-body-bytes');
   if (opts.host) applyScalarOverride('host', opts.host, '--host');
 
-  const normalized = normalizeConfig(effective);
+  const normalized = normalizeConfig(effective, { allowSetup: true });
   const defaultProvider = normalized.providers.find(provider => provider.id === normalized.defaultProvider);
-  if (process.env.DS_UPSTREAM) defaultProvider.baseUrl = normalizeBaseUrl(process.env.DS_UPSTREAM, 'DS_UPSTREAM');
-  if (opts.upstream) defaultProvider.baseUrl = normalizeBaseUrl(opts.upstream, '--upstream');
-  if (hasProviderConfig && externalKeys.length) defaultProvider.keys = externalKeys;
-  if (!hasProviderConfig && persistedConfig && externalKeys.length) {
-    defaultProvider.keys = [...defaultProvider.keys, ...externalKeys];
+  if (normalized.setupPending && (externalKeys.length || process.env.DS_UPSTREAM || opts.upstream)) {
+    throw new Error('provider runtime overrides cannot be used before gateway setup is complete');
+  }
+  if (defaultProvider) {
+    if (process.env.DS_UPSTREAM) defaultProvider.baseUrl = normalizeBaseUrl(process.env.DS_UPSTREAM, 'DS_UPSTREAM');
+    if (opts.upstream) defaultProvider.baseUrl = normalizeBaseUrl(opts.upstream, '--upstream');
+    if (hasProviderConfig && externalKeys.length) defaultProvider.keys = externalKeys;
+    if (!hasProviderConfig && persistedConfig && externalKeys.length) {
+      defaultProvider.keys = [...defaultProvider.keys, ...externalKeys];
+    }
   }
   normalized.configPath = path.resolve(configPath);
-  normalized.upstream = defaultProvider.baseUrl;
-  normalized.keys = defaultProvider.keys;
+  normalized.upstream = defaultProvider?.baseUrl || '';
+  normalized.keys = defaultProvider?.keys || [];
   normalized.mock = !!opts.mock;
   normalized.quiet = !!opts.quiet;
-  validateProviderConfig(normalized);
+  validateProviderConfig(normalized, { allowSetup: true });
   const providerOverrides = [];
   if (process.env.DEEPSEEK_KEYS) providerOverrides.push('DEEPSEEK_KEYS');
   if (opts.keys) providerOverrides.push('--keys');
@@ -630,7 +635,7 @@ class ProviderRegistry {
   }
 
   apply(nextConfig) {
-    validateProviderConfig(nextConfig);
+    validateProviderConfig(nextConfig, { allowSetup: true });
     const nextEntries = new Map();
     for (const provider of nextConfig.providers) {
       const existing = this.entries.get(provider.id);
@@ -655,12 +660,13 @@ class ProviderRegistry {
     }
     this.entries = nextEntries;
     this.settings.schemaVersion = 2;
+    this.settings.setupPending = nextConfig.setupPending === true;
     this.settings.defaultProvider = nextConfig.defaultProvider;
     this.settings.defaultModel = nextConfig.defaultModel;
     this.settings.providers = nextConfig.providers;
     const defaultProvider = nextConfig.providers.find(provider => provider.id === nextConfig.defaultProvider);
-    this.settings.upstream = defaultProvider.baseUrl;
-    this.settings.keys = defaultProvider.keys;
+    this.settings.upstream = defaultProvider?.baseUrl || '';
+    this.settings.keys = defaultProvider?.keys || [];
     this.rebuildAliases();
   }
 
@@ -894,6 +900,9 @@ async function fetchProviderModels(baseUrl, secret, modelsUrl = '') {
 }
 
 function resolveRequestRoute(registry, body) {
+  if (registry.settings.setupPending) {
+    throw Object.assign(new Error('gateway setup required'), { statusCode: 503 });
+  }
   let parsed = null;
   let requestedModel = '';
   if (body.length) {
@@ -1155,9 +1164,10 @@ function buildHealth(cfg, registry, uptime) {
   const defaultStats = defaultRuntime ? defaultRuntime.pool.stats() : { keys: [] };
   return {
     status: 'ok',
+    setupRequired: cfg.setupPending === true,
     version: VERSION,
     mock: cfg.mock,
-    upstream: cfg.mock ? 'mock' : defaultRuntime?.provider.baseUrl,
+    upstream: cfg.mock ? 'mock' : (defaultRuntime?.provider.baseUrl || null),
     defaultProvider: cfg.defaultProvider,
     defaultModel: cfg.defaultModel,
     port: cfg.port,
@@ -1197,6 +1207,7 @@ function publicProvider(provider) {
 function publicProviderConfig(cfg) {
   return {
     schemaVersion: 2,
+    setupPending: cfg.setupPending === true,
     defaultProvider: cfg.defaultProvider,
     defaultModel: cfg.defaultModel,
     providers: cfg.providers.map(publicProvider),
@@ -1275,12 +1286,15 @@ function nextSettingsConfig(cfg, payload) {
     }
   }
   if (payload.clearToken) changes.token = '';
-  return normalizeConfig({ ...serializableConfig(cfg._persistedConfig), ...changes });
+  return normalizeConfig(
+    { ...serializableConfig(cfg._persistedConfig), ...changes },
+    { allowSetup: true },
+  );
 }
 
 function commitSettingsConfig(cfg, registry, next) {
   persistConfig(cfg.configPath, next);
-  cfg._persistedConfig = normalizeConfig(serializableConfig(next));
+  cfg._persistedConfig = normalizeConfig(serializableConfig(next), { allowSetup: true });
   const hotChanges = {};
   for (const field of HOT_SETTING_FIELDS) {
     if (!cfg._scalarOverrides[field]) hotChanges[field] = next[field];
@@ -1338,7 +1352,7 @@ async function readJsonBody(req, maxBytes = 1024 * 1024) {
 
 function commitProviderConfig(cfg, registry, next) {
   persistConfig(cfg.configPath, next);
-  cfg._persistedConfig = normalizeConfig(serializableConfig(next));
+  cfg._persistedConfig = normalizeConfig(serializableConfig(next), { allowSetup: true });
   registry.apply(next);
 }
 
@@ -1472,8 +1486,9 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
     const payload = await readJsonBody(req);
     const provider = managementValidation(() => normalizeProvider(payload));
     if (cfg.providers.some(item => item.id === provider.id)) throw Object.assign(new Error(`provider ${provider.id} already exists`), { statusCode: 409 });
-    const makeDefault = payload.makeDefault === true;
+    const makeDefault = cfg.setupPending || payload.makeDefault === true;
     const changes = makeDefault ? {
+      setupPending: false,
       defaultProvider: provider.id,
       defaultModel: String(payload.defaultModel || providerModelAlias(provider.id, provider.models[0].id)),
     } : {};
@@ -1483,6 +1498,9 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
     return true;
   }
   if (pathname === '/api/codex/config' && req.method === 'GET') {
+    if (cfg.setupPending) {
+      throw Object.assign(new Error('complete gateway setup before generating Codex configuration'), { statusCode: 409 });
+    }
     const gatewayUrl = `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host}`;
     const artifacts = buildCodexArtifacts(serializableConfig(cfg), { gatewayUrl });
     writeJson(res, 200, artifacts);

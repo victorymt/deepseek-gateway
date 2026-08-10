@@ -37,9 +37,10 @@ export type ProviderHealth = {
 
 export type Health = {
   status: string
+  setupRequired: boolean
   version: string
   mock: boolean
-  upstream: string
+  upstream: string | null
   defaultProvider: string
   defaultModel: string
   port: number
@@ -81,6 +82,7 @@ export type Provider = {
 
 export type ProviderConfig = {
   schemaVersion: number
+  setupPending: boolean
   defaultProvider: string
   defaultModel: string
   providers: Provider[]

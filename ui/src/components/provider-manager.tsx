@@ -90,6 +90,10 @@ const copy = {
   en: {
     title: "Providers",
     description: "Configuration schema v2",
+    setupTitle: "Configure your first provider",
+    setupDescription:
+      "Gateway setup is waiting for a provider, model, and key.",
+    setupAdd: "Add first provider",
     add: "Add provider",
     empty: "No providers configured",
     emptyDescription: "The provider list is empty.",
@@ -141,6 +145,9 @@ const copy = {
   "zh-CN": {
     title: "Provider 管理",
     description: "配置结构 v2",
+    setupTitle: "配置首个 Provider",
+    setupDescription: "Gateway 正在等待 Provider、模型和密钥配置。",
+    setupAdd: "添加首个 Provider",
     add: "添加 Provider",
     empty: "尚未配置 Provider",
     emptyDescription: "Provider 列表为空。",
@@ -218,7 +225,15 @@ function providerDraft(provider: Provider): ProviderDraft {
   }
 }
 
-export function ProviderManager({ locale }: { locale: Locale }) {
+export function ProviderManager({
+  locale,
+  setupMode = false,
+  onConfigured,
+}: {
+  locale: Locale
+  setupMode?: boolean
+  onConfigured?: () => Promise<void>
+}) {
   const t = copy[locale]
   const [config, setConfig] = useState<ProviderConfig | null>(null)
   const [loading, setLoading] = useState(true)
@@ -289,6 +304,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
       )
       setConfig(next)
       setDialogOpen(false)
+      if (setupMode && !next.setupPending) await onConfigured?.()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t.failed)
     } finally {
@@ -402,12 +418,16 @@ export function ProviderManager({ locale }: { locale: Locale }) {
     <section className="flex flex-col gap-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h2 className="text-xl font-semibold">{t.title}</h2>
-          <p className="text-sm text-muted-foreground">{t.description}</p>
+          <h2 className="text-xl font-semibold">
+            {setupMode ? t.setupTitle : t.title}
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            {setupMode ? t.setupDescription : t.description}
+          </p>
         </div>
         <Button onClick={openCreate}>
           <PlusIcon data-icon="inline-start" />
-          {t.add}
+          {setupMode ? t.setupAdd : t.add}
         </Button>
       </div>
 

@@ -858,20 +858,18 @@ function ProviderKeySection({
             {provider.id} · {provider.baseUrl}
           </p>
         </div>
-        <p className="font-mono text-xs text-muted-foreground">
-          {t.providerSummary(provider.keys.length, provider.total.requests)}
+        <p
+          className={`max-w-full min-w-0 truncate font-mono text-xs sm:text-right ${
+            feedback?.kind === "error"
+              ? "text-destructive"
+              : "text-muted-foreground"
+          }`}
+          aria-live="polite"
+        >
+          {feedback?.message ??
+            t.providerSummary(provider.keys.length, provider.total.requests)}
         </p>
       </header>
-      {feedback && (
-        <Alert variant={feedback.kind === "error" ? "destructive" : "default"}>
-          <AlertTitle>
-            {feedback.kind === "error" ? t.actionFailed : feedback.message}
-          </AlertTitle>
-          {feedback.kind === "error" && (
-            <AlertDescription>{feedback.message}</AlertDescription>
-          )}
-        </Alert>
-      )}
       <div className="grid items-stretch gap-3 md:grid-cols-2">
         {provider.keys.map((keyInfo) => (
           <KeyCard

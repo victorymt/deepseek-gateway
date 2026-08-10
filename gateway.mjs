@@ -9,17 +9,23 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough, Transform } from 'node:stream';
-import { buildCodexArtifacts, providerModelAlias } from './codex-config.mjs';
+import { buildCodexArtifacts } from './codex-config.mjs';
+import {
+  DEFAULT_UPSTREAM,
+  keyFingerprint,
+  normalizeBaseUrl,
+  normalizeConfig,
+  normalizeIdentifier,
+  normalizeProvider,
+  persistConfig,
+  providerModelAlias,
+  serializableConfig,
+  validateProviderConfig,
+} from './config-core.mjs';
 
 const VERSION = '2.0.0';
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const UI_DIST_DIR = path.join(PROJECT_DIR, 'ui', 'dist');
-const DEFAULT_UPSTREAM = 'https://api.deepseek.com';
-const PROVIDER_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const DEFAULT_MODELS = [
-  { id: 'v4-flash', name: 'V4 Flash', upstreamModel: 'deepseek-v4-flash' },
-  { id: 'v4-pro', name: 'V4 Pro', upstreamModel: 'deepseek-v4-pro' },
-];
 const HOP_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade', 'proxy-connection',
@@ -137,158 +143,8 @@ function splitKeyToken(token) {
   return { name, secret };
 }
 
-function normalizeBaseUrl(value, field = 'baseUrl') {
-  let url;
-  try {
-    url = new URL(String(value || ''));
-  } catch {
-    throw new Error(`${field} must be a valid HTTP(S) URL`);
-  }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new Error(`${field} must be an HTTP(S) URL without credentials, query, or hash`);
-  }
-  url.pathname = url.pathname.replace(/\/+$/, '');
-  return url.toString().replace(/\/$/, '');
-}
-
-function normalizeIdentifier(value, field) {
-  const id = String(value || '').trim().toLowerCase();
-  if (!PROVIDER_ID_RE.test(id) || id.includes('--')) {
-    throw new Error(`${field} must use lowercase letters, numbers, and single hyphens`);
-  }
-  return id;
-}
-
-function normalizeNumber(value, field, { min = 0, max = Infinity, integer = false } = {}) {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number < min || number > max || (integer && !Number.isInteger(number))) {
-    throw new Error(`${field} must be ${integer ? 'an integer' : 'a number'} between ${min} and ${max}`);
-  }
-  return number;
-}
-
-function keyFingerprint(secret) {
-  return crypto.createHash('sha256').update(String(secret)).digest('hex');
-}
-
-function normalizeProvider(input, existing = null) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('provider must be an object');
-  const id = normalizeIdentifier(input.id ?? existing?.id, 'provider id');
-  const name = String(input.name ?? existing?.name ?? id).trim();
-  if (!name || name.length > 100) throw new Error(`provider ${id} name is required and must be at most 100 characters`);
-  const baseUrl = normalizeBaseUrl(input.baseUrl ?? input.upstream ?? existing?.baseUrl, `provider ${id} baseUrl`);
-  const enabled = input.enabled === undefined ? (existing?.enabled ?? true) : input.enabled === true;
-  const rawModels = input.models ?? existing?.models ?? [];
-  const rawKeys = input.keys ?? existing?.keys ?? [];
-  if (!Array.isArray(rawModels) || !rawModels.length) throw new Error(`provider ${id} must define at least one model`);
-  if (!Array.isArray(rawKeys) || !rawKeys.length) throw new Error(`provider ${id} must define at least one key`);
-
-  const models = rawModels.map(model => {
-    if (!model || typeof model !== 'object' || Array.isArray(model)) throw new Error(`provider ${id} has an invalid model`);
-    const modelId = normalizeIdentifier(model.id, `provider ${id} model id`);
-    const modelName = String(model.name || modelId).trim();
-    const upstreamModel = String(model.upstreamModel || '').trim();
-    if (!modelName || modelName.length > 100) throw new Error(`provider ${id} model ${modelId} name is invalid`);
-    if (!upstreamModel || upstreamModel.length > 200) throw new Error(`provider ${id} model ${modelId} upstreamModel is required`);
-    return { id: modelId, name: modelName, upstreamModel };
-  });
-
-  const existingKeys = new Map((existing?.keys || []).map(key => [key.name, key]));
-  const keys = rawKeys.map((key, index) => {
-    if (!key || typeof key !== 'object' || Array.isArray(key)) throw new Error(`provider ${id} has an invalid key`);
-    const keyName = String(key.name || `key-${index + 1}`).trim();
-    let secret = typeof key.key === 'string' ? key.key.trim() : '';
-    if (!secret && existingKeys.has(keyName)) secret = existingKeys.get(keyName).key;
-    const weight = Number(key.weight ?? 1);
-    if (!keyName || keyName.length > 100) throw new Error(`provider ${id} key name is invalid`);
-    if (!secret) throw new Error(`provider ${id} key ${keyName} secret is required`);
-    if (!Number.isFinite(weight) || weight <= 0) throw new Error(`provider ${id} key ${keyName} weight must be greater than zero`);
-    return { name: keyName, key: secret, weight };
-  });
-
-  return { id, name, baseUrl, enabled, models, keys };
-}
-
-function validateProviderConfig(config) {
-  if (!Array.isArray(config.providers) || !config.providers.length) throw new Error('at least one provider is required');
-  const providerIds = new Set();
-  const aliases = new Set();
-  let enabledCount = 0;
-  for (const provider of config.providers) {
-    if (providerIds.has(provider.id)) throw new Error(`duplicate provider id: ${provider.id}`);
-    providerIds.add(provider.id);
-    if (provider.enabled) enabledCount++;
-    const modelIds = new Set();
-    for (const model of provider.models) {
-      if (modelIds.has(model.id)) throw new Error(`duplicate model id ${model.id} in provider ${provider.id}`);
-      modelIds.add(model.id);
-      const alias = providerModelAlias(provider.id, model.id);
-      if (aliases.has(alias)) throw new Error(`duplicate model alias: ${alias}`);
-      aliases.add(alias);
-    }
-    const keyNames = new Set();
-    const keyFingerprints = new Set();
-    for (const key of provider.keys) {
-      if (keyNames.has(key.name)) throw new Error(`duplicate key name ${key.name} in provider ${provider.id}`);
-      keyNames.add(key.name);
-      const fingerprint = keyFingerprint(key.key);
-      if (keyFingerprints.has(fingerprint)) throw new Error(`duplicate key secret in provider ${provider.id}`);
-      keyFingerprints.add(fingerprint);
-    }
-  }
-  if (!enabledCount) throw new Error('at least one provider must be enabled');
-  const defaultProvider = config.providers.find(provider => provider.id === config.defaultProvider);
-  if (!defaultProvider || !defaultProvider.enabled) throw new Error('defaultProvider must reference an enabled provider');
-  if (!aliases.has(config.defaultModel)) throw new Error('defaultModel must reference a configured model alias');
-  const defaultModelProvider = config.defaultModel.split('--', 1)[0];
-  if (defaultModelProvider !== config.defaultProvider) throw new Error('defaultModel must belong to defaultProvider');
-}
-
-function normalizeConfig(raw) {
-  const legacy = !Array.isArray(raw.providers);
-  let providers;
-  if (legacy) {
-    providers = [normalizeProvider({
-      id: 'deepseek',
-      name: 'DeepSeek',
-      baseUrl: raw.upstream || DEFAULT_UPSTREAM,
-      enabled: true,
-      models: DEFAULT_MODELS,
-      keys: raw.keys || [],
-    })];
-  } else {
-    providers = raw.providers.map(provider => normalizeProvider(provider));
-  }
-  const defaultProvider = normalizeIdentifier(raw.defaultProvider || providers.find(provider => provider.enabled)?.id, 'defaultProvider');
-  const defaultEntry = providers.find(provider => provider.id === defaultProvider);
-  let defaultModel = String(raw.defaultModel || '').trim();
-  if (!defaultModel && defaultEntry) defaultModel = providerModelAlias(defaultEntry.id, defaultEntry.models[0].id);
-  if (defaultModel && !defaultModel.includes('--') && defaultEntry) {
-    const model = defaultEntry.models.find(item => item.upstreamModel === defaultModel || item.id === defaultModel);
-    if (model) defaultModel = providerModelAlias(defaultEntry.id, model.id);
-  }
-  const config = {
-    ...raw,
-    schemaVersion: 2,
-    port: normalizeNumber(raw.port ?? 8787, 'port', { min: 0, max: 65535, integer: true }),
-    host: String(raw.host || '127.0.0.1'),
-    cooldownMs: normalizeNumber(raw.cooldownMs ?? 60000, 'cooldownMs'),
-    blacklistThreshold: normalizeNumber(raw.blacklistThreshold ?? 3, 'blacklistThreshold', { integer: true }),
-    balanceRefreshMs: normalizeNumber(raw.balanceRefreshMs ?? 300000, 'balanceRefreshMs'),
-    maxRetries: normalizeNumber(raw.maxRetries ?? 2, 'maxRetries', { integer: true }),
-    timeoutMs: normalizeNumber(raw.timeoutMs ?? 0, 'timeoutMs'),
-    maxBodyBytes: normalizeNumber(raw.maxBodyBytes ?? 64 * 1024 * 1024, 'maxBodyBytes', { min: 1, integer: true }),
-    token: String(raw.token || ''),
-    defaultProvider,
-    defaultModel,
-    providers,
-  };
-  validateProviderConfig(config);
-  return config;
-}
-
 function loadConfig(opts) {
-  const cfg = {
+  const fileConfig = {
     port: 8787,
     host: '127.0.0.1',
     upstream: DEFAULT_UPSTREAM,
@@ -299,23 +155,22 @@ function loadConfig(opts) {
     timeoutMs: 0,
     maxBodyBytes: 64 * 1024 * 1024,
     token: '',
-    mock: false,
     keys: [],
   };
   const configPath = opts.config || process.env.DS_GATEWAY_CONFIG || configCandidates().find(p => fs.existsSync(p)) || configCandidates()[0];
   if (fs.existsSync(configPath)) {
     try {
-      const fileCfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      if (fileCfg.blacklistThreshold === undefined && fileCfg.breakerThreshold !== undefined) {
-        fileCfg.blacklistThreshold = fileCfg.breakerThreshold;
+      const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (parsed.blacklistThreshold === undefined && parsed.breakerThreshold !== undefined) {
+        parsed.blacklistThreshold = parsed.breakerThreshold;
       }
-      Object.assign(cfg, fileCfg);
+      Object.assign(fileConfig, parsed);
     } catch (err) {
       console.error(`failed to read config ${configPath}: ${err.message}`);
       process.exit(1);
     }
   }
-  const hasProviderConfig = Array.isArray(cfg.providers);
+  const hasProviderConfig = Array.isArray(fileConfig.providers);
   const externalKeys = [];
   const addExternalKey = (name, secret, weight = 1) => {
     if (!secret) return;
@@ -323,46 +178,62 @@ function loadConfig(opts) {
   };
   if (process.env.DEEPSEEK_KEYS) process.env.DEEPSEEK_KEYS.split(',').forEach(token => { const parsed = splitKeyToken(token); if (parsed) addExternalKey(parsed.name, parsed.secret); });
   if (opts.keys) opts.keys.split(',').forEach(token => { const parsed = splitKeyToken(token); if (parsed) addExternalKey(parsed.name, parsed.secret); });
-  const addKey = (name, secret, weight) => {
-    if (!secret) return;
-    cfg.keys.push({ name: name || `key-${cfg.keys.length + 1}`, key: secret, weight: weight || 1 });
-  };
-  const fileKeys = cfg.keys || [];
-  cfg.keys = [];
-  fileKeys.forEach(k => addKey(k.name, k.key, k.weight));
-  if (!hasProviderConfig) externalKeys.forEach(key => addKey(key.name, key.key, key.weight));
-  if (process.env.DS_GATEWAY_PORT) cfg.port = Number(process.env.DS_GATEWAY_PORT);
-  if (opts.port !== undefined) cfg.port = opts.port;
-  if (process.env.DS_UPSTREAM) cfg.upstream = process.env.DS_UPSTREAM;
-  if (opts.upstream) cfg.upstream = opts.upstream;
-  if (process.env.DS_GATEWAY_TOKEN) cfg.token = process.env.DS_GATEWAY_TOKEN;
-  if (opts.token) cfg.token = opts.token;
-  if (process.env.DS_COOLDOWN_MS) cfg.cooldownMs = Number(process.env.DS_COOLDOWN_MS);
-  if (opts.cooldownMs !== undefined) cfg.cooldownMs = opts.cooldownMs;
-  if (process.env.DS_BREAKER) cfg.blacklistThreshold = Number(process.env.DS_BREAKER);
-  if (process.env.DS_BLACKLIST_THRESHOLD) cfg.blacklistThreshold = Number(process.env.DS_BLACKLIST_THRESHOLD);
-  if (opts.blacklistThreshold !== undefined) cfg.blacklistThreshold = opts.blacklistThreshold;
-  if (process.env.DS_BALANCE_REFRESH_MS) cfg.balanceRefreshMs = Number(process.env.DS_BALANCE_REFRESH_MS);
-  if (opts.balanceRefreshMs !== undefined) cfg.balanceRefreshMs = opts.balanceRefreshMs;
-  if (process.env.DS_MAX_RETRIES) cfg.maxRetries = Number(process.env.DS_MAX_RETRIES);
-  if (opts.maxRetries !== undefined) cfg.maxRetries = opts.maxRetries;
-  if (process.env.DS_MAX_BODY_BYTES) cfg.maxBodyBytes = Number(process.env.DS_MAX_BODY_BYTES);
-  if (opts.maxBodyBytes !== undefined) cfg.maxBodyBytes = opts.maxBodyBytes;
-  if (opts.host) cfg.host = opts.host;
-  cfg.mock = !!opts.mock;
-  cfg.quiet = !!opts.quiet;
-  if (cfg.mock && !cfg.keys.length && !Array.isArray(cfg.providers)) cfg.keys = [{ name: 'mock', key: 'sk-mock-ok', weight: 1 }];
 
-  const normalized = normalizeConfig(cfg);
+  let persistedConfig = null;
+  try {
+    persistedConfig = normalizeConfig(fileConfig);
+  } catch (error) {
+    const noLegacyFileKeys = !hasProviderConfig && (!Array.isArray(fileConfig.keys) || !fileConfig.keys.length);
+    if (!(noLegacyFileKeys && (externalKeys.length || opts.mock))) throw error;
+  }
+
+  const effective = persistedConfig ? serializableConfig(persistedConfig) : structuredClone(fileConfig);
+  if (!hasProviderConfig && !persistedConfig && externalKeys.length) {
+    effective.keys = [...(effective.keys || []), ...externalKeys];
+  }
+  if (opts.mock && !hasProviderConfig && !(effective.keys || []).length) {
+    effective.keys = [{ name: 'mock', key: 'sk-mock-ok', weight: 1 }];
+  }
+  if (process.env.DS_GATEWAY_PORT) effective.port = Number(process.env.DS_GATEWAY_PORT);
+  if (opts.port !== undefined) effective.port = opts.port;
+  if (process.env.DS_GATEWAY_TOKEN) effective.token = process.env.DS_GATEWAY_TOKEN;
+  if (opts.token) effective.token = opts.token;
+  if (process.env.DS_COOLDOWN_MS) effective.cooldownMs = Number(process.env.DS_COOLDOWN_MS);
+  if (opts.cooldownMs !== undefined) effective.cooldownMs = opts.cooldownMs;
+  if (process.env.DS_BREAKER) effective.blacklistThreshold = Number(process.env.DS_BREAKER);
+  if (process.env.DS_BLACKLIST_THRESHOLD) effective.blacklistThreshold = Number(process.env.DS_BLACKLIST_THRESHOLD);
+  if (opts.blacklistThreshold !== undefined) effective.blacklistThreshold = opts.blacklistThreshold;
+  if (process.env.DS_BALANCE_REFRESH_MS) effective.balanceRefreshMs = Number(process.env.DS_BALANCE_REFRESH_MS);
+  if (opts.balanceRefreshMs !== undefined) effective.balanceRefreshMs = opts.balanceRefreshMs;
+  if (process.env.DS_MAX_RETRIES) effective.maxRetries = Number(process.env.DS_MAX_RETRIES);
+  if (opts.maxRetries !== undefined) effective.maxRetries = opts.maxRetries;
+  if (process.env.DS_MAX_BODY_BYTES) effective.maxBodyBytes = Number(process.env.DS_MAX_BODY_BYTES);
+  if (opts.maxBodyBytes !== undefined) effective.maxBodyBytes = opts.maxBodyBytes;
+  if (opts.host) effective.host = opts.host;
+
+  const normalized = normalizeConfig(effective);
   const defaultProvider = normalized.providers.find(provider => provider.id === normalized.defaultProvider);
   if (process.env.DS_UPSTREAM) defaultProvider.baseUrl = normalizeBaseUrl(process.env.DS_UPSTREAM, 'DS_UPSTREAM');
   if (opts.upstream) defaultProvider.baseUrl = normalizeBaseUrl(opts.upstream, '--upstream');
   if (hasProviderConfig && externalKeys.length) defaultProvider.keys = externalKeys;
+  if (!hasProviderConfig && persistedConfig && externalKeys.length) {
+    defaultProvider.keys = [...defaultProvider.keys, ...externalKeys];
+  }
   normalized.configPath = path.resolve(configPath);
   normalized.upstream = defaultProvider.baseUrl;
   normalized.keys = defaultProvider.keys;
-  normalized.mock = cfg.mock;
+  normalized.mock = !!opts.mock;
+  normalized.quiet = !!opts.quiet;
   validateProviderConfig(normalized);
+  const providerOverrides = [];
+  if (process.env.DEEPSEEK_KEYS) providerOverrides.push('DEEPSEEK_KEYS');
+  if (opts.keys) providerOverrides.push('--keys');
+  if (process.env.DS_UPSTREAM) providerOverrides.push('DS_UPSTREAM');
+  if (opts.upstream) providerOverrides.push('--upstream');
+  Object.defineProperties(normalized, {
+    _persistedConfig: { value: persistedConfig, writable: true },
+    _providerOverrides: { value: providerOverrides, writable: true },
+  });
   return normalized;
 }
 
@@ -1300,51 +1171,20 @@ function publicProviderConfig(cfg) {
   };
 }
 
-function serializableConfig(cfg) {
-  return {
-    schemaVersion: 2,
-    port: cfg.port,
-    host: cfg.host,
-    cooldownMs: cfg.cooldownMs,
-    blacklistThreshold: cfg.blacklistThreshold,
-    balanceRefreshMs: cfg.balanceRefreshMs,
-    maxRetries: cfg.maxRetries,
-    timeoutMs: cfg.timeoutMs,
-    maxBodyBytes: cfg.maxBodyBytes,
-    token: cfg.token,
-    defaultProvider: cfg.defaultProvider,
-    defaultModel: cfg.defaultModel,
-    providers: cfg.providers.map(provider => ({
-      ...provider,
-      models: provider.models.map(model => ({ ...model })),
-      keys: provider.keys.map(key => ({ name: key.name, key: key.key, weight: key.weight })),
-    })),
-  };
-}
-
-function persistConfig(configPath, cfg) {
-  const target = path.resolve(configPath);
-  const dir = path.dirname(target);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (fs.existsSync(target)) {
-    const backup = `${target}.bak`;
-    fs.copyFileSync(target, backup);
-    fs.chmodSync(backup, 0o600);
-  }
-  const temp = path.join(dir, `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
-  try {
-    fs.writeFileSync(temp, `${JSON.stringify(serializableConfig(cfg), null, 2)}\n`, { mode: 0o600 });
-    fs.chmodSync(temp, 0o600);
-    fs.renameSync(temp, target);
-    fs.chmodSync(target, 0o600);
-  } catch (error) {
-    try { fs.unlinkSync(temp); } catch {}
-    throw error;
-  }
-}
-
 function nextProviderConfig(cfg, providers, changes = {}) {
-  const raw = { ...serializableConfig(cfg), ...changes, providers };
+  if (cfg._providerOverrides.length) {
+    throw Object.assign(
+      new Error(`provider configuration is read-only while runtime overrides are active: ${cfg._providerOverrides.join(', ')}`),
+      { statusCode: 409 },
+    );
+  }
+  if (!cfg._persistedConfig) {
+    throw Object.assign(
+      new Error('provider configuration is read-only until a valid config file is created'),
+      { statusCode: 409 },
+    );
+  }
+  const raw = { ...serializableConfig(cfg._persistedConfig), ...changes, providers };
   const next = normalizeConfig(raw);
   next.configPath = cfg.configPath;
   next.mock = cfg.mock;
@@ -1381,6 +1221,7 @@ async function readJsonBody(req, maxBytes = 1024 * 1024) {
 
 function commitProviderConfig(cfg, registry, next) {
   persistConfig(cfg.configPath, next);
+  cfg._persistedConfig = normalizeConfig(serializableConfig(next));
   registry.apply(next);
 }
 

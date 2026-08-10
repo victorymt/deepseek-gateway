@@ -59,13 +59,15 @@ class ConfigureWizardTests(unittest.TestCase):
         config = {"host": "127.0.0.1", "port": 8787, "token": "gateway-token"}
 
         with patch.object(configure_module, "parse_args", return_value=args), \
-             patch.object(configure_module, "configure", return_value=config), \
+             patch.object(configure_module, "load_existing", return_value=config), \
+             patch.object(configure_module, "configure", return_value=config) as configure, \
              patch.object(configure_module, "gateway_status", return_value=configure_module.GATEWAY_RUNNING), \
              patch.object(configure_module, "confirm") as confirm, \
              patch.object(configure_module.subprocess, "call") as call:
             result = configure_module.main()
 
         self.assertEqual(result, 0)
+        configure.assert_not_called()
         confirm.assert_not_called()
         call.assert_not_called()
 
@@ -91,22 +93,38 @@ class ConfigureWizardTests(unittest.TestCase):
     def test_ui_build_runs_the_helper_script(self):
         completed = type("Completed", (), {"returncode": 0})()
 
-        with patch.object(configure_module.subprocess, "run", return_value=completed) as run:
+        with patch.object(configure_module, "ui_needs_build", return_value=True), \
+             patch.object(configure_module.subprocess, "run", return_value=completed) as run:
             result = configure_module.run_ui_build()
 
         self.assertTrue(result)
         run.assert_called_once_with([str(ROOT / "build-ui.sh")], check=False)
 
     def test_codex_setup_can_skip_ui_build(self):
-        config = {"host": "127.0.0.1", "port": 8787}
+        config = {"host": "127.0.0.1", "port": 8787, "defaultModel": "openrouter--sonnet"}
         completed = type("Completed", (), {"returncode": 0})()
 
-        with patch.object(configure_module, "prompt_text", return_value="deepseek--v4-flash"), \
+        with patch.object(configure_module, "prompt_text", return_value="openrouter--sonnet") as prompt, \
              patch.object(configure_module.subprocess, "run", return_value=completed) as run:
             configure_module.run_codex_setup(config, Path("/tmp/keys.json"), skip_ui=True)
 
         command = run.call_args.args[0]
         self.assertEqual(command, [str(ROOT / "setup-codex.sh"), "--skip-ui"])
+        prompt.assert_called_once_with("Codex 默认模型别名", "openrouter--sonnet")
+
+    def test_legacy_config_migrates_to_v2(self):
+        migrated = configure_module.migrate_to_v2({
+            "upstream": "https://legacy.example/v1",
+            "keys": [{"name": "legacy", "key": "sk-legacy", "weight": 2}],
+        })
+
+        self.assertEqual(migrated["schemaVersion"], 2)
+        self.assertEqual(migrated["defaultProvider"], "deepseek")
+        self.assertEqual(migrated["defaultModel"], "deepseek--v4-flash")
+        self.assertNotIn("upstream", migrated)
+        self.assertNotIn("keys", migrated)
+        self.assertEqual(migrated["providers"][0]["baseUrl"], "https://legacy.example/v1")
+        self.assertEqual(migrated["providers"][0]["keys"][0]["name"], "legacy")
 
     def test_v2_edits_default_provider_without_flattening_config(self):
         original = {

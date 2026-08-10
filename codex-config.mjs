@@ -5,16 +5,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeConfig, providerModelAlias } from './config-core.mjs';
+
+export { providerModelAlias } from './config-core.mjs';
 
 export const CODEX_PROVIDER_ID = 'multi-provider-gateway';
 export const CODEX_ENV_KEY = 'DEEPSEEK_GATEWAY_TOKEN';
 
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_PATH = path.join(PROJECT_DIR, 'codex-models.json');
-const LEGACY_MODELS = [
-  { id: 'v4-flash', name: 'V4 Flash', upstreamModel: 'deepseek-v4-flash' },
-  { id: 'v4-pro', name: 'V4 Pro', upstreamModel: 'deepseek-v4-pro' },
-];
 
 function tomlString(value) {
   return JSON.stringify(String(value));
@@ -36,38 +35,8 @@ function loadTemplates() {
   return parsed.models;
 }
 
-export function providerModelAlias(providerId, modelId) {
-  return `${providerId}--${modelId}`;
-}
-
 function normalizeCatalogConfig(config) {
-  if (Array.isArray(config.providers) && config.providers.length) {
-    const providers = config.providers.map(provider => ({
-      ...provider,
-      enabled: provider.enabled !== false,
-      models: Array.isArray(provider.models) ? provider.models : [],
-    }));
-    const defaultProvider = config.defaultProvider || providers.find(provider => provider.enabled)?.id;
-    const provider = providers.find(item => item.id === defaultProvider);
-    const defaultModel = config.defaultModel || (provider?.models[0]
-      ? providerModelAlias(provider.id, provider.models[0].id)
-      : '');
-    return { ...config, providers, defaultProvider, defaultModel };
-  }
-  return {
-    ...config,
-    schemaVersion: 2,
-    defaultProvider: 'deepseek',
-    defaultModel: 'deepseek--v4-flash',
-    providers: [{
-      id: 'deepseek',
-      name: 'DeepSeek',
-      baseUrl: config.upstream || 'https://api.deepseek.com',
-      enabled: true,
-      models: LEGACY_MODELS,
-      keys: config.keys || [],
-    }],
-  };
+  return normalizeConfig(config);
 }
 
 export function buildModelCatalog(config) {

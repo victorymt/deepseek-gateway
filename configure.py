@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "keys.json"
+CONFIG_CORE = ROOT / "config-core.mjs"
 GATEWAY_AVAILABLE = "available"
 GATEWAY_RUNNING = "running"
 GATEWAY_OCCUPIED = "occupied"
@@ -94,8 +95,15 @@ def prompt_secret(label: str) -> str:
 
 def validate_upstream(value: str) -> str:
     parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("请输入完整的 http:// 或 https:// URL")
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("请输入不包含凭据、查询参数或片段的完整 HTTP(S) URL")
     return value.rstrip("/")
 
 
@@ -111,6 +119,36 @@ def load_existing(path: Path) -> dict:
     return value
 
 
+def run_config_core(config: dict, mode: str) -> dict:
+    result = subprocess.run(
+        ["node", str(CONFIG_CORE), mode],
+        input=json.dumps(config, ensure_ascii=False),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        message = result.stderr.strip()
+        if message.startswith("ERROR: "):
+            message = message[7:]
+        raise ValueError(f"配置处理失败：{message or f'Node 退出码 {result.returncode}'}")
+    try:
+        normalized = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("配置校验器返回了无效 JSON") from exc
+    if not isinstance(normalized, dict):
+        raise ValueError("配置校验器返回的顶层必须是 JSON 对象")
+    return normalized
+
+
+def migrate_to_v2(existing: dict) -> dict:
+    return run_config_core(existing, "--migrate-stdin")
+
+
+def normalize_config(config: dict) -> dict:
+    return run_config_core(config, "--normalize-stdin")
+
+
 def mask_secret(value: str) -> str:
     if len(value) <= 7:
         return "*" * len(value)
@@ -120,12 +158,14 @@ def mask_secret(value: str) -> str:
 def configure_keys(existing) -> list[dict]:
     keys = []
     names = set()
+    secrets_seen = set()
     invalid_existing = False
     for index, item in enumerate(existing or []):
         if not isinstance(item, dict) or not item.get("key"):
             invalid_existing = True
             continue
-        name = str(item.get("name") or f"key-{index + 1}")
+        name = str(item.get("name") or f"key-{index + 1}").strip()
+        secret = str(item["key"]).strip()
         try:
             weight = float(item.get("weight", 1))
             if not math.isfinite(weight) or weight <= 0:
@@ -133,15 +173,16 @@ def configure_keys(existing) -> list[dict]:
         except (TypeError, ValueError):
             invalid_existing = True
             continue
-        if name in names:
+        if not name or len(name) > 100 or name in names or secret in secrets_seen:
             invalid_existing = True
             continue
         keys.append({
             "name": name,
-            "key": str(item["key"]),
+            "key": secret,
             "weight": int(weight) if weight.is_integer() else weight,
         })
         names.add(name)
+        secrets_seen.add(secret)
     if invalid_existing:
         print("现有 API Key 配置包含空值、重复名称或无效权重，需要重新输入。")
         keys = []
@@ -154,22 +195,27 @@ def configure_keys(existing) -> list[dict]:
 
     keys = []
     names = set()
+    secrets_seen = set()
     print("\n配置 API Key（至少一个）：")
     while True:
         default_name = f"key-{len(keys) + 1}"
         name = prompt_text("  名称", default_name)
-        if name in names:
-            print("该名称已存在，请换一个名称。")
+        if not name or len(name) > 100 or name in names:
+            print("名称不能为空、超过 100 个字符或与现有名称重复。")
             continue
         secret = prompt_secret("  API Key（隐藏输入）: ").strip()
         if not secret:
             print("API Key 不能为空。")
+            continue
+        if secret in secrets_seen:
+            print("该 API Key 已存在，请输入不同的 Key。")
             continue
         weight = prompt_number("  权重", 1, minimum=0.000001, integer=False)
         if float(weight).is_integer():
             weight = int(weight)
         keys.append({"name": name, "key": secret, "weight": weight})
         names.add(name)
+        secrets_seen.add(secret)
         if not confirm("  继续添加 Key", False):
             return keys
 
@@ -292,11 +338,35 @@ def gateway_status(config: dict) -> str:
         return GATEWAY_AVAILABLE
 
 
+def connection_config(existing: dict) -> dict:
+    current = {**DEFAULTS, **existing}
+    port = os.environ.get("DS_GATEWAY_PORT") or current["port"]
+    token = os.environ.get("DS_GATEWAY_TOKEN") or current.get("token") or ""
+    return {"host": str(current["host"]), "port": int(port), "token": str(token)}
+
+
+def ui_needs_build() -> bool:
+    output = ROOT / "ui" / "dist" / "index.html"
+    if not output.exists():
+        return True
+    inputs = [
+        ROOT / "ui" / "package.json",
+        ROOT / "ui" / "package-lock.json",
+        ROOT / "ui" / "index.html",
+        *list((ROOT / "ui" / "src").rglob("*")),
+    ]
+    output_mtime = output.stat().st_mtime
+    return any(item.is_file() and item.stat().st_mtime > output_mtime for item in inputs)
+
+
 def run_ui_build() -> bool:
     script = ROOT / "build-ui.sh"
     if not script.exists():
         print(f"WARNING: 找不到 {script}，将使用内嵌兼容面板。", file=sys.stderr)
         return False
+    if not ui_needs_build():
+        print(f"状态面板已是最新版本：{ROOT / 'ui' / 'dist'}")
+        return True
     result = subprocess.run([str(script)], check=False)
     if result.returncode:
         print(
@@ -311,7 +381,8 @@ def run_codex_setup(config: dict, config_path: Path, *, skip_ui: bool = False) -
     env = os.environ.copy()
     env["GATEWAY_URL"] = local_gateway_url(config["host"], config["port"])
     env["GATEWAY_CONFIG"] = str(config_path)
-    env["MODEL"] = prompt_text("Codex 默认模型别名", env.get("MODEL", "deepseek--v4-flash"))
+    default_model = env.get("MODEL") or str(config.get("defaultModel") or "deepseek--v4-flash")
+    env["MODEL"] = prompt_text("Codex 默认模型别名", default_model)
     command = [str(ROOT / "setup-codex.sh")]
     if skip_ui:
         command.append("--skip-ui")
@@ -321,48 +392,39 @@ def run_codex_setup(config: dict, config_path: Path, *, skip_ui: bool = False) -
     print("启动 Codex 前请设置：export DEEPSEEK_GATEWAY_TOKEN='<网关密码>'")
 
 
-def configure(path: Path) -> dict:
-    existing = load_existing(path)
-    if "blacklistThreshold" not in existing and "breakerThreshold" in existing:
-        existing["blacklistThreshold"] = existing.pop("breakerThreshold")
-    config = dict(existing)
-    current = {**DEFAULTS, **existing}
+def configure(path: Path, existing: dict | None = None) -> dict:
+    existing = load_existing(path) if existing is None else existing
+    config = migrate_to_v2(existing)
+    current = {**DEFAULTS, **config}
 
     print(f"配置文件：{path}")
     print("直接回车可接受方括号中的当前值。\n")
     config["port"] = prompt_number("监听端口", current["port"], minimum=1, maximum=65535)
     config["host"] = prompt_text("监听地址", str(current["host"]))
-    if isinstance(existing.get("providers"), list):
-        provider_index, provider = default_provider_entry(config)
-        provider = dict(provider)
-        provider_name = str(provider.get("name") or provider.get("id") or "default")
-        provider_url = provider.get("baseUrl") or provider.get("upstream") or DEFAULTS["upstream"]
-        print(f"\n编辑默认 Provider：{provider_name}")
-        provider["baseUrl"] = prompt_text("上游地址", str(provider_url), validate_upstream)
-        provider["keys"] = configure_keys(provider.get("keys"))
-        config["providers"] = list(existing["providers"])
-        config["providers"][provider_index] = provider
-    else:
-        config["upstream"] = prompt_text("上游地址", str(current["upstream"]), validate_upstream)
     config["cooldownMs"] = prompt_number("冷却时间（毫秒）", current["cooldownMs"], minimum=0)
     config["blacklistThreshold"] = prompt_number("累计失败黑名单阈值（0 表示禁用）", current["blacklistThreshold"], minimum=0)
     config["balanceRefreshMs"] = prompt_number("余额刷新间隔（毫秒，0 表示禁用）", current["balanceRefreshMs"], minimum=0)
     config["maxRetries"] = prompt_number("每次请求最大重试数", current["maxRetries"], minimum=0)
     config["timeoutMs"] = prompt_number("上游超时（毫秒，0 表示不限）", current["timeoutMs"], minimum=0)
     config["maxBodyBytes"] = prompt_number("请求体上限（字节）", current["maxBodyBytes"], minimum=1)
-    if not isinstance(existing.get("providers"), list):
-        config["keys"] = configure_keys(current.get("keys"))
+    provider_index, provider = default_provider_entry(config)
+    provider = dict(provider)
+    provider_name = str(provider.get("name") or provider.get("id") or "default")
+    provider_url = provider.get("baseUrl") or provider.get("upstream") or DEFAULTS["upstream"]
+    print(f"\n编辑默认 Provider：{provider_name}")
+    provider["baseUrl"] = prompt_text("上游地址", str(provider_url), validate_upstream)
+    provider["keys"] = configure_keys(provider.get("keys"))
+    config["providers"] = list(config["providers"])
+    config["providers"][provider_index] = provider
     config["token"], generated = configure_token(str(current.get("token") or ""))
+    config = normalize_config(config)
     backup = write_config(path, config)
 
-    if isinstance(config.get("providers"), list):
-        key_count = sum(
-            len(provider.get("keys") or [])
-            for provider in config["providers"]
-            if isinstance(provider, dict)
-        )
-    else:
-        key_count = len(config.get("keys") or [])
+    key_count = sum(
+        len(provider.get("keys") or [])
+        for provider in config["providers"]
+        if isinstance(provider, dict)
+    )
     print(f"\n已写入 {path}（权限 600，{key_count} 个 Key）")
     if backup:
         print(f"原配置备份：{backup}")
@@ -386,7 +448,14 @@ def main() -> int:
     args = parse_args()
     path = args.config.expanduser().resolve()
     try:
-        config = configure(path)
+        existing = load_existing(path)
+        initial = connection_config(existing)
+        if gateway_status(initial) == GATEWAY_RUNNING:
+            gateway_url = local_gateway_url(initial["host"], initial["port"])
+            print(f"检测到网关已在运行：{gateway_url}/")
+            print("Provider 请通过状态面板管理；修改离线配置前请先停止网关。")
+            return 0
+        config = configure(path, existing)
         if not args.no_ui:
             run_ui_build()
         if not args.no_codex and confirm("同步配置到 Codex CLI", True):

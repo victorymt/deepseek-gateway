@@ -402,6 +402,46 @@ test('provider API masks secrets, persists atomically, and applies new aliases l
   }
 });
 
+test('provider API does not persist key overrides from the environment', async () => {
+  const config = multiProviderConfig();
+  const gw = await startGateway('', [], { DEEPSEEK_KEYS: 'runtime=sk-runtime-only-ok' }, config, { keysArg: false });
+  try {
+    const response = await fetch(`${gw.base}/api/providers/alpha`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ name: 'Must Not Persist' }),
+    });
+    assert.equal(response.status, 409);
+    assert.match(await response.text(), /DEEPSEEK_KEYS/);
+
+    const persisted = fs.readFileSync(gw.configPath, 'utf8');
+    assert.ok(!persisted.includes('sk-runtime-only-ok'));
+    assert.equal(JSON.parse(persisted).providers[0].name, 'Alpha');
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('provider API persists file values instead of scalar runtime overrides', async () => {
+  const config = multiProviderConfig({ maxRetries: 0, customField: { keep: true } });
+  const gw = await startGateway('', [], { DS_MAX_RETRIES: '7' }, config, { keysArg: false });
+  try {
+    const response = await fetch(`${gw.base}/api/providers/beta`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ name: 'Beta Updated' }),
+    });
+    assert.equal(response.status, 200, await response.text());
+
+    const persisted = JSON.parse(fs.readFileSync(gw.configPath, 'utf8'));
+    assert.equal(persisted.maxRetries, 0);
+    assert.deepEqual(persisted.customField, { keep: true });
+    assert.equal(persisted.providers.find(provider => provider.id === 'beta').name, 'Beta Updated');
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('model discovery proxies OpenAI-compatible endpoints and normalizes upstream model ids', async () => {
   const upstreamPort = await freePort();
   const requests = [];
@@ -988,13 +1028,18 @@ test('interactive configure writes a validated private config', () => {
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.equal(config.schemaVersion, 2);
   assert.equal(config.port, 8790);
   assert.equal(config.host, '127.0.0.1');
-  assert.equal(config.upstream, 'https://api.deepseek.com');
+  assert.equal(config.defaultProvider, 'deepseek');
+  assert.equal(config.defaultModel, 'deepseek--v4-flash');
+  assert.equal(config.upstream, undefined);
+  assert.equal(config.keys, undefined);
   assert.equal(config.blacklistThreshold, 3);
   assert.equal(config.balanceRefreshMs, 300000);
   assert.equal(config.token, 'gateway-secret');
-  assert.deepEqual(config.keys, [
+  assert.equal(config.providers[0].baseUrl, 'https://api.deepseek.com');
+  assert.deepEqual(config.providers[0].keys, [
     { name: 'primary', key: 'sk-test-secret', weight: 2 },
   ]);
   assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
@@ -1012,7 +1057,7 @@ test('interactive configure writes a validated private config', () => {
   ], { input: keepAnswers, encoding: 'utf8' });
   assert.equal(second.status, 0, second.stderr || second.stdout);
   const kept = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  assert.deepEqual(kept.keys, config.keys);
+  assert.deepEqual(kept.providers[0].keys, config.providers[0].keys);
   assert.equal(kept.token, 'gateway-secret');
   const backups = fs.readdirSync(path.join(tmp, '.gateway-backups'));
   assert.equal(backups.length, 1);

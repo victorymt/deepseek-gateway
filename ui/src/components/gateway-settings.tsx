@@ -24,10 +24,8 @@ import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
-import type {
-  GatewaySettingField,
-  GatewaySettings,
-} from "@/gateway-types"
+import type { GatewaySettingField, GatewaySettings } from "@/gateway-types"
+import { apiRequest } from "@/lib/api-request"
 
 type Draft = Record<GatewaySettingField, string> & {
   token: string
@@ -71,7 +69,8 @@ const copy = {
     readOnly: "Create a valid config file before changing settings.",
     readOnlyTitle: "Settings are read-only",
     saved: "Settings saved",
-    savedDescription: "Runtime values were reconciled with the saved configuration.",
+    savedDescription:
+      "Runtime values were reconciled with the saved configuration.",
     failed: "Request failed",
     save: "Save settings",
     refresh: "Refresh settings",
@@ -137,25 +136,6 @@ function draftFromSettings(settings: GatewaySettings): Draft {
   }
 }
 
-async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    ...init,
-    headers: {
-      accept: "application/json",
-      ...(init?.body ? { "content-type": "application/json" } : {}),
-      ...init?.headers,
-    },
-  })
-  const payload = (await response.json().catch(() => ({}))) as {
-    error?: { message?: string }
-  }
-  if (!response.ok) {
-    throw new Error(payload.error?.message || `HTTP ${response.status}`)
-  }
-  return payload as T
-}
-
 export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
   const t = copy[locale]
   const [settings, setSettings] = useState<GatewaySettings | null>(null)
@@ -168,7 +148,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const next = await api<GatewaySettings>("/api/settings")
+      const next = await apiRequest<GatewaySettings>("/api/settings")
       setSettings(next)
       setDraft(draftFromSettings(next))
       setError("")
@@ -202,7 +182,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
       for (const field of numberFields) payload[field] = Number(draft[field])
       if (draft.token) payload.token = draft.token
       if (draft.clearToken) payload.clearToken = true
-      const next = await api<GatewaySettings>("/api/settings", {
+      const next = await apiRequest<GatewaySettings>("/api/settings", {
         method: "PATCH",
         body: JSON.stringify(payload),
       })
@@ -218,12 +198,12 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
 
   function settingField(
     field: GatewaySettingField,
-    options: { min?: number; max?: number; integer?: boolean } = {},
+    options: { min?: number; max?: number; integer?: boolean } = {}
   ) {
     if (!settings) return null
     const source = settings.overrides[field]
     const restartRequired = settings.restartRequired.includes(
-      field as "host" | "port",
+      field as "host" | "port"
     )
     const disabled = !settings.writable || Boolean(source)
     const inputType = field === "host" ? "text" : "number"
@@ -387,9 +367,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
               >
                 <FieldContent>
                   <FieldTitle>{t.clearToken}</FieldTitle>
-                  <FieldDescription>
-                    {t.clearTokenDescription}
-                  </FieldDescription>
+                  <FieldDescription>{t.clearTokenDescription}</FieldDescription>
                 </FieldContent>
                 <Switch
                   checked={draft.clearToken}

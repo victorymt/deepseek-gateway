@@ -65,6 +65,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import type { Provider, ProviderConfig } from "@/gateway-types"
+import { apiRequest } from "@/lib/api-request"
 
 type ModelDraft = { id: string; name: string; upstreamModel: string }
 type FetchedModel = ModelDraft & { ownedBy: string | null }
@@ -217,25 +218,6 @@ function providerDraft(provider: Provider): ProviderDraft {
   }
 }
 
-async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    ...init,
-    headers: {
-      accept: "application/json",
-      ...(init?.body ? { "content-type": "application/json" } : {}),
-      ...init?.headers,
-    },
-  })
-  const payload = (await response.json().catch(() => ({}))) as {
-    error?: { message?: string }
-  }
-  if (!response.ok) {
-    throw new Error(payload.error?.message || `HTTP ${response.status}`)
-  }
-  return payload as T
-}
-
 export function ProviderManager({ locale }: { locale: Locale }) {
   const t = copy[locale]
   const [config, setConfig] = useState<ProviderConfig | null>(null)
@@ -253,7 +235,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
 
   const refresh = useCallback(async () => {
     try {
-      setConfig(await api<ProviderConfig>("/api/providers"))
+      setConfig(await apiRequest<ProviderConfig>("/api/providers"))
       setError("")
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t.failed)
@@ -299,7 +281,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
           enabled,
         })),
       }
-      const next = await api<ProviderConfig>(
+      const next = await apiRequest<ProviderConfig>(
         editingId
           ? `/api/providers/${encodeURIComponent(editingId)}`
           : "/api/providers",
@@ -318,7 +300,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
     setError("")
     setNotice("")
     try {
-      const next = await api<ProviderConfig>(
+      const next = await apiRequest<ProviderConfig>(
         `/api/providers/${encodeURIComponent(id)}`,
         { method: "PATCH", body: JSON.stringify(payload) }
       )
@@ -331,7 +313,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
   async function deleteProvider(id: string) {
     setError("")
     try {
-      const next = await api<ProviderConfig>(
+      const next = await apiRequest<ProviderConfig>(
         `/api/providers/${encodeURIComponent(id)}`,
         { method: "DELETE" }
       )
@@ -346,7 +328,7 @@ export function ProviderManager({ locale }: { locale: Locale }) {
     setNotice("")
     setError("")
     try {
-      await api(`/api/providers/${encodeURIComponent(id)}/test`, {
+      await apiRequest(`/api/providers/${encodeURIComponent(id)}/test`, {
         method: "POST",
         body: "{}",
       })
@@ -368,10 +350,13 @@ export function ProviderManager({ locale }: { locale: Locale }) {
         ...(editingId ? { providerId: editingId } : {}),
         ...(inlineKey ? { key: inlineKey } : {}),
       }
-      const result = await api<{ models: FetchedModel[] }>("/api/models", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      })
+      const result = await apiRequest<{ models: FetchedModel[] }>(
+        "/api/models",
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      )
       setFetchedModels(result.models)
       if (!result.models.length) setModelFetchError(t.noModelsFound)
     } catch (cause) {

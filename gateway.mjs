@@ -22,6 +22,7 @@ import {
   executeBalanceQuery,
 } from './balance-script.mjs';
 import { buildCodexArtifacts } from './codex-config.mjs';
+import { prepareKeyImport } from './key-import.mjs';
 import {
   DEFAULT_UPSTREAM,
   keyFingerprint,
@@ -1861,6 +1862,29 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
 
   if (parts.length >= 5 && parts[1] === 'providers' && parts[3] === 'keys') {
     const providerId = parts[2];
+    if (parts.length === 5 && parts[4] === 'import' && req.method === 'POST') {
+      const provider = cfg.providers.find(item => item.id === providerId);
+      if (!provider) throw Object.assign(new Error(`provider ${providerId} not found`), { statusCode: 404 });
+      const payload = await readJsonBody(req);
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw Object.assign(new Error('key import payload must be an object'), { statusCode: 400 });
+      }
+      const allowed = new Set(['keysText', 'defaults']);
+      const unknown = Object.keys(payload).filter(field => !allowed.has(field));
+      if (unknown.length) throw Object.assign(new Error(`unknown key import fields: ${unknown.join(', ')}`), { statusCode: 400 });
+      const prepared = managementValidation(
+        () => prepareKeyImport(provider, payload.keysText, payload.defaults),
+      );
+      if (prepared.addedCount > 0) commitProviderKeys(cfg, registry, provider, prepared.keys, 409);
+      const current = publicProviderConfig(cfg).providers.find(item => item.id === providerId);
+      writeJson(res, 200, {
+        addedCount: prepared.addedCount,
+        ignoredCount: prepared.ignoredCount,
+        ignored: prepared.ignored,
+        totalCount: current?.keys.length || provider.keys.length,
+      });
+      return true;
+    }
     const keyName = parts[4];
     const { provider, key } = resolveProviderKey(cfg, providerId, keyName);
 

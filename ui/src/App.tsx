@@ -137,6 +137,24 @@ const translations = {
     actionFailed: "Key action failed",
     balanceRefreshed: "Balance refreshed",
     keyUpdated: "Key updated and applied",
+    importKeys: "Import keys",
+    importKeysTitle: "Import gateway keys",
+    importKeysDescription: (provider: string) =>
+      `Add keys to ${provider} in one batch.`,
+    importText: "Paste text",
+    importFile: "Upload file",
+    importPlaceholder: "One key per line, or name=key / name:key",
+    chooseFile: "Choose TXT or JSON file",
+    importFileHint:
+      "Accepts text files and JSON arrays of strings or key objects.",
+    importFileTooLarge: "The selected file exceeds the 1 MiB limit.",
+    importFileTypeInvalid: "Choose a TXT or JSON file.",
+    importEnabled: "Enable imported keys",
+    importAlwaysTry: "Always try imported keys",
+    importSubmit: "Import keys",
+    importFailed: "Key import failed",
+    importSummary: (added: number, ignored: number) =>
+      `Imported ${added} ${added === 1 ? "key" : "keys"}; ignored ${ignored}.`,
     keyDeleted: "Key deleted",
     keyConnected: (status: number, latencyMs: number) =>
       `Connection succeeded · HTTP ${status} · ${latencyMs} ms`,
@@ -250,6 +268,23 @@ const translations = {
     actionFailed: "密钥操作失败",
     balanceRefreshed: "额度已刷新",
     keyUpdated: "密钥已更新并生效",
+    importKeys: "批量导入",
+    importKeysTitle: "批量导入 Gateway 密钥",
+    importKeysDescription: (provider: string) =>
+      `向 ${provider} 一次添加多个密钥。`,
+    importText: "粘贴文本",
+    importFile: "上传文件",
+    importPlaceholder: "每行一个密钥，也支持 name=key 或 name:key",
+    chooseFile: "选择 TXT 或 JSON 文件",
+    importFileHint: "支持文本文件，以及字符串数组或密钥对象数组。",
+    importFileTooLarge: "所选文件超过 1 MiB 上限。",
+    importFileTypeInvalid: "请选择 TXT 或 JSON 文件。",
+    importEnabled: "启用导入的密钥",
+    importAlwaysTry: "始终尝试导入的密钥",
+    importSubmit: "导入密钥",
+    importFailed: "密钥导入失败",
+    importSummary: (added: number, ignored: number) =>
+      `已导入 ${added} 个密钥，忽略 ${ignored} 个。`,
     keyDeleted: "密钥已删除",
     keyConnected: (status: number, latencyMs: number) =>
       `连接成功 · HTTP ${status} · ${latencyMs} 毫秒`,

@@ -1,10 +1,5 @@
 export type KeyAction =
-  | "toggle"
-  | "alwaysTry"
-  | "test"
-  | "balance"
-  | "weight"
-  | "delete"
+  "toggle" | "alwaysTry" | "test" | "balance" | "weight" | "delete"
 
 export type KeyFeedback = { kind: "success" | "error"; message: string } | null
 
@@ -26,6 +21,21 @@ export type ProviderKeyCopy = {
   alwaysTry: string
   alwaysTryDescription: string
   keyUpdated: string
+  importKeys: string
+  importKeysTitle: string
+  importKeysDescription: (provider: string) => string
+  importText: string
+  importFile: string
+  importPlaceholder: string
+  chooseFile: string
+  importFileHint: string
+  importFileTooLarge: string
+  importFileTypeInvalid: string
+  importEnabled: string
+  importAlwaysTry: string
+  importSubmit: string
+  importFailed: string
+  importSummary: (added: number, ignored: number) => string
   lastEnabledKey: string
   providerSummary: (keys: number, requests: number) => string
   saveWeight: string

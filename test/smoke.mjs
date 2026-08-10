@@ -1016,6 +1016,60 @@ test('adding a key live preserves existing key state and schedules the new key i
   }
 });
 
+test('key import API adds a batch atomically, ignores duplicate secrets, and redacts output', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig({ maxRetries: 0 }), { keysArg: false });
+  try {
+    const response = await fetch(`${gw.base}/api/providers/alpha/keys/import`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        keysText: 'sk-alpha-ok\nimported=sk-imported-ok\nsk-auto-ok',
+        defaults: { weight: 2, enabled: true, alwaysTry: true },
+      }),
+    });
+    const responseText = await response.text();
+    assert.equal(response.status, 200, responseText);
+    assert.ok(!responseText.includes('sk-alpha-ok'));
+    assert.ok(!responseText.includes('sk-imported-ok'));
+    assert.deepEqual(JSON.parse(responseText), {
+      addedCount: 2,
+      ignoredCount: 1,
+      ignored: [{ entry: 1, name: null, reason: 'duplicate-secret' }],
+      totalCount: 3,
+    });
+
+    const health = await gw.health();
+    const alpha = health.providers.find(provider => provider.id === 'alpha');
+    assert.deepEqual(alpha.keys.map(key => key.name), ['alpha-key', 'imported', 'imported-1']);
+    assert.equal(alpha.keys.find(key => key.name === 'imported').alwaysTry, true);
+    assert.equal(alpha.keys.find(key => key.name === 'imported').weight, 2);
+
+    const tested = await fetch(`${gw.base}/api/providers/alpha/keys/imported/test`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: '{}',
+    });
+    assert.equal(tested.status, 200, await tested.text());
+
+    const beforeConflict = fs.readFileSync(gw.configPath, 'utf8');
+    const conflict = await fetch(`${gw.base}/api/providers/alpha/keys/import`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ keysText: 'alpha-key=sk-different\nsk-must-not-persist' }),
+    });
+    assert.equal(conflict.status, 409);
+    assert.match(await conflict.text(), /already exists with a different secret/);
+    assert.equal(fs.readFileSync(gw.configPath, 'utf8'), beforeConflict);
+
+    const persisted = JSON.parse(beforeConflict);
+    const keys = persisted.providers.find(provider => provider.id === 'alpha').keys;
+    assert.deepEqual(keys.map(key => key.name), ['alpha-key', 'imported', 'imported-1']);
+    assert.equal(keys.find(key => key.name === 'imported').key, 'sk-imported-ok');
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('key API updates routing state, tests one key, and deletes live', async () => {
   const config = multiProviderConfig({ maxRetries: 0 });
   config.providers[0].keys.push({

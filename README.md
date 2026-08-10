@@ -77,7 +77,27 @@ cd deepseek-gateway
 - 修改权重。权重必须大于 `0`，保存后立即参与 `inFlight / weight` 调度，无需重启。
 - 删除 Key。最后一个 Key 或最后一个已启用 Key 不能删除；其他 Key 删除后立即从新请求的调度池移除，不会中断正在处理的请求。
 
-添加新 Key 时，进入“Provider 管理”，选择对应 Provider 的编辑按钮，在“密钥”区域添加名称、API Key、权重和启用状态后保存。名称在同一个 Provider 内必须唯一；保存成功后新 Key 会立即出现在“监控面板”中。
+添加单个 Key 时，进入“Provider 管理”，选择对应 Provider 的编辑按钮，在“密钥”区域添加名称、API Key、权重和启用状态后保存。名称在同一个 Provider 内必须唯一；保存成功后新 Key 会立即出现在“监控面板”中。
+
+批量添加时，在“监控面板”对应 Provider 标题右侧选择“批量导入”。可以直接粘贴文本，也可以读取本地 `.txt` 或 `.json` 文件；文件内容只在浏览器中读取，再通过同一个脱敏管理接口提交。文本支持换行、空格、逗号和分号分隔，也支持显式名称：
+
+```text
+sk-key-1
+sk-key-2
+primary=sk-key-3
+backup:sk-key-4
+```
+
+JSON 可以使用字符串数组，也可以为单个 Key 覆盖名称、权重、启用状态和 `alwaysTry`：
+
+```json
+[
+  "sk-key-1",
+  { "name": "backup", "key": "sk-key-2", "weight": 2, "alwaysTry": true }
+]
+```
+
+未命名的 Key 自动使用 `imported-1`、`imported-2` 等不冲突名称。重复 Secret 会被忽略并计数；同名但 Secret 不同会返回 `409`，格式错误返回 `400`。冲突或格式错误时整个批次都不会写入。单次最多导入 500 条，文本或文件内容上限为 1 MiB。
 
 其他面板页签：
 
@@ -407,6 +427,7 @@ node gateway.mjs --config /path/to/keys.json
 - `GET/POST /api/providers`：读取脱敏配置或添加 Provider。
 - `PATCH/DELETE /api/providers/:id`：修改或删除 Provider。
 - `PATCH/DELETE /api/providers/:id/keys/:name`：热更新 Key 的启用状态或权重，或删除 Key。
+- `POST /api/providers/:id/keys/import`：批量解析、去重并原子导入 Key；响应只返回新增数、忽略数和脱敏元数据。
 - `POST /api/providers/:id/keys/:name/test`：使用指定 Key 测试上游连接，包括已停用 Key。
 - `POST /api/providers/:id/keys/:name/balance`：立即刷新指定 Key 的额度并返回新的 Key 状态。
 - `GET/PATCH /api/settings`：读取或修改脱敏的 Gateway 标量设置；响应只返回 `tokenConfigured`，不会返回令牌内容。
@@ -432,7 +453,7 @@ node gateway.mjs --config /path/to/keys.json
 
 ```bash
 npm ci
-node --test test/balance-script.mjs test/config-core.mjs test/gatewayctl.mjs test/smoke.mjs
+node --test test/balance-script.mjs test/config-core.mjs test/gatewayctl.mjs test/key-import.mjs test/smoke.mjs
 python3 -m unittest test/configure_test.py
 npm run lint --prefix ui
 npm run build --prefix ui
@@ -450,4 +471,4 @@ npm run build --prefix ui
 | `-drip` | 分段流式响应 |
 | `-abort` | 流式传输中断 |
 
-测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、重复 secret 拒绝、上游模型发现与 ID 归一化、Responses 与 Chat Completions 双向转换、工具调用和分片 SSE 终止事件、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl`、交互式配置和备份恢复。
+测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、批量解析与原子导入、重复 secret 拒绝、上游模型发现与 ID 归一化、Responses 与 Chat Completions 双向转换、工具调用和分片 SSE 终止事件、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl`、交互式配置和备份恢复。

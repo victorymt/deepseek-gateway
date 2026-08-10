@@ -95,6 +95,17 @@ export type MaskedProviderKey = {
   fingerprint: string
 }
 
+export type KeyImportResult = {
+  addedCount: number
+  ignoredCount: number
+  ignored: Array<{
+    entry: number
+    name: string | null
+    reason: string
+  }>
+  totalCount: number
+}
+
 export type Provider = {
   id: string
   name: string

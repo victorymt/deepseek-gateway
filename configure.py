@@ -182,6 +182,30 @@ def configure_token(existing: str) -> tuple[str, bool]:
     return secrets.token_urlsafe(32), True
 
 
+def default_provider_entry(config: dict) -> tuple[int, dict]:
+    """Return the provider edited by the wizard, selecting a usable default."""
+    providers = config.get("providers")
+    if not isinstance(providers, list) or not providers:
+        raise ValueError("v2 配置必须包含至少一个 Provider")
+
+    requested_id = str(config.get("defaultProvider") or "").strip()
+    if requested_id:
+        for index, provider in enumerate(providers):
+            if isinstance(provider, dict) and str(provider.get("id") or "").strip() == requested_id:
+                if provider.get("enabled", True) is not True:
+                    raise ValueError("defaultProvider 必须指向已启用的 Provider")
+                return index, provider
+        raise ValueError(f"找不到默认 Provider：{requested_id}")
+
+    for index, provider in enumerate(providers):
+        if isinstance(provider, dict) and provider.get("enabled", True) is True:
+            provider_id = str(provider.get("id") or "").strip()
+            if provider_id:
+                config["defaultProvider"] = provider_id
+                return index, provider
+    raise ValueError("v2 配置必须至少启用一个 Provider")
+
+
 def write_config(path: Path, config: dict) -> Path | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     backup = None
@@ -218,14 +242,15 @@ def local_gateway_url(host: str, port: int) -> str:
     return f"http://{target}:{port}"
 
 
-def run_codex_setup(config: dict) -> None:
+def run_codex_setup(config: dict, config_path: Path) -> None:
     env = os.environ.copy()
     env["GATEWAY_URL"] = local_gateway_url(config["host"], config["port"])
-    env["GATEWAY_TOKEN"] = config["token"] or "gateway"
-    env["MODEL"] = prompt_text("Codex 默认模型", env.get("MODEL", "deepseek-v4-flash"))
+    env["GATEWAY_CONFIG"] = str(config_path)
+    env["MODEL"] = prompt_text("Codex 默认模型别名", env.get("MODEL", "deepseek--v4-flash"))
     result = subprocess.run([str(ROOT / "setup-codex.sh")], env=env, check=False)
     if result.returncode:
         raise RuntimeError(f"setup-codex.sh 退出码为 {result.returncode}")
+    print("启动 Codex 前请设置：export DEEPSEEK_GATEWAY_TOKEN='<网关密码>'")
 
 
 def configure(path: Path) -> dict:
@@ -239,18 +264,38 @@ def configure(path: Path) -> dict:
     print("直接回车可接受方括号中的当前值。\n")
     config["port"] = prompt_number("监听端口", current["port"], minimum=1, maximum=65535)
     config["host"] = prompt_text("监听地址", str(current["host"]))
-    config["upstream"] = prompt_text("上游地址", str(current["upstream"]), validate_upstream)
+    if isinstance(existing.get("providers"), list):
+        provider_index, provider = default_provider_entry(config)
+        provider = dict(provider)
+        provider_name = str(provider.get("name") or provider.get("id") or "default")
+        provider_url = provider.get("baseUrl") or provider.get("upstream") or DEFAULTS["upstream"]
+        print(f"\n编辑默认 Provider：{provider_name}")
+        provider["baseUrl"] = prompt_text("上游地址", str(provider_url), validate_upstream)
+        provider["keys"] = configure_keys(provider.get("keys"))
+        config["providers"] = list(existing["providers"])
+        config["providers"][provider_index] = provider
+    else:
+        config["upstream"] = prompt_text("上游地址", str(current["upstream"]), validate_upstream)
     config["cooldownMs"] = prompt_number("冷却时间（毫秒）", current["cooldownMs"], minimum=0)
     config["blacklistThreshold"] = prompt_number("累计失败黑名单阈值（0 表示禁用）", current["blacklistThreshold"], minimum=0)
     config["balanceRefreshMs"] = prompt_number("余额刷新间隔（毫秒，0 表示禁用）", current["balanceRefreshMs"], minimum=0)
     config["maxRetries"] = prompt_number("每次请求最大重试数", current["maxRetries"], minimum=0)
     config["timeoutMs"] = prompt_number("上游超时（毫秒，0 表示不限）", current["timeoutMs"], minimum=0)
     config["maxBodyBytes"] = prompt_number("请求体上限（字节）", current["maxBodyBytes"], minimum=1)
-    config["keys"] = configure_keys(current.get("keys"))
+    if not isinstance(existing.get("providers"), list):
+        config["keys"] = configure_keys(current.get("keys"))
     config["token"], generated = configure_token(str(current.get("token") or ""))
     backup = write_config(path, config)
 
-    print(f"\n已写入 {path}（权限 600，{len(config['keys'])} 个 Key）")
+    if isinstance(config.get("providers"), list):
+        key_count = sum(
+            len(provider.get("keys") or [])
+            for provider in config["providers"]
+            if isinstance(provider, dict)
+        )
+    else:
+        key_count = len(config.get("keys") or [])
+    print(f"\n已写入 {path}（权限 600，{key_count} 个 Key）")
     if backup:
         print(f"原配置备份：{backup}")
     if generated:
@@ -274,7 +319,7 @@ def main() -> int:
     try:
         config = configure(path)
         if not args.no_codex and confirm("同步配置到 Codex CLI", True):
-            run_codex_setup(config)
+            run_codex_setup(config, path)
         if not args.no_start and confirm("立即启动网关", False):
             print("按 Ctrl+C 停止网关。\n")
             return subprocess.call(["node", str(ROOT / "gateway.mjs"), "--config", str(path)])

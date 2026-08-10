@@ -3,10 +3,8 @@ import re
 import sys
 import pathlib
 import json
-import os
 
-config_path, model, provider_id, gateway_url, models_path = sys.argv[1:6]
-gateway_token = os.environ.get('GATEWAY_TOKEN', 'gateway')
+config_path, model, provider_id, gateway_url, models_path, env_key = sys.argv[1:7]
 p = pathlib.Path(config_path)
 lines = p.read_text().splitlines() if p.exists() else []
 
@@ -19,7 +17,7 @@ def is_provider_section(stripped):
     if not (stripped.startswith('[') and stripped.endswith(']')):
         return False
     parts = [p.strip() for p in stripped[1:-1].split('.')]
-    return len(parts) >= 2 and parts[0] == 'model_providers' and parts[1] == provider_id
+    return len(parts) >= 2 and parts[0] == 'model_providers' and parts[1] in {provider_id, 'deepseek'}
 
 
 out = []
@@ -47,20 +45,24 @@ for ln in lines:
 top = [
     f'model = {json.dumps(model, ensure_ascii=False)}',
     f'model_provider = {json.dumps(provider_id, ensure_ascii=False)}',
-    'preferred_auth_method = "apikey"',
-    'forced_login_method = "api"',
     f'model_catalog_json = {json.dumps(models_path, ensure_ascii=False)}',
 ]
+
+gateway_api_url = gateway_url.rstrip('/')
+if not gateway_api_url.endswith('/v1'):
+    gateway_api_url += '/v1'
 
 idx = next((i for i, ln in enumerate(out) if re.match(r'^\s*\[', ln)), len(out))
 new = out[:idx] + top + out[idx:]
 new += [
     '',
     f'[model_providers.{provider_id}]',
-    'name = "deepseek"',
-    f'base_url = {json.dumps(gateway_url, ensure_ascii=False)}',
+    'name = "Multi-Provider Gateway"',
+    f'base_url = {json.dumps(gateway_api_url, ensure_ascii=False)}',
     'wire_api = "responses"',
-    f'experimental_bearer_token = {json.dumps(gateway_token, ensure_ascii=False)}',
+    f'env_key = {json.dumps(env_key, ensure_ascii=False)}',
+    f'env_key_instructions = {json.dumps(f"Set {env_key} to the gateway token.", ensure_ascii=False)}',
     '',
 ]
 p.write_text('\n'.join(new) + '\n')
+p.chmod(0o600)

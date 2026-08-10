@@ -1,7 +1,7 @@
 {
+  "schemaVersion": 2,
   "port": 8787,
   "host": "127.0.0.1",
-  "upstream": "https://api.deepseek.com",
   "cooldownMs": 60000,
   "blacklistThreshold": 3,
   "balanceRefreshMs": 300000,
@@ -9,8 +9,22 @@
   "timeoutMs": 0,
   "maxBodyBytes": 67108864,
   "token": "",
-  "keys": [
-    { "name": "primary", "key": "sk-REPLACE-WITH-YOUR-KEY-1", "weight": 1 },
-    { "name": "backup", "key": "sk-REPLACE-WITH-YOUR-KEY-2", "weight": 1 }
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek--v4-flash",
+  "providers": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com",
+      "enabled": true,
+      "models": [
+        { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash" },
+        { "id": "v4-pro", "name": "V4 Pro", "upstreamModel": "deepseek-v4-pro" }
+      ],
+      "keys": [
+        { "name": "primary", "key": "sk-REPLACE-WITH-YOUR-KEY-1", "weight": 1 },
+        { "name": "backup", "key": "sk-REPLACE-WITH-YOUR-KEY-2", "weight": 1 }
+      ]
+    }
   ]
 }

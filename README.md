@@ -1,25 +1,26 @@
 # deepseek-gateway
 
-本地 DeepSeek 多 Key 网关。它使用一个零依赖 Node.js 进程把多个 DeepSeek API Key 汇聚成统一入口，并提供负载均衡、余额监控、限流冷却、失败黑名单、故障切换、流式透传和状态面板，可直接接入 Codex CLI。
+本地多 Provider Codex 网关。它把多个 OpenAI Responses 兼容上游接入同一个地址，每个 Provider 拥有独立 KeyPool、冷却、失败状态和统计。Codex 只配置一个 Gateway Provider，并可直接通过 `/model` 在 `provider--model` 别名之间切换。
 
 ```text
 Codex / API client
         |
         |  http://127.0.0.1:8787
         v
-gateway.mjs  -- 最少并发 + 权重 + 轮询游标
-        |       429 冷却切换 / 5xx 累计失败拉黑 / 401、402、403 剔除
-        v
-https://api.deepseek.com
+gateway.mjs  -- 根据请求 model 解析 provider--model
+        |
+        +-- DeepSeek KeyPool  -- deepseek--v4-flash
+        +-- OpenRouter KeyPool -- openrouter--claude-sonnet
+        +-- 其他 Responses 兼容 Provider
 ```
 
 ## 运行要求
 
-- Node.js 18 或更新版本
+- Node.js 18 或更新版本；构建 shadcn 状态面板需要 Node.js 20.19+ 或 22.12+，以及 npm
 - Python 3.10 或更新版本，用于交互式配置和 Codex 配置合并；推荐 Python 3.11+
 - Codex CLI，仅在需要接入 Codex 时使用
 
-项目本身没有 npm 依赖，不需要执行 `npm install`。
+网关核心仍是零依赖 Node.js 进程。React/shadcn 状态面板的依赖隔离在 `ui/` 目录中。
 
 ## 快速开始
 
@@ -30,14 +31,27 @@ cd deepseek-gateway
 ./configure.py
 ```
 
+首次运行先构建 shadcn 状态面板：
+
+```bash
+cd ui
+npm ci
+npm run build
+cd ..
+```
+
+如果未构建 `ui/dist`，网关会自动使用内嵌的兼容面板。
+
 向导会依次完成：
 
 1. 配置监听地址、上游、冷却、黑名单阈值、重试、超时和请求体上限。
-2. 隐藏输入一个或多个 DeepSeek API Key，并为每个 Key 设置名称和权重。
+2. 隐藏输入一个或多个 DeepSeek API Key，并为初始 Provider 设置名称和权重。
 3. 可选启用网关访问密码。
 4. 安全写入 `keys.json`。
 5. 可选同步 Codex CLI 配置。
 6. 可选立即启动网关。
+
+启动后可在面板的“Provider 管理”中添加、编辑、测试或删除其他上游。首次通过面板修改时，旧版 `{ upstream, keys }` 配置会以 v2 结构原子写回。
 
 如果向导中没有选择立即启动，运行：
 
@@ -94,23 +108,26 @@ node gateway.mjs --config keys.json
 cp keys.example.json keys.json
 ```
 
-然后编辑 `keys.json`：
+然后编辑 `keys.json`。v2 配置的核心结构如下，完整字段见 `keys.example.json`：
 
 ```json
 {
-  "port": 8787,
-  "host": "127.0.0.1",
-  "upstream": "https://api.deepseek.com",
-  "cooldownMs": 60000,
-  "blacklistThreshold": 3,
-  "balanceRefreshMs": 300000,
-  "maxRetries": 2,
-  "timeoutMs": 0,
-  "maxBodyBytes": 67108864,
-  "token": "",
-  "keys": [
-    { "name": "primary", "key": "sk-你的第一个Key", "weight": 1 },
-    { "name": "backup", "key": "sk-你的第二个Key", "weight": 1 }
+  "schemaVersion": 2,
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek--v4-flash",
+  "providers": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com",
+      "enabled": true,
+      "models": [
+        { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash" }
+      ],
+      "keys": [
+        { "name": "primary", "key": "sk-你的Key", "weight": 1 }
+      ]
+    }
   ]
 }
 ```
@@ -123,7 +140,7 @@ DEEPSEEK_KEYS="main=sk-xxx,backup=sk-yyy" node gateway.mjs
 
 ## 接入 Codex
 
-推荐在 `configure.py` 中选择“同步配置到 Codex CLI”。向导会把网关 URL、模型和网关密码一起传给安装脚本，避免两侧 token 不一致。
+推荐在 `configure.py` 中选择“同步配置到 Codex CLI”，或在面板的“Codex 配置”中预览和下载生成物。
 
 也可以单独运行：
 
@@ -135,20 +152,20 @@ DEEPSEEK_KEYS="main=sk-xxx,backup=sk-yyy" node gateway.mjs
 脚本会备份并合并：
 
 - `~/.codex/config.toml`
-- `~/.codex/models.json`
+- `~/.codex/gateway-models.json`
 
 自定义模型和网关地址：
 
 ```bash
-MODEL="deepseek-v4-pro" \
+MODEL="deepseek--v4-pro" \
 GATEWAY_URL="http://127.0.0.1:8787" \
 ./setup-codex.sh
 ```
 
-如果 `keys.json` 中设置了 `token`，单独执行安装脚本时必须传入相同值：
+生成的 Provider 使用 `env_key`，不会把 Gateway token 或上游 API Key 写进 Codex 配置。启动 Codex 前设置：
 
 ```bash
-GATEWAY_TOKEN="你的网关密码" ./setup-codex.sh
+export DEEPSEEK_GATEWAY_TOKEN="你的网关密码"
 ```
 
 完成后，在任意项目目录运行：
@@ -157,7 +174,7 @@ GATEWAY_TOKEN="你的网关密码" ./setup-codex.sh
 codex
 ```
 
-启动信息应显示 `deepseek-v4-flash` 或配置时选择的模型。恢复最近一次 Codex 配置备份：
+启动信息应显示 `deepseek--v4-flash` 或配置的默认别名。在 Codex 内执行 `/model` 即可切换到其他 Provider 的别名；新增目录项后需要重启一次 Codex 以重新加载 `model_catalog_json`。恢复最近一次 Codex 配置备份：
 
 ```bash
 ./setup-codex.sh --undo
@@ -170,7 +187,7 @@ codex
 ```bash
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"deepseek--v4-flash","messages":[{"role":"user","content":"你好"}]}'
 ```
 
 设置了网关 `token` 时，需要发送 Bearer token：
@@ -179,14 +196,16 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H 'Authorization: Bearer 你的网关密码' \
   -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"deepseek--v4-flash","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-网关会原样转发请求方法、路径和请求体，因此 `/v1/responses`、`/v1/chat/completions` 及其他上游路径均可使用。响应头 `X-Gateway-Key` 表示本次请求由哪个 Key 提供服务。
+网关根据 `model` 精确匹配 `${providerId}--${modelId}`，选定 Provider 后把模型字段改写为 `upstreamModel`。带 `--` 但未命中的别名会返回 `400`；未带前缀的旧模型名仍由 `defaultProvider` 原样转发。响应头 `X-Gateway-Provider`、`X-Gateway-Model` 和 `X-Gateway-Key` 可用于核对路由结果。
 
 ## 调度策略
 
-每个 Key 会维护并发数、成功数、错误数、429 次数、累计失败数、冷却截止时间和失效状态。累计失败的处理参考 `gpt-load`：普通业务请求成功不会清零失败数，达到阈值后将 Key 永久移出当前进程的调度池。
+每个 Provider 的 KeyPool 分别维护并发数、成功数、错误数、429 次数、累计失败数、冷却截止时间和失效状态。同名上游模型不会共享 Key、冷却或失败状态。
+
+在面板中编辑 Provider 并添加 Key 后，新 Key 会立即加入正在运行的调度池，无需重启网关。未改变的 Key 按 secret 指纹复用原状态，因此改名或调整权重不会清空其统计、冷却、失效状态或余额；删除 Key 也不会中断已经使用它的请求。修改 Provider 的 `baseUrl` 时，新请求立即切换到新上游，旧 runtime 会等待进行中的响应（包括 SSE 长流）结束后再释放连接。
 
 当上游为 `api.deepseek.com` 时，网关启动后会立即通过 DeepSeek `/user/balance` 查询每个 Key 的余额，并按 `balanceRefreshMs` 在后台刷新。其他自定义或 OpenAI 兼容上游不会发起余额请求。查询失败只记录在面板和 `/health` 中，不计入 Key 的业务失败次数；设置为 `0` 可禁用余额查询。
 
@@ -204,14 +223,17 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 ## 配置参考
 
-标量配置优先级为：命令行 > 环境变量 > `keys.json` > 默认值。来自配置文件、环境变量和命令行的 Key 会合并到同一个池中。
+标量配置优先级为：命令行 > 环境变量 > `keys.json` > 默认值。`--keys`、`DEEPSEEK_KEYS` 和 `--upstream` 作为兼容入口作用于默认 Provider；旧版 `{ upstream, keys }` 配置会在内存中迁移为 `deepseek` Provider。
 
 | JSON 字段 | 命令行 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `port` | `--port` | `DS_GATEWAY_PORT` | `8787` | 监听端口 |
 | `host` | `--host` | - | `127.0.0.1` | 监听地址 |
-| `upstream` | `--upstream` | `DS_UPSTREAM` | `https://api.deepseek.com` | 上游基础 URL |
-| `keys[]` | `--keys` | `DEEPSEEK_KEYS` | - | Key 的 `name`、`key`、`weight` |
+| `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`models`、`keys` 和启用状态 |
+| `defaultProvider` | - | - | 第一个启用项 | 未带别名前缀时使用的 Provider |
+| `defaultModel` | - | - | 默认 Provider 首个模型 | Codex 启动模型别名 |
+| `upstream` | `--upstream` | `DS_UPSTREAM` | `https://api.deepseek.com` | 旧配置/默认 Provider 上游 URL |
+| `keys[]` | `--keys` | `DEEPSEEK_KEYS` | - | 旧配置/默认 Provider Key |
 | `cooldownMs` | `--cooldown-ms` | `DS_COOLDOWN_MS` | `60000` | 429 冷却时间 |
 | `blacklistThreshold` | `--blacklist-threshold` | `DS_BLACKLIST_THRESHOLD` | `3` | 累计失败黑名单阈值；0 表示禁用 |
 | `balanceRefreshMs` | `--balance-refresh-ms` | `DS_BALANCE_REFRESH_MS` | `300000` | Key 余额后台刷新间隔；0 表示禁用 |
@@ -232,15 +254,21 @@ node gateway.mjs --config /path/to/keys.json
 
 ## 面板与鉴权
 
+- 状态面板使用 React、Vite 和 shadcn/ui；生产构建位于 `ui/dist`。
 - `GET /`：状态面板，每 2 秒刷新一次。
 - `GET /health`：JSON 健康状态，适合脚本和监控。
+- `GET/POST /api/providers`：读取脱敏配置或添加 Provider。
+- `PATCH/DELETE /api/providers/:id`：修改或删除 Provider。
+- `POST /api/models`：通过 Provider 的 Base URL 和 Key 获取上游模型列表；支持 `/v1/models`、`/models` 及兼容子路径回退，不会自动写入配置。
+- `POST /api/providers/:id/test`：测试 Provider 连接。
+- `GET /api/codex/config`：生成统一 Codex Provider 和模型目录。
 - `GET /login`：输入网关 `token`，签发 24 小时 HttpOnly、SameSite Cookie。
 - `GET /logout`：清除面板会话。
 
 启用 `token` 后：
 
 - 代理 API 必须使用 `Authorization: Bearer <token>`。
-- 浏览器通过 `/login` 登录后可以访问面板和 `/health`。
+- 浏览器通过 `/login` 登录后可以访问面板、`/health` 和管理 API；写操作同时校验同源。
 - 面板 Cookie 不能调用代理 API。
 - 页面和健康接口不会返回 API Key 内容。
 
@@ -266,4 +294,4 @@ node --test test/smoke.mjs
 | `-drip` | 分段流式响应 |
 | `-abort` | 流式传输中断 |
 
-测试覆盖轮询与并发调度、逐 Key 余额、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、上游中断、token/Cookie 权限隔离、请求体上限、面板脚本与转义、交互式配置、Codex 配置幂等和备份恢复。
+测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、重复 secret 拒绝、上游模型发现与 ID 归一化、切换上游时的请求排空、逐 Key 余额、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、管理 API 脱敏与原子持久化、Codex 动态目录、token/Cookie 权限隔离、请求体上限、交互式配置和备份恢复。

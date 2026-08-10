@@ -37,8 +37,9 @@ async function startGateway(keys, extra = [], env = {}, config = {}, options = {
   const configPath = path.join(runDir, 'keys.json');
   fs.writeFileSync(configPath, JSON.stringify(config));
   const mockArgs = options.mock === false ? [] : ['--mock'];
+  const keyArgs = options.keysArg === false ? [] : ['--keys', keys];
   const child = spawn(process.execPath, [
-    GATEWAY, ...mockArgs, '--config', configPath, '--port', String(port), '--keys', keys, '--quiet', ...extra,
+    GATEWAY, ...mockArgs, '--config', configPath, '--port', String(port), ...keyArgs, '--quiet', ...extra,
   ], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
   let stderr = '';
   child.stderr.on('data', d => { stderr += d; });
@@ -46,7 +47,9 @@ async function startGateway(keys, extra = [], env = {}, config = {}, options = {
   await waitFor(() => fetch(`${base}/health`).then(r => r.ok));
   return {
     base,
+    configPath,
     async health() { return fetch(`${base}/health`).then(r => r.json()); },
+    async providers() { return fetch(`${base}/api/providers`).then(r => r.json()); },
     async chat(body = {}) {
       const res = await fetch(`${base}/v1/chat/completions`, {
         method: 'POST',
@@ -62,6 +65,34 @@ async function startGateway(keys, extra = [], env = {}, config = {}, options = {
       fs.rmSync(runDir, { recursive: true, force: true });
       if (stderr) throw new Error(`gateway stderr: ${stderr}`);
     },
+  };
+}
+
+function multiProviderConfig(overrides = {}) {
+  return {
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--shared',
+    maxRetries: 0,
+    providers: [
+      {
+        id: 'alpha',
+        name: 'Alpha',
+        baseUrl: 'https://alpha.example',
+        enabled: true,
+        models: [{ id: 'shared', name: 'Shared Alpha', upstreamModel: 'same-upstream-model' }],
+        keys: [{ name: 'alpha-key', key: 'sk-alpha-ok', weight: 1 }],
+      },
+      {
+        id: 'beta',
+        name: 'Beta',
+        baseUrl: 'https://beta.example/v1',
+        enabled: true,
+        models: [{ id: 'shared', name: 'Shared Beta', upstreamModel: 'same-upstream-model' }],
+        keys: [{ name: 'beta-key', key: 'sk-beta-ok', weight: 1 }],
+      },
+    ],
+    ...overrides,
   };
 }
 
@@ -217,6 +248,352 @@ test('health endpoint reports totals', async () => {
   }
 });
 
+test('provider-scoped aliases route identical upstream model names without crossing pools', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  try {
+    const alpha = await gw.chat({ model: 'alpha--shared' });
+    assert.equal(alpha.status, 200);
+    assert.equal(alpha.headers.get('x-gateway-provider'), 'alpha');
+    assert.equal(alpha.headers.get('x-gateway-model'), 'alpha--shared');
+    assert.equal(JSON.parse(alpha.text).gateway_key_name, 'alpha-key');
+    assert.equal(JSON.parse(alpha.text).model, 'same-upstream-model');
+
+    const beta = await gw.chat({ model: 'beta--shared' });
+    assert.equal(beta.status, 200);
+    assert.equal(beta.headers.get('x-gateway-provider'), 'beta');
+    assert.equal(beta.headers.get('x-gateway-model'), 'beta--shared');
+    assert.equal(JSON.parse(beta.text).gateway_key_name, 'beta-key');
+
+    const h = await gw.health();
+    assert.equal(h.providers.find(provider => provider.id === 'alpha').total.requests, 1);
+    assert.equal(h.providers.find(provider => provider.id === 'beta').total.requests, 1);
+    assert.equal(h.total.requests, 2);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('provider failure and cooldown state is isolated', async () => {
+  const config = multiProviderConfig();
+  config.providers[0].keys[0].key = 'sk-alpha-429';
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
+  try {
+    assert.equal((await gw.chat({ model: 'alpha--shared' })).status, 429);
+    assert.equal((await gw.chat({ model: 'beta--shared' })).status, 200);
+    const h = await gw.health();
+    const alpha = h.providers.find(provider => provider.id === 'alpha');
+    const beta = h.providers.find(provider => provider.id === 'beta');
+    assert.equal(alpha.keys[0].state, 'cooldown');
+    assert.equal(alpha.total.ratelimited, 1);
+    assert.equal(beta.keys[0].state, 'healthy');
+    assert.equal(beta.total.ratelimited, 0);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('unknown prefixed aliases fail closed while legacy model names use the default provider', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  try {
+    const unknown = await gw.chat({ model: 'missing--shared' });
+    assert.equal(unknown.status, 400);
+    assert.match(unknown.text, /unknown or disabled model alias/);
+    const legacy = await gw.chat({ model: 'same-upstream-model' });
+    assert.equal(legacy.status, 200);
+    assert.equal(legacy.headers.get('x-gateway-provider'), 'alpha');
+    assert.equal(JSON.parse(legacy.text).gateway_key_name, 'alpha-key');
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('provider API masks secrets, persists atomically, and applies new aliases live', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  const secret = 'sk-gamma-super-secret';
+  try {
+    const response = await fetch(`${gw.base}/api/providers`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        id: 'gamma',
+        name: 'Gamma',
+        baseUrl: 'https://gamma.example/v1',
+        enabled: true,
+        models: [{ id: 'shared', name: 'Shared Gamma', upstreamModel: 'same-upstream-model' }],
+        keys: [{ name: 'gamma-key', key: secret, weight: 2 }],
+      }),
+    });
+    assert.equal(response.status, 201);
+    const responseText = await response.text();
+    assert.ok(!responseText.includes(secret));
+    const publicConfig = JSON.parse(responseText);
+    const gamma = publicConfig.providers.find(provider => provider.id === 'gamma');
+    assert.match(gamma.keys[0].maskedKey, /^\*\*\*\*/);
+    assert.equal(gamma.keys[0].key, undefined);
+
+    const routed = await gw.chat({ model: 'gamma--shared' });
+    assert.equal(routed.status, 200);
+    assert.equal(routed.headers.get('x-gateway-provider'), 'gamma');
+    assert.equal(JSON.parse(routed.text).gateway_key_name, 'gamma-key');
+
+    const persisted = JSON.parse(fs.readFileSync(gw.configPath, 'utf8'));
+    assert.equal(persisted.schemaVersion, 2);
+    assert.equal(persisted.providers.find(provider => provider.id === 'gamma').keys[0].key, secret);
+    assert.equal(fs.statSync(gw.configPath).mode & 0o777, 0o600);
+    assert.ok(fs.existsSync(`${gw.configPath}.bak`));
+
+    const crossOrigin = await fetch(`${gw.base}/api/providers/gamma`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: 'https://evil.example' },
+      body: JSON.stringify({ name: 'Compromised' }),
+    });
+    assert.equal(crossOrigin.status, 403);
+
+    const invalid = await fetch(`${gw.base}/api/providers`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ id: 'bad--id' }),
+    });
+    assert.equal(invalid.status, 400);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('model discovery proxies OpenAI-compatible endpoints and normalizes upstream model ids', async () => {
+  const upstreamPort = await freePort();
+  const requests = [];
+  const upstream = http.createServer((req, res) => {
+    requests.push({ path: req.url, authorization: req.headers.authorization });
+    if (req.url === '/anthropic/v1/models') {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
+    if (req.url !== '/v1/models') {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      object: 'list',
+      data: [
+        { id: 'Qwen/Qwen3-235B-A22B-Instruct', owned_by: 'qwen' },
+        { id: 'gpt-4o-mini', owned_by: 'openai' },
+        { id: 'claude/3.5-sonnet', name: 'Claude 3.5 Sonnet' },
+      ],
+    }));
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  const secret = 'sk-model-discovery-secret';
+  try {
+    const response = await fetch(`${gw.base}/api/models`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        baseUrl: `http://127.0.0.1:${upstreamPort}/anthropic`,
+        key: secret,
+      }),
+    });
+    const responseText = await response.text();
+    assert.equal(response.status, 200, responseText);
+    const payload = JSON.parse(responseText);
+    assert.deepEqual(payload.models.map(model => model.upstreamModel), [
+      'claude/3.5-sonnet',
+      'gpt-4o-mini',
+      'Qwen/Qwen3-235B-A22B-Instruct',
+    ]);
+    assert.deepEqual(payload.models.map(model => model.id), [
+      'claude-3-5-sonnet',
+      'gpt-4o-mini',
+      'qwen-qwen3-235b-a22b-instruct',
+    ]);
+    assert.equal(payload.models[2].ownedBy, 'qwen');
+    assert.equal(payload.models[0].name, 'Claude 3.5 Sonnet');
+    assert.ok(!JSON.stringify(payload).includes(secret));
+
+    const providerKeyResponse = await fetch(`${gw.base}/api/models`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ providerId: 'alpha', baseUrl: `http://127.0.0.1:${upstreamPort}/anthropic` }),
+    });
+    assert.equal(providerKeyResponse.status, 200, await providerKeyResponse.text());
+    assert.deepEqual(requests, [
+      { path: '/anthropic/v1/models', authorization: `Bearer ${secret}` },
+      { path: '/v1/models', authorization: `Bearer ${secret}` },
+      { path: '/anthropic/v1/models', authorization: 'Bearer sk-alpha-ok' },
+      { path: '/v1/models', authorization: 'Bearer sk-alpha-ok' },
+    ]);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('adding a key live preserves existing key state and schedules the new key immediately', async () => {
+  const config = multiProviderConfig({ maxRetries: 0 });
+  config.providers[0].keys[0].key = 'sk-alpha-429';
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
+  try {
+    const limited = await gw.chat({ model: 'alpha--shared' });
+    assert.equal(limited.status, 429);
+    const before = await gw.health();
+    const beforeKey = before.providers.find(provider => provider.id === 'alpha').keys[0];
+    assert.equal(beforeKey.state, 'cooldown');
+    assert.equal(beforeKey.ratelimited, 1);
+
+    const response = await fetch(`${gw.base}/api/providers/alpha`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        keys: [
+          { name: 'alpha-renamed', key: 'sk-alpha-429', weight: 2 },
+          { name: 'alpha-fresh', key: 'sk-alpha-fresh', weight: 1 },
+        ],
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+
+    const reconciled = await gw.health();
+    const alpha = reconciled.providers.find(provider => provider.id === 'alpha');
+    const preserved = alpha.keys.find(key => key.name === 'alpha-renamed');
+    const added = alpha.keys.find(key => key.name === 'alpha-fresh');
+    assert.equal(preserved.state, 'cooldown');
+    assert.equal(preserved.ratelimited, 1);
+    assert.equal(preserved.lastUsed, beforeKey.lastUsed);
+    assert.equal(preserved.weight, 2);
+    assert.equal(added.state, 'healthy');
+    assert.equal(added.total, 0);
+    assert.equal(alpha.total.ratelimited, 1);
+
+    const routed = await gw.chat({ model: 'alpha--shared' });
+    assert.equal(routed.status, 200);
+    assert.equal(JSON.parse(routed.text).gateway_key_name, 'alpha-fresh');
+    const after = await gw.health();
+    const afterAlpha = after.providers.find(provider => provider.id === 'alpha');
+    assert.equal(afterAlpha.keys.find(key => key.name === 'alpha-renamed').ratelimited, 1);
+    assert.equal(afterAlpha.keys.find(key => key.name === 'alpha-fresh').success, 1);
+    assert.equal(afterAlpha.total.requests, 2);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('provider update rejects duplicate key secrets without changing the live pool', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  try {
+    const response = await fetch(`${gw.base}/api/providers/alpha`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        keys: [
+          { name: 'alpha-key', key: 'sk-alpha-ok', weight: 1 },
+          { name: 'alpha-copy', key: 'sk-alpha-ok', weight: 1 },
+        ],
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.match(await response.text(), /duplicate key secret in provider alpha/);
+    const health = await gw.health();
+    const alpha = health.providers.find(provider => provider.id === 'alpha');
+    assert.deepEqual(alpha.keys.map(key => key.name), ['alpha-key']);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('changing provider baseUrl drains an active stream before retiring its runtime', async () => {
+  const oldPort = await freePort();
+  const newPort = await freePort();
+  let finishOldStream = null;
+  let oldRequests = 0;
+  let newRequests = 0;
+  const oldUpstream = http.createServer((req, res) => {
+    oldRequests++;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: old-start\n\n');
+    finishOldStream = () => res.end('data: old-end\n\ndata: [DONE]\n\n');
+  });
+  const newUpstream = http.createServer((req, res) => {
+    newRequests++;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ source: 'new-upstream' }));
+  });
+  await Promise.all([
+    new Promise(resolve => oldUpstream.listen(oldPort, '127.0.0.1', resolve)),
+    new Promise(resolve => newUpstream.listen(newPort, '127.0.0.1', resolve)),
+  ]);
+
+  const config = multiProviderConfig({ maxRetries: 0 });
+  config.providers[0].baseUrl = `http://127.0.0.1:${oldPort}`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    const stream = await fetch(`${gw.base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'alpha--shared', stream: true }),
+    });
+    assert.equal(stream.status, 200);
+    const reader = stream.body.getReader();
+    const decoder = new TextDecoder();
+    const first = await reader.read();
+    assert.match(decoder.decode(first.value), /old-start/);
+
+    const updated = await fetch(`${gw.base}/api/providers/alpha`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ baseUrl: `http://127.0.0.1:${newPort}` }),
+    });
+    assert.equal(updated.status, 200, await updated.text());
+
+    const next = await gw.chat({ model: 'alpha--shared' });
+    assert.equal(next.status, 200);
+    assert.deepEqual(JSON.parse(next.text), { source: 'new-upstream' });
+    assert.equal(oldRequests, 1);
+    assert.equal(newRequests, 1);
+
+    finishOldStream();
+    let remainder = '';
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      remainder += decoder.decode(chunk.value, { stream: true });
+    }
+    remainder += decoder.decode();
+    assert.match(remainder, /old-end/);
+  } finally {
+    finishOldStream?.();
+    await gw.stop();
+    await Promise.all([
+      new Promise(resolve => oldUpstream.close(resolve)),
+      new Promise(resolve => newUpstream.close(resolve)),
+    ]);
+  }
+});
+
+test('generated Codex artifacts use one provider, env auth, and unique aliases without secrets', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  try {
+    const response = await fetch(`${gw.base}/api/codex/config`);
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.ok(!text.includes('sk-alpha-ok'));
+    assert.ok(!text.includes('sk-beta-ok'));
+    const artifacts = JSON.parse(text);
+    assert.equal(artifacts.providerId, 'multi-provider-gateway');
+    assert.match(artifacts.configToml, /model_provider = "multi-provider-gateway"/);
+    assert.match(artifacts.configToml, /env_key = "DEEPSEEK_GATEWAY_TOKEN"/);
+    assert.doesNotMatch(artifacts.configToml, /experimental_bearer_token/);
+    assert.equal((artifacts.configToml.match(/\[model_providers\./g) || []).length, 1);
+    const aliases = JSON.parse(artifacts.catalogJson).models.map(model => model.slug);
+    assert.deepEqual(aliases, ['alpha--shared', 'beta--shared']);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('health and dashboard report every key balance', async () => {
   const gw = await startGateway('alice=sk-a-ok,bob=sk-b-ok');
   try {
@@ -234,11 +611,19 @@ test('health and dashboard report every key balance', async () => {
       assert.equal(key.balanceError, '');
     }
     const html = await fetch(`${gw.base}/`).then(r => r.text());
-    assert.match(html, /<th>Balance<\/th>/);
-    assert.match(html, /balanceCell\(k\)/);
-    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
-    assert.ok(script, 'dashboard script must exist');
-    assert.doesNotThrow(() => new Function(script), 'rendered dashboard script must be valid JavaScript');
+    if (html.includes('id="root"')) {
+      const asset = html.match(/src="([^\"]+\.js)"/)?.[1];
+      assert.ok(asset, 'shadcn dashboard bundle must be referenced');
+      const bundle = await fetch(`${gw.base}${asset}`);
+      assert.equal(bundle.status, 200);
+      assert.match(bundle.headers.get('content-type'), /javascript/);
+    } else {
+      assert.match(html, /<th>Balance<\/th>/);
+      assert.match(html, /balanceCell\(k\)/);
+      const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+      assert.ok(script, 'fallback dashboard script must exist');
+      assert.doesNotThrow(() => new Function(script), 'rendered fallback dashboard script must be valid JavaScript');
+    }
   } finally {
     await gw.stop();
   }
@@ -314,6 +699,8 @@ test('token auth: cookie login for dashboard, bearer for proxy', async () => {
 
     const healthNoAuth = await fetch(`${gw.base}/health`);
     assert.equal(healthNoAuth.status, 401);
+    const providersNoAuth = await fetch(`${gw.base}/api/providers`);
+    assert.equal(providersNoAuth.status, 401);
     const wrongLogin = await fetch(`${gw.base}/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -333,6 +720,8 @@ test('token auth: cookie login for dashboard, bearer for proxy', async () => {
 
     const healthCookie = await fetch(`${gw.base}/health`, { headers: { cookie } });
     assert.equal(healthCookie.status, 200);
+    const providersCookie = await fetch(`${gw.base}/api/providers`, { headers: { cookie } });
+    assert.equal(providersCookie.status, 200);
     const shellCookie = await fetch(`${gw.base}/`, { headers: { cookie } });
     assert.equal(shellCookie.status, 200);
 
@@ -426,8 +815,10 @@ test('merge-config preserves codex profiles', async () => {
   assert.match(merged, /model = "gpt-5-fast"/, 'profile model must be preserved');
   assert.match(merged, /\[profiles\.deepseek\]/);
   assert.match(merged, /base_url = "https:\/\/deepseek\.example"/, 'profile deepseek must be preserved');
-  assert.match(merged, /^model = "deepseek-v4-flash"/m, 'top-level model must be replaced');
-  assert.equal((merged.match(/\[model_providers\.deepseek\]/g) || []).length, 1);
+  assert.match(merged, /^model = "deepseek--v4-flash"/m, 'top-level model must be replaced');
+  assert.equal((merged.match(/\[model_providers\.multi-provider-gateway\]/g) || []).length, 1);
+  assert.match(merged, /env_key = "DEEPSEEK_GATEWAY_TOKEN"/);
+  assert.doesNotMatch(merged, /experimental_bearer_token/);
   const validate = spawnSync('python3', ['-c', `
 import sys, tomllib
 with open(sys.argv[1], 'rb') as f: tomllib.load(f)
@@ -458,8 +849,12 @@ test('dashboard escapes key names', async () => {
   try {
     const res = await fetch(`${gw.base}/`);
     const html = await res.text();
-    assert.match(html, /function esc\(/);
-    assert.match(html, /esc\(k\.name\)/);
+    if (html.includes('id="root"')) {
+      assert.ok(!html.includes(evilName), 'dashboard shell must not embed key names');
+    } else {
+      assert.match(html, /function esc\(/);
+      assert.match(html, /esc\(k\.name\)/);
+    }
     const h = await gw.health();
     assert.equal(h.keys[0].name, evilName);
   } finally {
@@ -471,13 +866,16 @@ test('setup script is idempotent and dry-run is pure', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-setup-'));
   const codexDir = path.join(tmp, 'codex');
   fs.mkdirSync(codexDir);
+  const gatewayConfig = path.join(tmp, 'gateway.json');
+  fs.writeFileSync(gatewayConfig, JSON.stringify(multiProviderConfig()));
   const setup = path.join(ROOT, 'setup-codex.sh');
   const runSetup = (args) => spawnSync('bash', [setup, ...args], {
     env: {
       ...process.env,
       CODEX_HOME: codexDir,
       GATEWAY_URL: 'http://127.0.0.1:8787',
-      GATEWAY_TOKEN: 'configured-token',
+      GATEWAY_CONFIG: gatewayConfig,
+      DEEPSEEK_GATEWAY_TOKEN: 'configured-token',
     },
     encoding: 'utf8',
   });
@@ -497,12 +895,16 @@ test('setup script is idempotent and dry-run is pure', async () => {
   assert.equal(second.status, 0, second.stderr);
 
   const merged = fs.readFileSync(configPath, 'utf8');
-  const sectionCount = (merged.match(/\[model_providers\.deepseek\]/g) || []).length;
+  const sectionCount = (merged.match(/\[model_providers\.multi-provider-gateway\]/g) || []).length;
   assert.equal(sectionCount, 1, `expected exactly one provider section: ${merged}`);
   assert.match(merged, /\[mcp_servers\.demo\]/);
-  assert.match(merged, /base_url = "http:\/\/127\.0\.0\.1:8787"/);
-  assert.match(merged, /experimental_bearer_token = "configured-token"/);
-  assert.match(merged, /model = "deepseek-v4-flash"/);
+  assert.match(merged, /base_url = "http:\/\/127\.0\.0\.1:8787\/v1"/);
+  assert.match(merged, /env_key = "DEEPSEEK_GATEWAY_TOKEN"/);
+  assert.doesNotMatch(merged, /experimental_bearer_token/);
+  assert.ok(!merged.includes('configured-token'));
+  assert.match(merged, /model = "alpha--shared"/);
+  const catalog = JSON.parse(fs.readFileSync(path.join(codexDir, 'gateway-models.json'), 'utf8'));
+  assert.deepEqual(catalog.models.map(model => model.slug), ['alpha--shared', 'beta--shared']);
 
   const validate = spawnSync('python3', ['-c', `
 import sys, tomllib

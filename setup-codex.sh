@@ -4,16 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 GATEWAY_URL="${GATEWAY_URL:-http://127.0.0.1:8787}"
-GATEWAY_TOKEN="${GATEWAY_TOKEN:-gateway}"
-MODEL="${MODEL:-deepseek-v4-flash}"
-PROVIDER_ID="deepseek"
+MODEL="${MODEL:-}"
+PROVIDER_ID="multi-provider-gateway"
+ENV_KEY="DEEPSEEK_GATEWAY_TOKEN"
 BACKUP_DIR="$CODEX_DIR/backup-gateway"
 CONFIG="$CODEX_DIR/config.toml"
-MODELS="$CODEX_DIR/models.json"
+MODELS="$CODEX_DIR/gateway-models.json"
+GATEWAY_CONFIG="${GATEWAY_CONFIG:-$SCRIPT_DIR/keys.json}"
+[ -f "$GATEWAY_CONFIG" ] || GATEWAY_CONFIG="$SCRIPT_DIR/keys.example.json"
 
 usage() {
   cat <<EOF
-setup-codex.sh — point Codex CLI at the local DeepSeek multi-key gateway
+setup-codex.sh — point Codex CLI at the local multi-provider gateway
 
 Usage:
   ./setup-codex.sh                install gateway config (backs up existing files)
@@ -22,8 +24,8 @@ Usage:
 
 Env:
   GATEWAY_URL   gateway base URL (default $GATEWAY_URL)
-  GATEWAY_TOKEN bearer token sent to the gateway (default: gateway)
-  MODEL         model id, e.g. deepseek-v4-flash / deepseek-v4-pro (default $MODEL)
+  GATEWAY_CONFIG gateway v2 JSON config (default keys.json)
+  MODEL         optional default model alias (defaults to config defaultModel)
   CODEX_HOME    codex config dir (default ~/.codex)
 EOF
 }
@@ -35,7 +37,7 @@ case "${1:-}" in
   --undo)
     if [ ! -d "$BACKUP_DIR" ]; then echo "no backups found in $BACKUP_DIR"; exit 1; fi
     CONFIG_BACKUP="$(ls -1 "$BACKUP_DIR"/config.toml.* 2>/dev/null | tail -1 || true)"
-    MODELS_BACKUP="$(ls -1 "$BACKUP_DIR"/models.json.* 2>/dev/null | tail -1 || true)"
+    MODELS_BACKUP="$(ls -1 "$BACKUP_DIR"/gateway-models.json.* 2>/dev/null | tail -1 || true)"
     if [ -z "$CONFIG_BACKUP" ] && [ -z "$MODELS_BACKUP" ]; then echo "no backups found"; exit 1; fi
     if [ -n "$CONFIG_BACKUP" ]; then cp "$CONFIG_BACKUP" "$CONFIG"; echo "restored $CONFIG from $CONFIG_BACKUP"; fi
     if [ -n "$MODELS_BACKUP" ]; then cp "$MODELS_BACKUP" "$MODELS"; echo "restored $MODELS from $MODELS_BACKUP"; fi
@@ -46,6 +48,10 @@ esac
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "ERROR: python3 is required for config merging" >&2
+  exit 1
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "ERROR: node is required for model catalog generation" >&2
   exit 1
 fi
 
@@ -68,23 +74,26 @@ if [ -f "$CONFIG" ]; then
   now "backed up config.toml -> $BACKUP_DIR/config.toml.$TS"
 fi
 if [ -f "$MODELS" ]; then
-  run cp "$MODELS" "$BACKUP_DIR/models.json.$TS"
-  now "backed up models.json -> $BACKUP_DIR/models.json.$TS"
+  run cp "$MODELS" "$BACKUP_DIR/gateway-models.json.$TS"
+  now "backed up gateway-models.json -> $BACKUP_DIR/gateway-models.json.$TS"
 fi
 
-if [ ! -f "$MODELS" ] || ! grep -q '"deepseek-v4-flash"' "$MODELS" 2>/dev/null; then
-  python3 -c "import json,sys; json.load(open('$SCRIPT_DIR/codex-models.json'))" || { echo "ERROR: bundled codex-models.json is invalid" >&2; exit 1; }
-  run cp "$SCRIPT_DIR/codex-models.json" "$MODELS"
-  now "wrote $MODELS (deepseek-v4-flash / deepseek-v4-pro catalog)"
+if [ -z "$MODEL" ]; then
+  MODEL="$(node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --print-model)"
+fi
+node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --model "$MODEL"
+if [ -n "$DRY" ]; then
+  echo "[dry-run] node $SCRIPT_DIR/codex-config.mjs --config $GATEWAY_CONFIG --models-path $MODELS --write-catalog $MODELS"
 else
-  echo "kept existing $MODELS (already contains deepseek catalog)"
+  node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --models-path "$MODELS" --write-catalog "$MODELS"
+  chmod 600 "$MODELS"
+  now "wrote $MODELS (provider-scoped model aliases)"
 fi
 
 if [ ! -f "$CONFIG" ]; then
   run touch "$CONFIG"
 fi
-export GATEWAY_TOKEN
-run python3 "$SCRIPT_DIR/merge-config.py" "$CONFIG" "$MODEL" "$PROVIDER_ID" "$GATEWAY_URL" "$MODELS"
+run python3 "$SCRIPT_DIR/merge-config.py" "$CONFIG" "$MODEL" "$PROVIDER_ID" "$GATEWAY_URL" "$MODELS" "$ENV_KEY"
 now "merged gateway config into $CONFIG"
 
 if [ -n "$DRY" ]; then
@@ -108,9 +117,10 @@ cat <<EOF
 
 Done. Next steps:
   1. start the gateway:        node $SCRIPT_DIR/gateway.mjs --config $SCRIPT_DIR/keys.json
-  2. run codex in your project: codex
+  2. set the gateway token:    export $ENV_KEY='<gateway-token>'
+  3. run codex in your project: codex
      startup banner should show "model: $MODEL"
-  3. dashboard:                $GATEWAY_URL/
+  4. dashboard:                $GATEWAY_URL/
 
 To restore your previous codex config: ./setup-codex.sh --undo
 EOF

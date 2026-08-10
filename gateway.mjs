@@ -1954,6 +1954,18 @@ function main() {
       res.end(JSON.stringify({ error: { message: err.message } }));
     });
   });
+  server.once('error', error => {
+    registry.close();
+    if (error.code === 'EADDRINUSE') {
+      console.error(
+        `ERROR: Cannot listen on http://${cfg.host}:${cfg.port}: address already in use. ` +
+        'Stop the existing gateway or choose another port with --port <port>.',
+      );
+    } else {
+      console.error(`ERROR: Cannot start gateway on ${cfg.host}:${cfg.port}: ${error.message}`);
+    }
+    process.exitCode = 1;
+  });
   server.listen(cfg.port, cfg.host, () => {
     const addr = server.address();
     cfg.port = addr.port;

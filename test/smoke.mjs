@@ -22,6 +22,36 @@ function freePort() {
   });
 }
 
+test('reports an occupied listen port without an unhandled error stack', async () => {
+  const blocker = net.createServer();
+  await new Promise((resolve, reject) => {
+    blocker.once('error', reject);
+    blocker.listen(0, '127.0.0.1', resolve);
+  });
+  const port = blocker.address().port;
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-port-'));
+  const configPath = path.join(runDir, 'keys.json');
+  fs.writeFileSync(configPath, '{}');
+
+  try {
+    const result = spawnSync(process.execPath, [
+      GATEWAY,
+      '--mock',
+      '--config', configPath,
+      '--port', String(port),
+      '--keys', 'test=sk-test-ok',
+    ], { cwd: ROOT, encoding: 'utf8', timeout: 5000 });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /address already in use/);
+    assert.match(result.stderr, /--port <port>/);
+    assert.doesNotMatch(result.stderr, /Unhandled 'error' event/);
+  } finally {
+    await new Promise(resolve => blocker.close(resolve));
+    fs.rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
 async function waitFor(fn, timeout = 8000) {
   const start = Date.now();
   for (;;) {

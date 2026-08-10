@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("gateway_configure", ROOT / "configure.py")
+SPEC = importlib.util.spec_from_file_location("gateway_configure", ROOT / "configure_wizard.py")
 configure_module = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(configure_module)

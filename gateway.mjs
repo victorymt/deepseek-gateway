@@ -194,22 +194,27 @@ function loadConfig(opts) {
   if (opts.mock && !hasProviderConfig && !(effective.keys || []).length) {
     effective.keys = [{ name: 'mock', key: 'sk-mock-ok', weight: 1 }];
   }
-  if (process.env.DS_GATEWAY_PORT) effective.port = Number(process.env.DS_GATEWAY_PORT);
-  if (opts.port !== undefined) effective.port = opts.port;
-  if (process.env.DS_GATEWAY_TOKEN) effective.token = process.env.DS_GATEWAY_TOKEN;
-  if (opts.token) effective.token = opts.token;
-  if (process.env.DS_COOLDOWN_MS) effective.cooldownMs = Number(process.env.DS_COOLDOWN_MS);
-  if (opts.cooldownMs !== undefined) effective.cooldownMs = opts.cooldownMs;
-  if (process.env.DS_BREAKER) effective.blacklistThreshold = Number(process.env.DS_BREAKER);
-  if (process.env.DS_BLACKLIST_THRESHOLD) effective.blacklistThreshold = Number(process.env.DS_BLACKLIST_THRESHOLD);
-  if (opts.blacklistThreshold !== undefined) effective.blacklistThreshold = opts.blacklistThreshold;
-  if (process.env.DS_BALANCE_REFRESH_MS) effective.balanceRefreshMs = Number(process.env.DS_BALANCE_REFRESH_MS);
-  if (opts.balanceRefreshMs !== undefined) effective.balanceRefreshMs = opts.balanceRefreshMs;
-  if (process.env.DS_MAX_RETRIES) effective.maxRetries = Number(process.env.DS_MAX_RETRIES);
-  if (opts.maxRetries !== undefined) effective.maxRetries = opts.maxRetries;
-  if (process.env.DS_MAX_BODY_BYTES) effective.maxBodyBytes = Number(process.env.DS_MAX_BODY_BYTES);
-  if (opts.maxBodyBytes !== undefined) effective.maxBodyBytes = opts.maxBodyBytes;
-  if (opts.host) effective.host = opts.host;
+  const scalarOverrides = {};
+  const applyScalarOverride = (field, value, source) => {
+    effective[field] = value;
+    scalarOverrides[field] = source;
+  };
+  if (process.env.DS_GATEWAY_PORT) applyScalarOverride('port', Number(process.env.DS_GATEWAY_PORT), 'DS_GATEWAY_PORT');
+  if (opts.port !== undefined) applyScalarOverride('port', opts.port, '--port');
+  if (process.env.DS_GATEWAY_TOKEN) applyScalarOverride('token', process.env.DS_GATEWAY_TOKEN, 'DS_GATEWAY_TOKEN');
+  if (opts.token) applyScalarOverride('token', opts.token, '--token');
+  if (process.env.DS_COOLDOWN_MS) applyScalarOverride('cooldownMs', Number(process.env.DS_COOLDOWN_MS), 'DS_COOLDOWN_MS');
+  if (opts.cooldownMs !== undefined) applyScalarOverride('cooldownMs', opts.cooldownMs, '--cooldown-ms');
+  if (process.env.DS_BREAKER) applyScalarOverride('blacklistThreshold', Number(process.env.DS_BREAKER), 'DS_BREAKER');
+  if (process.env.DS_BLACKLIST_THRESHOLD) applyScalarOverride('blacklistThreshold', Number(process.env.DS_BLACKLIST_THRESHOLD), 'DS_BLACKLIST_THRESHOLD');
+  if (opts.blacklistThreshold !== undefined) applyScalarOverride('blacklistThreshold', opts.blacklistThreshold, '--blacklist-threshold');
+  if (process.env.DS_BALANCE_REFRESH_MS) applyScalarOverride('balanceRefreshMs', Number(process.env.DS_BALANCE_REFRESH_MS), 'DS_BALANCE_REFRESH_MS');
+  if (opts.balanceRefreshMs !== undefined) applyScalarOverride('balanceRefreshMs', opts.balanceRefreshMs, '--balance-refresh-ms');
+  if (process.env.DS_MAX_RETRIES) applyScalarOverride('maxRetries', Number(process.env.DS_MAX_RETRIES), 'DS_MAX_RETRIES');
+  if (opts.maxRetries !== undefined) applyScalarOverride('maxRetries', opts.maxRetries, '--max-retries');
+  if (process.env.DS_MAX_BODY_BYTES) applyScalarOverride('maxBodyBytes', Number(process.env.DS_MAX_BODY_BYTES), 'DS_MAX_BODY_BYTES');
+  if (opts.maxBodyBytes !== undefined) applyScalarOverride('maxBodyBytes', opts.maxBodyBytes, '--max-body-bytes');
+  if (opts.host) applyScalarOverride('host', opts.host, '--host');
 
   const normalized = normalizeConfig(effective);
   const defaultProvider = normalized.providers.find(provider => provider.id === normalized.defaultProvider);
@@ -233,6 +238,7 @@ function loadConfig(opts) {
   Object.defineProperties(normalized, {
     _persistedConfig: { value: persistedConfig, writable: true },
     _providerOverrides: { value: providerOverrides, writable: true },
+    _scalarOverrides: { value: scalarOverrides, writable: true },
   });
   return normalized;
 }
@@ -625,7 +631,7 @@ class ProviderRegistry {
           || !sameKeyConfig(existing.provider, provider);
         existing.provider = provider;
         existing.settings = this.settings;
-        const keyChanges = existing.pool.reconcile(provider.keys, nextConfig);
+        const keyChanges = existing.pool.reconcile(provider.keys, this.settings);
         if (refreshBalance) this.restartBalanceRefresh(existing);
         if (keyChanges.added || keyChanges.removed) {
           this.log(`provider=${provider.id} keys reconciled added=${keyChanges.added} removed=${keyChanges.removed}`);
@@ -648,6 +654,17 @@ class ProviderRegistry {
     this.settings.upstream = defaultProvider.baseUrl;
     this.settings.keys = defaultProvider.keys;
     this.rebuildAliases();
+  }
+
+  updateSettings(changes) {
+    const refreshBalance = Object.hasOwn(changes, 'balanceRefreshMs')
+      && changes.balanceRefreshMs !== this.settings.balanceRefreshMs;
+    Object.assign(this.settings, changes);
+    for (const runtime of this.entries.values()) {
+      runtime.settings = this.settings;
+      runtime.pool.reconcile(runtime.provider.keys, this.settings);
+      if (refreshBalance) this.restartBalanceRefresh(runtime);
+    }
   }
 
   get(providerId) {
@@ -1171,6 +1188,91 @@ function publicProviderConfig(cfg) {
   };
 }
 
+const SETTING_FIELDS = [
+  'port',
+  'host',
+  'cooldownMs',
+  'blacklistThreshold',
+  'balanceRefreshMs',
+  'maxRetries',
+  'timeoutMs',
+  'maxBodyBytes',
+  'token',
+];
+const HOT_SETTING_FIELDS = SETTING_FIELDS.filter(field => !['port', 'host'].includes(field));
+
+function publicScalarSettings(config) {
+  return {
+    port: config.port,
+    host: config.host,
+    cooldownMs: config.cooldownMs,
+    blacklistThreshold: config.blacklistThreshold,
+    balanceRefreshMs: config.balanceRefreshMs,
+    maxRetries: config.maxRetries,
+    timeoutMs: config.timeoutMs,
+    maxBodyBytes: config.maxBodyBytes,
+    tokenConfigured: Boolean(config.token),
+  };
+}
+
+function publicSettings(cfg) {
+  const persisted = cfg._persistedConfig || cfg;
+  return {
+    writable: Boolean(cfg._persistedConfig),
+    persisted: publicScalarSettings(persisted),
+    effective: publicScalarSettings(cfg),
+    overrides: { ...cfg._scalarOverrides },
+    restartRequired: ['host', 'port'].filter(field => persisted[field] !== cfg[field]),
+  };
+}
+
+function nextSettingsConfig(cfg, payload) {
+  if (!cfg._persistedConfig) {
+    throw Object.assign(
+      new Error('settings are read-only until a valid config file is created'),
+      { statusCode: 409 },
+    );
+  }
+  const allowed = new Set([...SETTING_FIELDS, 'clearToken']);
+  const unknown = Object.keys(payload).filter(field => !allowed.has(field));
+  if (unknown.length) throw new Error(`unknown settings: ${unknown.join(', ')}`);
+  if (Object.hasOwn(payload, 'clearToken') && typeof payload.clearToken !== 'boolean') {
+    throw new Error('clearToken must be a boolean');
+  }
+  if (payload.clearToken && Object.hasOwn(payload, 'token')) {
+    throw new Error('token and clearToken cannot be used together');
+  }
+
+  const changes = {};
+  for (const field of SETTING_FIELDS) {
+    if (!Object.hasOwn(payload, field)) continue;
+    if (field === 'host') {
+      if (typeof payload.host !== 'string' || !payload.host.trim() || payload.host.length > 255) {
+        throw new Error('host must be a non-empty string of at most 255 characters');
+      }
+      changes.host = payload.host.trim();
+    } else if (field === 'token') {
+      if (typeof payload.token !== 'string') throw new Error('token must be a string');
+      changes.token = payload.token;
+    } else {
+      if (typeof payload[field] !== 'number') throw new Error(`${field} must be a number`);
+      changes[field] = payload[field];
+    }
+  }
+  if (payload.clearToken) changes.token = '';
+  return normalizeConfig({ ...serializableConfig(cfg._persistedConfig), ...changes });
+}
+
+function commitSettingsConfig(cfg, registry, next) {
+  persistConfig(cfg.configPath, next);
+  cfg._persistedConfig = normalizeConfig(serializableConfig(next));
+  const hotChanges = {};
+  for (const field of HOT_SETTING_FIELDS) {
+    if (!cfg._scalarOverrides[field]) hotChanges[field] = next[field];
+  }
+  registry.updateSettings(hotChanges);
+}
+
 function nextProviderConfig(cfg, providers, changes = {}) {
   if (cfg._providerOverrides.length) {
     throw Object.assign(
@@ -1297,6 +1399,17 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
 
   if (pathname === '/api/providers' && req.method === 'GET') {
     writeJson(res, 200, publicProviderConfig(cfg));
+    return true;
+  }
+  if (pathname === '/api/settings' && req.method === 'GET') {
+    writeJson(res, 200, publicSettings(cfg));
+    return true;
+  }
+  if (pathname === '/api/settings' && req.method === 'PATCH') {
+    const payload = await readJsonBody(req);
+    const next = managementValidation(() => nextSettingsConfig(cfg, payload));
+    commitSettingsConfig(cfg, registry, next);
+    writeJson(res, 200, publicSettings(cfg));
     return true;
   }
   if (pathname === '/api/providers' && req.method === 'POST') {

@@ -146,11 +146,11 @@ fi
 cat <<EOF
 
 Done. Next steps:
-  1. start the gateway:        node $SCRIPT_DIR/gateway.mjs --config $SCRIPT_DIR/keys.json
+  1. start the gateway:        $SCRIPT_DIR/gatewayctl start --config $GATEWAY_CONFIG
   2. set the gateway token:    export $ENV_KEY='<gateway-token>'
   3. run codex in your project: codex
      startup banner should show "model: $MODEL"
   4. dashboard:                $GATEWAY_URL/
 
-To restore your previous codex config: ./setup-codex.sh --undo
+To restore your previous codex config: $SCRIPT_DIR/gatewayctl codex --undo
 EOF

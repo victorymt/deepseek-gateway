@@ -8,11 +8,13 @@ import {
   MoonIcon,
   ServerCogIcon,
   ServerCrashIcon,
+  Settings2Icon,
   SunIcon,
   TerminalSquareIcon,
 } from "lucide-react"
 
 import { CodexSetup } from "@/components/codex-setup"
+import { GatewaySettingsPanel } from "@/components/gateway-settings"
 import { useLanguage, type Locale } from "@/components/language-provider"
 import { ProviderManager } from "@/components/provider-manager"
 import { useTheme } from "@/components/theme-provider"
@@ -80,6 +82,7 @@ const translations = {
     navigation: {
       dashboard: "Dashboard",
       providers: "Providers",
+      settings: "Settings",
       codex: "Codex setup",
     },
     connection: {
@@ -160,6 +163,7 @@ const translations = {
     navigation: {
       dashboard: "监控面板",
       providers: "Provider 管理",
+      settings: "Gateway 设置",
       codex: "Codex 配置",
     },
     connection: {
@@ -579,18 +583,38 @@ function Dashboard({
         )}
 
         <Tabs defaultValue="dashboard" className="flex flex-col gap-5">
-          <TabsList variant="line">
-            <TabsTrigger value="dashboard">
+          <TabsList variant="line" className="w-full justify-start overflow-x-auto">
+            <TabsTrigger
+              value="dashboard"
+              aria-label={t.navigation.dashboard}
+              title={t.navigation.dashboard}
+            >
               <LayoutDashboardIcon data-icon="inline-start" />
-              {t.navigation.dashboard}
+              <span className="hidden sm:inline">{t.navigation.dashboard}</span>
             </TabsTrigger>
-            <TabsTrigger value="providers">
+            <TabsTrigger
+              value="providers"
+              aria-label={t.navigation.providers}
+              title={t.navigation.providers}
+            >
               <ServerCogIcon data-icon="inline-start" />
-              {t.navigation.providers}
+              <span className="hidden sm:inline">{t.navigation.providers}</span>
             </TabsTrigger>
-            <TabsTrigger value="codex">
+            <TabsTrigger
+              value="settings"
+              aria-label={t.navigation.settings}
+              title={t.navigation.settings}
+            >
+              <Settings2Icon data-icon="inline-start" />
+              <span className="hidden sm:inline">{t.navigation.settings}</span>
+            </TabsTrigger>
+            <TabsTrigger
+              value="codex"
+              aria-label={t.navigation.codex}
+              title={t.navigation.codex}
+            >
               <TerminalSquareIcon data-icon="inline-start" />
-              {t.navigation.codex}
+              <span className="hidden sm:inline">{t.navigation.codex}</span>
             </TabsTrigger>
           </TabsList>
 
@@ -749,6 +773,9 @@ function Dashboard({
           </TabsContent>
           <TabsContent value="providers" className="pt-2">
             <ProviderManager locale={locale} />
+          </TabsContent>
+          <TabsContent value="settings" className="pt-2">
+            <GatewaySettingsPanel locale={locale} />
           </TabsContent>
           <TabsContent value="codex" className="pt-2">
             <CodexSetup locale={locale} />

@@ -92,10 +92,11 @@ async function startGateway(keys, extra = [], env = {}, config = {}, options = {
     configPath,
     async health() { return fetch(`${base}/health`).then(r => r.json()); },
     async providers() { return fetch(`${base}/api/providers`).then(r => r.json()); },
-    async chat(body = {}) {
+    async settings(init) { return fetch(`${base}/api/settings`, init); },
+    async chat(body = {}, headers = {}) {
       const res = await fetch(`${base}/v1/chat/completions`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...headers },
         body: JSON.stringify({ model: 'deepseek-v4-flash', ...body }),
       });
       const text = await res.text();
@@ -437,6 +438,154 @@ test('provider API persists file values instead of scalar runtime overrides', as
     assert.equal(persisted.maxRetries, 0);
     assert.deepEqual(persisted.customField, { keep: true });
     assert.equal(persisted.providers.find(provider => provider.id === 'beta').name, 'Beta Updated');
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('settings API redacts tokens and applies runtime settings live', async () => {
+  const config = multiProviderConfig({
+    cooldownMs: 60000,
+    maxRetries: 0,
+    token: 'stored-gateway-secret',
+  });
+  config.providers[0].keys = [
+    { name: 'limited', key: 'sk-alpha-429', weight: 1 },
+    { name: 'healthy', key: 'sk-alpha-ok', weight: 1 },
+  ];
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
+  const auth = { authorization: 'Bearer stored-gateway-secret' };
+  try {
+    const initial = await gw.settings({ headers: auth });
+    const initialText = await initial.text();
+    assert.equal(initial.status, 200);
+    assert.ok(!initialText.includes('stored-gateway-secret'));
+    const initialSettings = JSON.parse(initialText);
+    assert.equal(initialSettings.persisted.tokenConfigured, true);
+    assert.equal(initialSettings.effective.tokenConfigured, true);
+    assert.equal(initialSettings.persisted.token, undefined);
+
+    const updated = await gw.settings({
+      method: 'PATCH',
+      headers: { ...auth, 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ cooldownMs: 4000, maxRetries: 1, timeoutMs: 2500 }),
+    });
+    const updatedText = await updated.text();
+    assert.equal(updated.status, 200, updatedText);
+    const settings = JSON.parse(updatedText);
+    assert.equal(settings.effective.cooldownMs, 4000);
+    assert.equal(settings.effective.maxRetries, 1);
+    assert.equal(settings.effective.timeoutMs, 2500);
+
+    const routed = await gw.chat({ model: 'alpha--shared' }, auth);
+    assert.equal(routed.status, 200);
+    assert.equal(JSON.parse(routed.text).gateway_key_name, 'healthy');
+    const health = await fetch(`${gw.base}/health`, { headers: auth }).then(response => response.json());
+    const limited = health.providers.find(provider => provider.id === 'alpha').keys.find(key => key.name === 'limited');
+    assert.equal(limited.state, 'cooldown');
+    assert.ok(limited.cooldownSec <= 4);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('settings API persists restart-only values and rejects cross-origin writes', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  try {
+    const rejected = await gw.settings({
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: 'https://evil.example' },
+      body: JSON.stringify({ host: '0.0.0.0' }),
+    });
+    assert.equal(rejected.status, 403);
+
+    const response = await gw.settings({
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ host: '0.0.0.0', port: 9444, maxBodyBytes: 4096 }),
+    });
+    const responseText = await response.text();
+    assert.equal(response.status, 200, responseText);
+    const settings = JSON.parse(responseText);
+    assert.equal(settings.persisted.host, '0.0.0.0');
+    assert.equal(settings.persisted.port, 9444);
+    assert.equal(settings.effective.host, '127.0.0.1');
+    assert.notEqual(settings.effective.port, 9444);
+    assert.deepEqual(settings.restartRequired.sort(), ['host', 'port']);
+    assert.equal(settings.effective.maxBodyBytes, 4096);
+
+    const persisted = JSON.parse(fs.readFileSync(gw.configPath, 'utf8'));
+    assert.equal(persisted.host, '0.0.0.0');
+    assert.equal(persisted.port, 9444);
+    assert.equal(persisted.maxBodyBytes, 4096);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('settings API reports scalar overrides without persisting their values', async () => {
+  const config = multiProviderConfig({ cooldownMs: 60000, maxRetries: 0 });
+  const gw = await startGateway('', [], {
+    DS_COOLDOWN_MS: '9000',
+    DS_MAX_RETRIES: '7',
+  }, config, { keysArg: false });
+  try {
+    const response = await gw.settings({
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ cooldownMs: 4000, maxRetries: 1, port: 9444 }),
+    });
+    const responseText = await response.text();
+    assert.equal(response.status, 200, responseText);
+    const settings = JSON.parse(responseText);
+    assert.equal(settings.persisted.cooldownMs, 4000);
+    assert.equal(settings.persisted.maxRetries, 1);
+    assert.equal(settings.effective.cooldownMs, 9000);
+    assert.equal(settings.effective.maxRetries, 7);
+    assert.equal(settings.overrides.cooldownMs, 'DS_COOLDOWN_MS');
+    assert.equal(settings.overrides.maxRetries, 'DS_MAX_RETRIES');
+    assert.equal(settings.overrides.port, '--port');
+
+    const persisted = JSON.parse(fs.readFileSync(gw.configPath, 'utf8'));
+    assert.equal(persisted.cooldownMs, 4000);
+    assert.equal(persisted.maxRetries, 1);
+    assert.equal(persisted.port, 9444);
+    assert.ok(!JSON.stringify(persisted).includes('9000'));
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('settings API can set and clear the gateway token without exposing it', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  try {
+    const setToken = await gw.settings({
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ token: 'rotated-gateway-secret' }),
+    });
+    const setText = await setToken.text();
+    assert.equal(setToken.status, 200);
+    assert.ok(!setText.includes('rotated-gateway-secret'));
+    assert.equal(JSON.parse(setText).effective.tokenConfigured, true);
+    assert.equal((await gw.settings()).status, 401);
+
+    const auth = { authorization: 'Bearer rotated-gateway-secret' };
+    const authenticated = await gw.settings({ headers: auth });
+    const authenticatedText = await authenticated.text();
+    assert.equal(authenticated.status, 200);
+    assert.ok(!authenticatedText.includes('rotated-gateway-secret'));
+
+    const cleared = await gw.settings({
+      method: 'PATCH',
+      headers: { ...auth, 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ clearToken: true }),
+    });
+    const clearedText = await cleared.text();
+    assert.equal(cleared.status, 200, clearedText);
+    assert.equal(JSON.parse(clearedText).effective.tokenConfigured, false);
+    assert.equal(JSON.parse(fs.readFileSync(gw.configPath, 'utf8')).token, '');
+    assert.equal((await gw.settings()).status, 200);
   } finally {
     await gw.stop();
   }
@@ -1001,11 +1150,12 @@ with open(sys.argv[1], 'rb') as f: tomllib.load(f)
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('interactive configure writes a validated private config', () => {
+test('interactive configure writes a validated private config', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-configure-'));
   const configPath = path.join(tmp, 'keys.json');
+  const port = await freePort();
   const answers = [
-    '8790',
+    String(port),
     '',
     '',
     '',
@@ -1024,12 +1174,16 @@ test('interactive configure writes a validated private config', () => {
   ].join('\n');
   const result = spawnSync('python3', [
     CONFIGURE, '--config', configPath, '--no-codex', '--no-start',
-  ], { input: answers, encoding: 'utf8' });
+  ], {
+    input: answers,
+    encoding: 'utf8',
+    env: { ...process.env, DS_GATEWAY_PORT: String(port) },
+  });
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   assert.equal(config.schemaVersion, 2);
-  assert.equal(config.port, 8790);
+  assert.equal(config.port, port);
   assert.equal(config.host, '127.0.0.1');
   assert.equal(config.defaultProvider, 'deepseek');
   assert.equal(config.defaultModel, 'deepseek--v4-flash');
@@ -1054,7 +1208,11 @@ test('interactive configure writes a validated private config', () => {
   ].join('\n');
   const second = spawnSync('python3', [
     CONFIGURE, '--config', configPath, '--no-codex', '--no-start',
-  ], { input: keepAnswers, encoding: 'utf8' });
+  ], {
+    input: keepAnswers,
+    encoding: 'utf8',
+    env: { ...process.env, DS_GATEWAY_PORT: String(port) },
+  });
   assert.equal(second.status, 0, second.stderr || second.stdout);
   const kept = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   assert.deepEqual(kept.providers[0].keys, config.providers[0].keys);

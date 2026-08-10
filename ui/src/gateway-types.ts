@@ -83,6 +83,31 @@ export type ProviderConfig = {
   providers: Provider[]
 }
 
+export type GatewaySettingValues = {
+  port: number
+  host: string
+  cooldownMs: number
+  blacklistThreshold: number
+  balanceRefreshMs: number
+  maxRetries: number
+  timeoutMs: number
+  maxBodyBytes: number
+  tokenConfigured: boolean
+}
+
+export type GatewaySettingField = Exclude<
+  keyof GatewaySettingValues,
+  "tokenConfigured"
+>
+
+export type GatewaySettings = {
+  writable: boolean
+  persisted: GatewaySettingValues
+  effective: GatewaySettingValues
+  overrides: Partial<Record<GatewaySettingField | "token", string>>
+  restartRequired: Array<"host" | "port">
+}
+
 export type CodexArtifacts = {
   providerId: string
   envKey: string

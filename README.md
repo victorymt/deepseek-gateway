@@ -28,7 +28,7 @@ gateway.mjs  -- 根据请求 model 解析 provider--model
 
 ```bash
 cd deepseek-gateway
-./configure.py
+./gatewayctl init
 ```
 
 首次运行会由配置脚本自动构建 shadcn 状态面板。也可以手动构建：
@@ -51,12 +51,12 @@ cd deepseek-gateway
 6. 可选同步 Codex CLI 配置。
 7. 检查监听地址：已有可访问的网关则直接复用，端口空闲时可选立即启动。
 
-启动后可在面板的“Provider 管理”中添加、编辑、测试或删除其他上游。手工创建的旧版 `{ upstream, keys }` 配置仍可加载，并会在首次通过面板修改时以 v2 结构原子写回。
+启动后可在面板的“Provider 管理”中添加、编辑、测试或删除其他上游，并在“Gateway 设置”中管理监听参数、运行策略和访问令牌。手工创建的旧版 `{ upstream, keys }` 配置仍可加载，并会在首次通过面板修改时以 v2 结构原子写回。
 
 如果向导中没有选择立即启动，运行：
 
 ```bash
-node gateway.mjs --config keys.json
+./gatewayctl start --config keys.json
 ```
 
 默认地址：
@@ -67,7 +67,7 @@ node gateway.mjs --config keys.json
 ## 交互式配置
 
 ```bash
-./configure.py
+./gatewayctl init
 ```
 
 直接回车会接受当前值。再次运行向导时，可以保留现有 API Key，也可以重新录入全部 Key。
@@ -86,13 +86,13 @@ node gateway.mjs --config keys.json
 自定义配置路径：
 
 ```bash
-./configure.py --config /path/to/keys.json
+./gatewayctl init --config /path/to/keys.json
 ```
 
 只生成网关配置，不接入 Codex，也不询问是否启动：
 
 ```bash
-./configure.py --no-codex --no-start
+./gatewayctl init --no-codex --no-start
 ```
 
 完整选项：
@@ -103,6 +103,21 @@ node gateway.mjs --config keys.json
 --no-start     不询问立即启动网关
 --no-ui        跳过 shadcn 状态面板构建
 ```
+
+旧入口 `./configure.py` 会兼容转发到 `gatewayctl init`。新脚本和自动化应直接使用 `gatewayctl`。
+
+其他运维命令：
+
+```bash
+./gatewayctl validate --config keys.json
+./gatewayctl doctor --config keys.json
+./gatewayctl start --config keys.json --quiet
+./gatewayctl codex --config keys.json --dry-run
+```
+
+- `validate` 使用网关配置核心完成迁移、规范化和完整校验。
+- `doctor` 检查 Node.js、配置、Dashboard 构建和本地网关状态；网关未启动只会报告警告。
+- `start` 和 `codex` 分别向网关进程及 Codex 配置工具转发其余参数。
 
 ## 手工配置
 
@@ -144,14 +159,16 @@ DEEPSEEK_KEYS="main=sk-xxx,backup=sk-yyy" node gateway.mjs
 
 ## 接入 Codex
 
-推荐在 `configure.py` 中选择“同步配置到 Codex CLI”，或在面板的“Codex 配置”中预览和下载生成物。
+推荐在 `gatewayctl init` 中选择“同步配置到 Codex CLI”，或在面板的“Codex 配置”中预览和下载生成物。
 
 也可以单独运行：
 
 ```bash
-./setup-codex.sh --dry-run
-./setup-codex.sh
+./gatewayctl codex --dry-run
+./gatewayctl codex
 ```
+
+`setup-codex.sh` 仍可作为底层兼容入口直接运行。
 
 脚本会备份并合并：
 
@@ -231,6 +248,8 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 环境变量和命令行参数只影响本次运行，不会通过管理 API 回写到 `keys.json`。当 `--keys`、`DEEPSEEK_KEYS`、`--upstream` 或 `DS_UPSTREAM` 覆盖 Provider 配置时，Provider 管理写操作会返回 `409`；移除覆盖并重启后即可恢复写入。这可以避免运行时传入的 Key 被意外持久化。
 
+“Gateway 设置”会显示持久化值、当前生效值和覆盖来源。`cooldownMs`、`blacklistThreshold`、`balanceRefreshMs`、`maxRetries`、`timeoutMs`、`maxBodyBytes` 和 `token` 在没有运行时覆盖时热生效；`host` 和 `port` 保存后需要重启。被命令行或环境变量接管的字段在面板中为只读，覆盖值不会写入配置文件。
+
 | JSON 字段 | 命令行 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `port` | `--port` | `DS_GATEWAY_PORT` | `8787` | 监听端口 |
@@ -265,6 +284,7 @@ node gateway.mjs --config /path/to/keys.json
 - `GET /health`：JSON 健康状态，适合脚本和监控。
 - `GET/POST /api/providers`：读取脱敏配置或添加 Provider。
 - `PATCH/DELETE /api/providers/:id`：修改或删除 Provider。
+- `GET/PATCH /api/settings`：读取或修改脱敏的 Gateway 标量设置；响应只返回 `tokenConfigured`，不会返回令牌内容。
 - `POST /api/models`：通过 Provider 的 Base URL 和 Key 获取上游模型列表；支持 `/v1/models`、`/models` 及兼容子路径回退，不会自动写入配置。
 - `POST /api/providers/:id/test`：测试 Provider 连接。
 - `GET /api/codex/config`：生成统一 Codex Provider 和模型目录。
@@ -285,7 +305,10 @@ node gateway.mjs --config /path/to/keys.json
 运行完整测试：
 
 ```bash
-node --test test/smoke.mjs
+node --test test/config-core.mjs test/gatewayctl.mjs test/smoke.mjs
+python3 -m unittest test/configure_test.py
+npm run lint --prefix ui
+npm run build --prefix ui
 ```
 
 测试使用内置 mock 上游，不消耗真实 API Key。Key 后缀可触发不同 mock 行为：
@@ -300,4 +323,4 @@ node --test test/smoke.mjs
 | `-drip` | 分段流式响应 |
 | `-abort` | 流式传输中断 |
 
-测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、重复 secret 拒绝、上游模型发现与 ID 归一化、切换上游时的请求排空、逐 Key 余额、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、管理 API 脱敏与原子持久化、Codex 动态目录、token/Cookie 权限隔离、请求体上限、交互式配置和备份恢复。
+测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、重复 secret 拒绝、上游模型发现与 ID 归一化、切换上游时的请求排空、逐 Key 余额、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl`、交互式配置和备份恢复。

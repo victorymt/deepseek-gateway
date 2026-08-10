@@ -38,6 +38,17 @@ class ConfigureWizardTests(unittest.TestCase):
         )
         connection.close.assert_called_once_with()
 
+    def test_gateway_status_recognizes_legacy_health_response(self):
+        payload = {
+            "status": "ok",
+            "version": "1.0.0",
+            "mock": True,
+            "keys": [],
+            "total": {"requests": 0, "success": 0, "errors": 0},
+        }
+
+        self.assertTrue(configure_module.is_gateway_health(payload))
+
     def test_main_does_not_start_a_second_running_gateway(self):
         args = type("Args", (), {
             "config": Path("/tmp/keys.json"),

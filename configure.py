@@ -247,6 +247,22 @@ def local_gateway_url(host: str, port: int) -> str:
     return f"http://{target}:{port}"
 
 
+def is_gateway_health(payload) -> bool:
+    if not (
+        isinstance(payload, dict)
+        and payload.get("status") == "ok"
+        and isinstance(payload.get("version"), str)
+    ):
+        return False
+    current_shape = isinstance(payload.get("providers"), list)
+    legacy_shape = (
+        isinstance(payload.get("keys"), list)
+        and isinstance(payload.get("total"), dict)
+        and isinstance(payload.get("mock"), bool)
+    )
+    return current_shape or legacy_shape
+
+
 def gateway_status(config: dict) -> str:
     base_url = local_gateway_url(config["host"], config["port"])
     parsed = urlparse(base_url)
@@ -261,12 +277,7 @@ def gateway_status(config: dict) -> str:
         body = response.read(1024 * 1024)
         if response.status == 200:
             payload = json.loads(body)
-            if (
-                isinstance(payload, dict)
-                and payload.get("status") == "ok"
-                and isinstance(payload.get("version"), str)
-                and isinstance(payload.get("providers"), list)
-            ):
+            if is_gateway_health(payload):
                 return GATEWAY_RUNNING
         return GATEWAY_OCCUPIED
     except (OSError, http.client.HTTPException, json.JSONDecodeError, UnicodeDecodeError):

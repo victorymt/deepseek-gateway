@@ -141,7 +141,8 @@ export type GatewaySettings = {
 
 export type CodexArtifacts = {
   providerId: string
-  envKey: string
+  authRequired: boolean
+  envKey: string | null
   defaultModel: string
   gatewayUrl: string
   modelsPath: string

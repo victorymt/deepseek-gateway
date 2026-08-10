@@ -60,6 +60,17 @@ function sessionCookie(token) {
   return `v1.${expiry}.${sig}`;
 }
 
+function setSessionCookie(res, token) {
+  res.setHeader(
+    'set-cookie',
+    `${COOKIE_NAME}=${sessionCookie(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+  );
+}
+
+function clearSessionCookie(res) {
+  res.setHeader('set-cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+}
+
 function cookieValid(cookie, token) {
   const m = /^v1\.(\d+)\.([0-9a-f]{64})$/.exec(cookie || '');
   if (!m) return false;
@@ -1772,6 +1783,10 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
     const payload = await readJsonBody(req);
     const next = managementValidation(() => nextSettingsConfig(cfg, payload));
     commitSettingsConfig(cfg, registry, next);
+    if (Object.hasOwn(payload, 'token') || payload.clearToken === true) {
+      if (cfg.token) setSessionCookie(res, cfg.token);
+      else clearSessionCookie(res);
+    }
     writeJson(res, 200, publicSettings(cfg));
     return true;
   }
@@ -1795,7 +1810,10 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
       throw Object.assign(new Error('complete gateway setup before generating Codex configuration'), { statusCode: 409 });
     }
     const gatewayUrl = `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host}`;
-    const artifacts = buildCodexArtifacts(serializableConfig(cfg), { gatewayUrl });
+    const artifacts = buildCodexArtifacts(serializableConfig(cfg), {
+      gatewayUrl,
+      authRequired: Boolean(cfg.token),
+    });
     writeJson(res, 200, artifacts);
     return true;
   }
@@ -2265,7 +2283,7 @@ async function handleLogin(cfg, req, res) {
     res.end(JSON.stringify({ error: { message: 'invalid token' } }));
     return;
   }
-  res.setHeader('set-cookie', `${COOKIE_NAME}=${sessionCookie(cfg.token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
+  setSessionCookie(res, cfg.token);
   res.writeHead(302, { location: '/' });
   res.end();
 }
@@ -2283,7 +2301,7 @@ async function handleRequest(cfg, registry, req, res, log, startedAt) {
     return;
   }
   if (url === '/logout') {
-    res.setHeader('set-cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+    clearSessionCookie(res);
     res.writeHead(302, { location: '/' });
     res.end();
     return;

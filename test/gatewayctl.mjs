@@ -45,8 +45,8 @@ test('gatewayctl forwards init, start, and codex arguments', () => {
   const explicitStart = commandInvocation('start', ['--config', '/tmp/explicit.json', '--mock'], env);
   assert.deepEqual(explicitStart.args.slice(-3), ['--config', '/tmp/explicit.json', '--mock']);
 
-  const codex = commandInvocation('codex', ['--config', '/tmp/codex.json', '--dry-run'], env);
-  assert.deepEqual(codex.args, ['--dry-run']);
+  const codex = commandInvocation('codex', ['--config', '/tmp/codex.json', '--auth', 'required', '--dry-run'], env);
+  assert.deepEqual(codex.args, ['--auth', 'required', '--dry-run']);
   assert.equal(codex.env.GATEWAY_CONFIG, '/tmp/codex.json');
 });
 

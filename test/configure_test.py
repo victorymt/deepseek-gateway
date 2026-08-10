@@ -107,12 +107,14 @@ class ConfigureWizardTests(unittest.TestCase):
         completed = type("Completed", (), {"returncode": 0})()
 
         with patch.object(configure_module, "prompt_text", return_value="openrouter--sonnet") as prompt, \
-             patch.object(configure_module.subprocess, "run", return_value=completed) as run:
+             patch.object(configure_module.subprocess, "run", return_value=completed) as run, \
+             patch("builtins.print") as output:
             configure_module.run_codex_setup(config, Path("/tmp/keys.json"), skip_ui=True)
 
         command = run.call_args.args[0]
         self.assertEqual(command, [str(ROOT / "setup-codex.sh"), "--skip-ui"])
         prompt.assert_called_once_with("Codex 默认模型别名", "openrouter--sonnet")
+        output.assert_called_with("Gateway 未启用认证，Codex 不需要设置 Token 环境变量。")
 
     def test_legacy_config_migrates_to_v2(self):
         migrated = configure_module.migrate_to_v2({

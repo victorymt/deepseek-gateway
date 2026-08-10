@@ -21,6 +21,7 @@ Usage:
   ./setup-codex.sh                install gateway config (backs up existing files)
   ./setup-codex.sh --build-ui     force rebuild the shadcn dashboard first
   ./setup-codex.sh --skip-ui      skip the dashboard build
+  ./setup-codex.sh --auth MODE    auth mode: auto, required, or none
   ./setup-codex.sh --undo         restore the latest backup
   ./setup-codex.sh --dry-run      show what would be written, change nothing
 
@@ -32,14 +33,28 @@ Env:
 EOF
 }
 
-[ "${1:-}" = "--help" ] && usage && exit 0
-
 DRY=""
 UI_MODE="auto"
-case "${1:-}" in
-  --build-ui) UI_MODE="force" ;;
-  --skip-ui) UI_MODE="skip" ;;
-  --undo)
+AUTH_MODE="auto"
+UNDO=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --help) usage; exit 0 ;;
+    --build-ui) UI_MODE="force"; shift ;;
+    --skip-ui) UI_MODE="skip"; shift ;;
+    --dry-run) DRY=1; shift ;;
+    --auth)
+      [ "$#" -ge 2 ] || { echo "ERROR: --auth requires auto, required, or none" >&2; exit 1; }
+      AUTH_MODE="$2"
+      case "$AUTH_MODE" in auto|required|none) ;; *) echo "ERROR: invalid auth mode: $AUTH_MODE" >&2; exit 1 ;; esac
+      shift 2
+      ;;
+    --undo) UNDO=1; shift ;;
+    *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [ -n "$UNDO" ]; then
     if [ ! -d "$BACKUP_DIR" ]; then echo "no backups found in $BACKUP_DIR"; exit 1; fi
     CONFIG_BACKUP="$(ls -1 "$BACKUP_DIR"/config.toml.* 2>/dev/null | tail -1 || true)"
     MODELS_BACKUP="$(ls -1 "$BACKUP_DIR"/gateway-models.json.* 2>/dev/null | tail -1 || true)"
@@ -47,9 +62,7 @@ case "${1:-}" in
     if [ -n "$CONFIG_BACKUP" ]; then cp "$CONFIG_BACKUP" "$CONFIG"; echo "restored $CONFIG from $CONFIG_BACKUP"; fi
     if [ -n "$MODELS_BACKUP" ]; then cp "$MODELS_BACKUP" "$MODELS"; echo "restored $MODELS from $MODELS_BACKUP"; fi
     exit 0
-    ;;
-  --dry-run) DRY=1 ;;
-esac
+fi
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "ERROR: python3 is required for config merging" >&2
@@ -109,13 +122,14 @@ if [ -f "$MODELS" ]; then
 fi
 
 if [ -z "$MODEL" ]; then
-  MODEL="$(node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --print-model)"
+  MODEL="$(node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --print-model)"
 fi
-node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --model "$MODEL"
+AUTH_EFFECTIVE="$(node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --print-auth)"
+node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --model "$MODEL"
 if [ -n "$DRY" ]; then
-  echo "[dry-run] node $SCRIPT_DIR/codex-config.mjs --config $GATEWAY_CONFIG --models-path $MODELS --write-catalog $MODELS"
+  echo "[dry-run] node $SCRIPT_DIR/codex-config.mjs --config $GATEWAY_CONFIG --auth $AUTH_MODE --models-path $MODELS --write-catalog $MODELS"
 else
-  node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --models-path "$MODELS" --write-catalog "$MODELS"
+  node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --models-path "$MODELS" --write-catalog "$MODELS"
   chmod 600 "$MODELS"
   now "wrote $MODELS (provider-scoped model aliases)"
 fi
@@ -123,7 +137,9 @@ fi
 if [ ! -f "$CONFIG" ]; then
   run touch "$CONFIG"
 fi
-run python3 "$SCRIPT_DIR/merge-config.py" "$CONFIG" "$MODEL" "$PROVIDER_ID" "$GATEWAY_URL" "$MODELS" "$ENV_KEY"
+MERGE_ENV_KEY=""
+if [ "$AUTH_EFFECTIVE" = "required" ]; then MERGE_ENV_KEY="$ENV_KEY"; fi
+run python3 "$SCRIPT_DIR/merge-config.py" "$CONFIG" "$MODEL" "$PROVIDER_ID" "$GATEWAY_URL" "$MODELS" "$MERGE_ENV_KEY"
 now "merged gateway config into $CONFIG"
 
 if [ -n "$DRY" ]; then
@@ -143,14 +159,16 @@ else
   echo "WARNING: could not validate config.toml (python3 tomllib needs 3.11+); check the file manually" >&2
 fi
 
-cat <<EOF
-
-Done. Next steps:
-  1. start the gateway:        $SCRIPT_DIR/gatewayctl start --config $GATEWAY_CONFIG
-  2. set the gateway token:    export $ENV_KEY='<gateway-token>'
-  3. run codex in your project: codex
-     startup banner should show "model: $MODEL"
-  4. dashboard:                $GATEWAY_URL/
-
-To restore your previous codex config: $SCRIPT_DIR/gatewayctl codex --undo
-EOF
+echo
+echo "Done. Next steps:"
+echo "  1. start the gateway:        $SCRIPT_DIR/gatewayctl start --config $GATEWAY_CONFIG"
+if [ "$AUTH_EFFECTIVE" = "required" ]; then
+  echo "  2. set the gateway token:    export $ENV_KEY='<gateway-token>'"
+else
+  echo "  2. gateway authentication:   disabled (no token environment variable needed)"
+fi
+echo "  3. run codex in your project: codex"
+echo "     startup banner should show \"model: $MODEL\""
+echo "  4. dashboard:                $GATEWAY_URL/"
+echo
+echo "To restore your previous codex config: $SCRIPT_DIR/gatewayctl codex --undo"

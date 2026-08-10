@@ -60,9 +60,12 @@ new += [
     'name = "Multi-Provider Gateway"',
     f'base_url = {json.dumps(gateway_api_url, ensure_ascii=False)}',
     'wire_api = "responses"',
-    f'env_key = {json.dumps(env_key, ensure_ascii=False)}',
-    f'env_key_instructions = {json.dumps(f"Set {env_key} to the gateway token.", ensure_ascii=False)}',
-    '',
 ]
+if env_key:
+    new += [
+        f'env_key = {json.dumps(env_key, ensure_ascii=False)}',
+        f'env_key_instructions = {json.dumps(f"Set {env_key} to the gateway token.", ensure_ascii=False)}',
+    ]
+new.append('')
 p.write_text('\n'.join(new) + '\n')
 p.chmod(0o600)

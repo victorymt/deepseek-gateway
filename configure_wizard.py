@@ -404,7 +404,10 @@ def run_codex_setup(config: dict, config_path: Path, *, skip_ui: bool = False) -
     result = subprocess.run(command, env=env, check=False)
     if result.returncode:
         raise RuntimeError(f"setup-codex.sh 退出码为 {result.returncode}")
-    print("启动 Codex 前请设置：export DEEPSEEK_GATEWAY_TOKEN='<网关密码>'")
+    if config.get("token"):
+        print("启动 Codex 前请设置：export DEEPSEEK_GATEWAY_TOKEN='<网关密码>'")
+    else:
+        print("Gateway 未启用认证，Codex 不需要设置 Token 环境变量。")
 
 
 def new_setup_config() -> dict:

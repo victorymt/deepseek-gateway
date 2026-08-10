@@ -11,6 +11,7 @@ export { providerModelAlias } from './config-core.mjs';
 
 export const CODEX_PROVIDER_ID = 'multi-provider-gateway';
 export const CODEX_ENV_KEY = 'DEEPSEEK_GATEWAY_TOKEN';
+const AUTH_MODES = new Set(['auto', 'required', 'none']);
 
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_PATH = path.join(PROJECT_DIR, 'codex-models.json');
@@ -37,6 +38,15 @@ function loadTemplates() {
 
 function normalizeCatalogConfig(config) {
   return normalizeConfig(config);
+}
+
+function authRequired(config, options = {}) {
+  if (typeof options.authRequired === 'boolean') return options.authRequired;
+  const mode = options.auth || 'auto';
+  if (!AUTH_MODES.has(mode)) throw new Error(`invalid auth mode: ${mode}`);
+  if (mode === 'required') return true;
+  if (mode === 'none') return false;
+  return Boolean(config.token);
 }
 
 export function buildModelCatalog(config) {
@@ -76,10 +86,10 @@ export function buildModelCatalog(config) {
   return { models };
 }
 
-export function buildCodexToml({ config, gatewayUrl, modelsPath }) {
+export function buildCodexToml({ config, gatewayUrl, modelsPath, authRequired: requireAuth }) {
   config = normalizeCatalogConfig(config);
   const baseUrl = gatewayApiUrl(gatewayUrl);
-  return [
+  const lines = [
     `model = ${tomlString(config.defaultModel)}`,
     `model_provider = ${tomlString(CODEX_PROVIDER_ID)}`,
     `model_catalog_json = ${tomlString(modelsPath)}`,
@@ -88,27 +98,34 @@ export function buildCodexToml({ config, gatewayUrl, modelsPath }) {
     `name = ${tomlString('Multi-Provider Gateway')}`,
     `base_url = ${tomlString(baseUrl)}`,
     'wire_api = "responses"',
-    `env_key = ${tomlString(CODEX_ENV_KEY)}`,
-    `env_key_instructions = ${tomlString(`Set ${CODEX_ENV_KEY} to the gateway token.`)}`,
-    '',
-  ].join('\n');
+  ];
+  if (requireAuth ?? Boolean(config.token)) {
+    lines.push(
+      `env_key = ${tomlString(CODEX_ENV_KEY)}`,
+      `env_key_instructions = ${tomlString(`Set ${CODEX_ENV_KEY} to the gateway token.`)}`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 export function buildCodexArtifacts(config, options = {}) {
   config = normalizeCatalogConfig(config);
   const gatewayUrl = options.gatewayUrl || `http://127.0.0.1:${config.port || 8787}`;
   const modelsPath = options.modelsPath || path.join(os.homedir(), '.codex', 'gateway-models.json');
+  const requireAuth = authRequired(config, options);
   const catalog = buildModelCatalog(config);
   if (!catalog.models.some(model => model.slug === config.defaultModel)) {
     throw new Error(`defaultModel is not present in the generated catalog: ${config.defaultModel}`);
   }
   return {
     providerId: CODEX_PROVIDER_ID,
-    envKey: CODEX_ENV_KEY,
+    authRequired: requireAuth,
+    envKey: requireAuth ? CODEX_ENV_KEY : null,
     defaultModel: config.defaultModel,
     gatewayUrl: gatewayApiUrl(gatewayUrl),
     modelsPath,
-    configToml: buildCodexToml({ config, gatewayUrl, modelsPath }),
+    configToml: buildCodexToml({ config, gatewayUrl, modelsPath, authRequired: requireAuth }),
     catalog,
     catalogJson: `${JSON.stringify(catalog, null, 2)}\n`,
   };
@@ -122,9 +139,14 @@ function parseArgs(argv) {
     else if (flag === '--gateway-url') args.gatewayUrl = argv[++i];
     else if (flag === '--models-path') args.modelsPath = argv[++i];
     else if (flag === '--model') args.model = argv[++i];
+    else if (flag === '--auth') {
+      args.auth = argv[++i];
+      if (!AUTH_MODES.has(args.auth)) throw new Error('--auth requires auto, required, or none');
+    }
     else if (flag === '--write-catalog') args.catalogOutput = argv[++i];
     else if (flag === '--print-toml') args.printToml = true;
     else if (flag === '--print-model') args.printModel = true;
+    else if (flag === '--print-auth') args.printAuth = true;
     else throw new Error(`unknown option: ${flag}`);
   }
   return args;
@@ -137,6 +159,7 @@ function runCli() {
   const artifacts = buildCodexArtifacts(config, {
     gatewayUrl: args.gatewayUrl,
     modelsPath: args.modelsPath || args.catalogOutput,
+    auth: args.auth,
   });
   if (args.model && !artifacts.catalog.models.some(model => model.slug === args.model)) {
     throw new Error(`model alias is not present in the generated catalog: ${args.model}`);
@@ -147,6 +170,7 @@ function runCli() {
   }
   if (args.printToml) process.stdout.write(artifacts.configToml);
   if (args.printModel) process.stdout.write(`${artifacts.defaultModel}\n`);
+  if (args.printAuth) process.stdout.write(`${artifacts.authRequired ? 'required' : 'none'}\n`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

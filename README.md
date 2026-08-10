@@ -270,10 +270,22 @@ GATEWAY_URL="http://127.0.0.1:8787" \
 ./setup-codex.sh
 ```
 
-生成的 Provider 使用 `env_key`，不会把 Gateway token 或上游 API Key 写进 Codex 配置。启动 Codex 前设置：
+Codex 配置会跟随 Gateway 的认证状态生成：Gateway 配置了 `token` 时才写入 `env_key`；未配置时不要求任何 Token 环境变量。无论哪种模式，上游 API Key 和 Gateway token 的内容都不会写进 Codex 配置。
+
+启用 Gateway 认证时，启动 Codex 前设置客户端环境变量，其值必须与 Gateway 当前生效的 Token 一致：
 
 ```bash
 export DEEPSEEK_GATEWAY_TOKEN="你的网关密码"
+```
+
+Gateway 服务端读取的是 `keys.json` 中的 `token`、`DS_GATEWAY_TOKEN` 或启动参数 `--token`；`DEEPSEEK_GATEWAY_TOKEN` 只供 Codex 读取，不会启用 Gateway 服务端认证。Web UI 的“Codex 配置”页会根据当前进程的实际认证状态生成正确配置。
+
+离线运行 `gatewayctl codex` 时，`--auth auto`（默认）根据配置文件中的 `token` 判断。若 Gateway 仅通过 `DS_GATEWAY_TOKEN` 或 `--token` 启动，需要显式指定认证模式：
+
+```bash
+./gatewayctl codex --auth required
+# 明确生成无认证配置：
+./gatewayctl codex --auth none
 ```
 
 完成后，在任意项目目录运行：
@@ -355,7 +367,7 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 
 环境变量和命令行参数只影响本次运行，不会通过管理 API 回写到 `keys.json`。当 `--keys`、`DEEPSEEK_KEYS`、`--upstream` 或 `DS_UPSTREAM` 覆盖 Provider 配置时，Provider 管理写操作会返回 `409`；移除覆盖并重启后即可恢复写入。这可以避免运行时传入的 Key 被意外持久化。
 
-“Gateway 设置”会显示持久化值、当前生效值和覆盖来源。`cooldownMs`、`blacklistThreshold`、`balanceRefreshMs`、`maxRetries`、`timeoutMs`、`maxBodyBytes` 和 `token` 在没有运行时覆盖时热生效；`host` 和 `port` 保存后需要重启。被命令行或环境变量接管的字段在面板中为只读，覆盖值不会写入配置文件。
+“Gateway 设置”会显示持久化值、当前生效值和覆盖来源，认证状态以当前生效值为准。`cooldownMs`、`blacklistThreshold`、`balanceRefreshMs`、`maxRetries`、`timeoutMs`、`maxBodyBytes` 和 `token` 在没有运行时覆盖时热生效；`host` 和 `port` 保存后需要重启。被命令行或环境变量接管的字段在面板中为只读，覆盖值不会写入配置文件。通过面板设置新 Token 后，当前浏览器会自动获得新会话 Cookie；清除 Token 时会同步清除 Cookie。
 
 | JSON 字段 | 命令行 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |

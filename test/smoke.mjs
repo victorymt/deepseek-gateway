@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const GATEWAY = path.join(ROOT, 'gateway.mjs');
+const CODEX_CONFIG = path.join(ROOT, 'codex-config.mjs');
 const CONFIGURE = path.join(ROOT, 'configure.py');
 
 function freePort() {
@@ -868,22 +869,25 @@ test('settings API can set and clear the gateway token without exposing it', asy
     assert.equal(setToken.status, 200);
     assert.ok(!setText.includes('rotated-gateway-secret'));
     assert.equal(JSON.parse(setText).effective.tokenConfigured, true);
+    const setCookie = setToken.headers.get('set-cookie');
+    assert.match(setCookie || '', /dsgw=v1\./);
+    const browserCookie = setCookie.split(';', 1)[0];
     assert.equal((await gw.settings()).status, 401);
 
-    const auth = { authorization: 'Bearer rotated-gateway-secret' };
-    const authenticated = await gw.settings({ headers: auth });
+    const authenticated = await gw.settings({ headers: { cookie: browserCookie } });
     const authenticatedText = await authenticated.text();
     assert.equal(authenticated.status, 200);
     assert.ok(!authenticatedText.includes('rotated-gateway-secret'));
 
     const cleared = await gw.settings({
       method: 'PATCH',
-      headers: { ...auth, 'content-type': 'application/json', origin: gw.base },
+      headers: { cookie: browserCookie, 'content-type': 'application/json', origin: gw.base },
       body: JSON.stringify({ clearToken: true }),
     });
     const clearedText = await cleared.text();
     assert.equal(cleared.status, 200, clearedText);
     assert.equal(JSON.parse(clearedText).effective.tokenConfigured, false);
+    assert.match(cleared.headers.get('set-cookie') || '', /Max-Age=0/);
     assert.equal(JSON.parse(fs.readFileSync(gw.configPath, 'utf8')).token, '');
     assert.equal((await gw.settings()).status, 200);
   } finally {
@@ -1189,7 +1193,7 @@ test('changing provider baseUrl drains an active stream before retiring its runt
   }
 });
 
-test('generated Codex artifacts use one provider, env auth, and unique aliases without secrets', async () => {
+test('generated Codex artifacts omit env auth when the gateway has no token', async () => {
   const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
   try {
     const response = await fetch(`${gw.base}/api/codex/config`);
@@ -1199,14 +1203,60 @@ test('generated Codex artifacts use one provider, env auth, and unique aliases w
     assert.ok(!text.includes('sk-beta-ok'));
     const artifacts = JSON.parse(text);
     assert.equal(artifacts.providerId, 'multi-provider-gateway');
+    assert.equal(artifacts.authRequired, false);
+    assert.equal(artifacts.envKey, null);
     assert.match(artifacts.configToml, /model_provider = "multi-provider-gateway"/);
-    assert.match(artifacts.configToml, /env_key = "DEEPSEEK_GATEWAY_TOKEN"/);
+    assert.doesNotMatch(artifacts.configToml, /env_key/);
     assert.doesNotMatch(artifacts.configToml, /experimental_bearer_token/);
     assert.equal((artifacts.configToml.match(/\[model_providers\./g) || []).length, 1);
     const aliases = JSON.parse(artifacts.catalogJson).models.map(model => model.slug);
     assert.deepEqual(aliases, ['alpha--shared', 'beta--shared']);
   } finally {
     await gw.stop();
+  }
+});
+
+test('generated Codex artifacts use the effective runtime gateway token state', async () => {
+  const gw = await startGateway('', [], { DS_GATEWAY_TOKEN: 'runtime-gateway-secret' }, multiProviderConfig(), { keysArg: false });
+  const auth = { authorization: 'Bearer runtime-gateway-secret' };
+  try {
+    const settingsResponse = await gw.settings({ headers: auth });
+    assert.equal(settingsResponse.status, 200);
+    const settings = await settingsResponse.json();
+    assert.equal(settings.persisted.tokenConfigured, false);
+    assert.equal(settings.effective.tokenConfigured, true);
+    assert.equal(settings.overrides.token, 'DS_GATEWAY_TOKEN');
+
+    const response = await fetch(`${gw.base}/api/codex/config`, { headers: auth });
+    assert.equal(response.status, 200);
+    const artifacts = await response.json();
+    assert.equal(artifacts.authRequired, true);
+    assert.equal(artifacts.envKey, 'DEEPSEEK_GATEWAY_TOKEN');
+    assert.match(artifacts.configToml, /env_key = "DEEPSEEK_GATEWAY_TOKEN"/);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('Codex config auth mode can override offline token detection', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-codex-auth-'));
+  const configPath = path.join(directory, 'keys.json');
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(multiProviderConfig()));
+    const required = spawnSync(process.execPath, [
+      CODEX_CONFIG, '--config', configPath, '--auth', 'required', '--print-toml',
+    ], { encoding: 'utf8' });
+    assert.equal(required.status, 0, required.stderr);
+    assert.match(required.stdout, /env_key = "DEEPSEEK_GATEWAY_TOKEN"/);
+
+    fs.writeFileSync(configPath, JSON.stringify(multiProviderConfig({ token: 'gateway-secret' })));
+    const none = spawnSync(process.execPath, [
+      CODEX_CONFIG, '--config', configPath, '--auth', 'none', '--print-toml',
+    ], { encoding: 'utf8' });
+    assert.equal(none.status, 0, none.stderr);
+    assert.doesNotMatch(none.stdout, /env_key/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -1600,7 +1650,7 @@ test('merge-config preserves codex profiles', async () => {
   assert.match(merged, /base_url = "https:\/\/deepseek\.example"/, 'profile deepseek must be preserved');
   assert.match(merged, /^model = "deepseek--v4-flash"/m, 'top-level model must be replaced');
   assert.equal((merged.match(/\[model_providers\.multi-provider-gateway\]/g) || []).length, 1);
-  assert.match(merged, /env_key = "DEEPSEEK_GATEWAY_TOKEN"/);
+  assert.doesNotMatch(merged, /env_key/);
   assert.doesNotMatch(merged, /experimental_bearer_token/);
   const validate = spawnSync('python3', ['-c', `
 import sys, tomllib
@@ -1650,7 +1700,7 @@ test('setup script is idempotent and dry-run is pure', async () => {
   const codexDir = path.join(tmp, 'codex');
   fs.mkdirSync(codexDir);
   const gatewayConfig = path.join(tmp, 'gateway.json');
-  fs.writeFileSync(gatewayConfig, JSON.stringify(multiProviderConfig()));
+  fs.writeFileSync(gatewayConfig, JSON.stringify(multiProviderConfig({ token: 'gateway-secret' })));
   const setup = path.join(ROOT, 'setup-codex.sh');
   const runSetup = (args) => spawnSync('bash', [setup, ...args], {
     env: {

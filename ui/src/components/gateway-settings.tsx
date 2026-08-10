@@ -6,10 +6,21 @@ import {
   SaveIcon,
   Settings2Icon,
   ShieldCheckIcon,
+  Trash2Icon,
 } from "lucide-react"
 
 import type { Locale } from "@/components/language-provider"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -23,13 +34,11 @@ import {
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
-import { Switch } from "@/components/ui/switch"
 import type { GatewaySettingField, GatewaySettings } from "@/gateway-types"
 import { apiRequest } from "@/lib/api-request"
 
 type Draft = Record<GatewaySettingField, string> & {
   token: string
-  clearToken: boolean
 }
 
 const numberFields: GatewaySettingField[] = [
@@ -60,7 +69,15 @@ const copy = {
     token: "New gateway token",
     tokenPlaceholder: "Leave blank to keep the current token",
     clearToken: "Clear gateway token",
-    clearTokenDescription: "Disable gateway authentication after saving.",
+    clearTokenDescription: "Remove the token stored in the config file.",
+    clearTokenConfirmTitle: "Disable gateway authentication?",
+    clearTokenConfirmDescription:
+      "The persisted gateway token will be removed immediately. Requests will no longer require authentication unless a runtime override is active.",
+    cancel: "Cancel",
+    authFromConfig: "The token stored in the config file is currently active.",
+    authDisabled: "Gateway authentication is currently disabled.",
+    persistedConfigured: "A token is also stored in the config file.",
+    persistedNotConfigured: "No token is stored in the config file.",
     configured: "Configured",
     notConfigured: "Not configured",
     effective: (value: string | number) => `Effective: ${value}`,
@@ -92,7 +109,15 @@ const copy = {
     token: "新的 Gateway 令牌",
     tokenPlaceholder: "留空则保留当前令牌",
     clearToken: "清除 Gateway 令牌",
-    clearTokenDescription: "保存后关闭 Gateway 认证。",
+    clearTokenDescription: "删除配置文件中保存的 Gateway 令牌。",
+    clearTokenConfirmTitle: "关闭 Gateway 认证？",
+    clearTokenConfirmDescription:
+      "持久化的 Gateway 令牌将被立即删除。除非存在运行时覆盖，否则后续请求将不再需要认证。",
+    cancel: "取消",
+    authFromConfig: "配置文件中的 Token 当前正在生效。",
+    authDisabled: "Gateway 当前未启用认证。",
+    persistedConfigured: "配置文件中也保存了 Token。",
+    persistedNotConfigured: "配置文件中没有保存 Token。",
     configured: "已配置",
     notConfigured: "未配置",
     effective: (value: string | number) => `当前生效：${value}`,
@@ -118,7 +143,6 @@ const emptyDraft = (): Draft => ({
   timeoutMs: "",
   maxBodyBytes: "",
   token: "",
-  clearToken: false,
 })
 
 function draftFromSettings(settings: GatewaySettings): Draft {
@@ -132,7 +156,6 @@ function draftFromSettings(settings: GatewaySettings): Draft {
     timeoutMs: String(settings.persisted.timeoutMs),
     maxBodyBytes: String(settings.persisted.maxBodyBytes),
     token: "",
-    clearToken: false,
   }
 }
 
@@ -142,6 +165,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
   const [draft, setDraft] = useState<Draft>(emptyDraft)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [clearDialogOpen, setClearDialogOpen] = useState(false)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState(false)
 
@@ -181,7 +205,6 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
       }
       for (const field of numberFields) payload[field] = Number(draft[field])
       if (draft.token) payload.token = draft.token
-      if (draft.clearToken) payload.clearToken = true
       const next = await apiRequest<GatewaySettings>("/api/settings", {
         method: "PATCH",
         body: JSON.stringify(payload),
@@ -189,6 +212,27 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
       setSettings(next)
       setDraft(draftFromSettings(next))
       setNotice(true)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t.failed)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function clearToken() {
+    if (!settings?.writable || settings.overrides.token) return
+    setSaving(true)
+    setError("")
+    setNotice(false)
+    try {
+      const next = await apiRequest<GatewaySettings>("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ clearToken: true }),
+      })
+      setSettings(next)
+      setDraft(draftFromSettings(next))
+      setNotice(true)
+      setClearDialogOpen(false)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t.failed)
     } finally {
@@ -321,12 +365,12 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
                   {t.token}
                   <Badge
                     variant={
-                      settings.persisted.tokenConfigured
+                      settings.effective.tokenConfigured
                         ? "secondary"
                         : "outline"
                     }
                   >
-                    {settings.persisted.tokenConfigured
+                    {settings.effective.tokenConfigured
                       ? t.configured
                       : t.notConfigured}
                   </Badge>
@@ -345,14 +389,19 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
                   }
                   onChange={(event) => {
                     update("token", event.target.value)
-                    if (event.target.value) update("clearToken", false)
                   }}
                 />
-                {settings.overrides.token && (
-                  <FieldDescription>
-                    {t.overridden(settings.overrides.token)}
-                  </FieldDescription>
-                )}
+                <FieldDescription>
+                  {settings.overrides.token
+                    ? `${t.overridden(settings.overrides.token)} ${
+                        settings.persisted.tokenConfigured
+                          ? t.persistedConfigured
+                          : t.persistedNotConfigured
+                      }`
+                    : settings.effective.tokenConfigured
+                      ? t.authFromConfig
+                      : t.authDisabled}
+                </FieldDescription>
               </Field>
 
               <Field
@@ -369,19 +418,21 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
                   <FieldTitle>{t.clearToken}</FieldTitle>
                   <FieldDescription>{t.clearTokenDescription}</FieldDescription>
                 </FieldContent>
-                <Switch
-                  checked={draft.clearToken}
+                <Button
+                  type="button"
+                  variant="destructive"
                   disabled={
                     !settings.writable ||
                     !settings.persisted.tokenConfigured ||
-                    Boolean(settings.overrides.token)
+                    Boolean(settings.overrides.token) ||
+                    saving
                   }
-                  onCheckedChange={(checked) => {
-                    update("clearToken", checked)
-                    if (checked) update("token", "")
-                  }}
+                  onClick={() => setClearDialogOpen(true)}
                   aria-label={t.clearToken}
-                />
+                >
+                  <Trash2Icon data-icon="inline-start" />
+                  {t.clearToken}
+                </Button>
               </Field>
             </FieldGroup>
           </section>
@@ -398,6 +449,32 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
           </div>
         </form>
       )}
+
+      <AlertDialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t.clearTokenConfirmTitle}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t.clearTokenConfirmDescription}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={saving}>{t.cancel}</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={saving}
+              onClick={() => void clearToken()}
+            >
+              {saving ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <Trash2Icon data-icon="inline-start" />
+              )}
+              {t.clearToken}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   )
 }

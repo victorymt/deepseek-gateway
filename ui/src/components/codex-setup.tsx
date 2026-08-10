@@ -5,7 +5,8 @@ import {
   DownloadIcon,
   FileCode2Icon,
   RefreshCwIcon,
-  TerminalIcon,
+  ShieldCheckIcon,
+  ShieldOffIcon,
 } from "lucide-react"
 
 import type { Locale } from "@/components/language-provider"
@@ -36,7 +37,12 @@ const copy = {
     download: "Download",
     config: "config.toml",
     catalog: "gateway-models.json",
-    environment: "Environment",
+    authEnabled: "Gateway authentication is enabled",
+    authEnabledDescription:
+      "Set this environment variable before starting Codex.",
+    authDisabled: "Gateway authentication is disabled",
+    authDisabledDescription:
+      "Codex can connect without a gateway token environment variable.",
     provider: "Provider",
     defaultModel: "Default model",
     catalogPath: "Catalog path",
@@ -51,7 +57,10 @@ const copy = {
     download: "下载",
     config: "config.toml",
     catalog: "gateway-models.json",
-    environment: "环境变量",
+    authEnabled: "Gateway 已启用认证",
+    authEnabledDescription: "启动 Codex 前请设置以下环境变量。",
+    authDisabled: "Gateway 当前未启用认证",
+    authDisabledDescription: "Codex 无需 Gateway Token 环境变量即可连接。",
     provider: "Provider",
     defaultModel: "默认模型",
     catalogPath: "模型目录路径",
@@ -63,7 +72,9 @@ async function fetchArtifacts() {
     credentials: "same-origin",
     headers: { accept: "application/json" },
   })
-  const payload = (await response.json().catch(() => ({}))) as CodexArtifacts & {
+  const payload = (await response
+    .json()
+    .catch(() => ({}))) as CodexArtifacts & {
     error?: { message?: string }
   }
   if (!response.ok) {
@@ -111,9 +122,10 @@ export function CodexSetup({ locale }: { locale: Locale }) {
     window.setTimeout(() => setNotice(""), 1600)
   }
 
-  const environmentLine = artifacts
-    ? `export ${artifacts.envKey}="<gateway-token>"`
-    : ""
+  const environmentLine =
+    artifacts?.authRequired && artifacts.envKey
+      ? `export ${artifacts.envKey}="<gateway-token>"`
+      : ""
 
   return (
     <section className="flex flex-col gap-6">
@@ -122,7 +134,11 @@ export function CodexSetup({ locale }: { locale: Locale }) {
           <h2 className="text-xl font-semibold">{t.title}</h2>
           <p className="text-sm text-muted-foreground">{t.description}</p>
         </div>
-        <Button variant="outline" onClick={() => void refresh()} disabled={loading}>
+        <Button
+          variant="outline"
+          onClick={() => void refresh()}
+          disabled={loading}
+        >
           <RefreshCwIcon data-icon="inline-start" />
           {t.refresh}
         </Button>
@@ -147,33 +163,42 @@ export function CodexSetup({ locale }: { locale: Locale }) {
         <>
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="flex flex-col gap-1 border-l-2 border-primary pl-3">
-              <span className="text-xs text-muted-foreground">{t.provider}</span>
+              <span className="text-xs text-muted-foreground">
+                {t.provider}
+              </span>
               <span className="font-mono text-sm">{artifacts.providerId}</span>
             </div>
             <div className="flex flex-col gap-1 border-l-2 border-primary pl-3">
-              <span className="text-xs text-muted-foreground">{t.defaultModel}</span>
-              <span className="break-all font-mono text-sm">
+              <span className="text-xs text-muted-foreground">
+                {t.defaultModel}
+              </span>
+              <span className="font-mono text-sm break-all">
                 {artifacts.defaultModel}
               </span>
             </div>
             <div className="flex flex-col gap-1 border-l-2 border-primary pl-3">
-              <span className="text-xs text-muted-foreground">{t.catalogPath}</span>
-              <span className="break-all font-mono text-sm">
+              <span className="text-xs text-muted-foreground">
+                {t.catalogPath}
+              </span>
+              <span className="font-mono text-sm break-all">
                 {artifacts.modelsPath}
               </span>
             </div>
           </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <TerminalIcon />
-                {t.environment}
-              </CardTitle>
-              <CardDescription className="break-all font-mono">
-                {environmentLine}
-              </CardDescription>
-              <CardAction>
+          {artifacts.authRequired ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <ShieldCheckIcon />
+                  {t.authEnabled}
+                </CardTitle>
+                <CardDescription>{t.authEnabledDescription}</CardDescription>
+              </CardHeader>
+              <CardContent className="flex items-center justify-between gap-3 border-t pt-4">
+                <code className="min-w-0 text-xs break-all">
+                  {environmentLine}
+                </code>
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -183,9 +208,15 @@ export function CodexSetup({ locale }: { locale: Locale }) {
                 >
                   <CopyIcon />
                 </Button>
-              </CardAction>
-            </CardHeader>
-          </Card>
+              </CardContent>
+            </Card>
+          ) : (
+            <Alert>
+              <ShieldOffIcon />
+              <AlertTitle>{t.authDisabled}</AlertTitle>
+              <AlertDescription>{t.authDisabledDescription}</AlertDescription>
+            </Alert>
+          )}
 
           <Tabs defaultValue="config">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -215,7 +246,11 @@ export function CodexSetup({ locale }: { locale: Locale }) {
                       aria-label={t.download}
                       title={t.download}
                       onClick={() =>
-                        downloadText("gateway-config.toml", artifacts.configToml, "text/plain")
+                        downloadText(
+                          "gateway-config.toml",
+                          artifacts.configToml,
+                          "text/plain"
+                        )
                       }
                     >
                       <DownloadIcon />
@@ -258,7 +293,7 @@ export function CodexSetup({ locale }: { locale: Locale }) {
                         downloadText(
                           "gateway-models.json",
                           artifacts.catalogJson,
-                          "application/json",
+                          "application/json"
                         )
                       }
                     >

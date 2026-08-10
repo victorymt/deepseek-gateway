@@ -13,6 +13,7 @@ export const DEFAULT_MODELS = [
 ];
 
 const PROVIDER_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const MAX_BALANCE_SCRIPT_BYTES = 64 * 1024;
 
 function isLoopbackHost(value) {
   const host = String(value || '').toLowerCase();
@@ -61,6 +62,38 @@ export function keyFingerprint(secret) {
   return crypto.createHash('sha256').update(String(secret)).digest('hex');
 }
 
+export function normalizeBalanceQuery(input, existing = null, field = 'balanceQuery') {
+  const source = input === undefined ? existing : input;
+  if (source === undefined || source === null) return null;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    throw new Error(`${field} must be an object or null`);
+  }
+  const enabled = source.enabled === undefined ? (existing?.enabled ?? true) : source.enabled === true;
+  const language = String(source.language ?? existing?.language ?? 'javascript').trim().toLowerCase();
+  if (language !== 'javascript') throw new Error(`${field} language must be javascript`);
+  const code = String(source.code ?? existing?.code ?? '').trim();
+  if (enabled && !code) throw new Error(`${field} code is required when enabled`);
+  if (Buffer.byteLength(code, 'utf8') > MAX_BALANCE_SCRIPT_BYTES) {
+    throw new Error(`${field} code must be at most ${MAX_BALANCE_SCRIPT_BYTES} bytes`);
+  }
+  const timeoutMs = normalizeNumber(
+    source.timeoutMs ?? existing?.timeoutMs ?? 10000,
+    `${field} timeoutMs`,
+    { min: 2000, max: 30000, integer: true },
+  );
+  const rawRefreshMs = source.refreshMs ?? existing?.refreshMs;
+  const refreshMs = rawRefreshMs === undefined
+    ? null
+    : normalizeNumber(rawRefreshMs, `${field} refreshMs`, { min: 10000, max: 24 * 60 * 60 * 1000, integer: true });
+  return {
+    enabled,
+    language,
+    code,
+    timeoutMs,
+    ...(refreshMs === null ? {} : { refreshMs }),
+  };
+}
+
 export function normalizeProvider(input, existing = null) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('provider must be an object');
   const id = normalizeIdentifier(input.id ?? existing?.id, 'provider id');
@@ -70,6 +103,11 @@ export function normalizeProvider(input, existing = null) {
   const enabled = input.enabled === undefined ? (existing?.enabled ?? true) : input.enabled === true;
   const rawModels = input.models ?? existing?.models ?? [];
   const rawKeys = input.keys ?? existing?.keys ?? [];
+  const balanceQuery = normalizeBalanceQuery(
+    input.balanceQuery,
+    existing?.balanceQuery,
+    `provider ${id} balanceQuery`,
+  );
   if (!Array.isArray(rawModels) || !rawModels.length) throw new Error(`provider ${id} must define at least one model`);
   if (!Array.isArray(rawKeys) || !rawKeys.length) throw new Error(`provider ${id} must define at least one key`);
 
@@ -99,7 +137,15 @@ export function normalizeProvider(input, existing = null) {
     return { name: keyName, key: secret, weight, enabled };
   });
 
-  return { id, name, baseUrl, enabled, models, keys };
+  return {
+    id,
+    name,
+    baseUrl,
+    enabled,
+    models,
+    keys,
+    ...(balanceQuery ? { balanceQuery } : {}),
+  };
 }
 
 export function validateProviderConfig(config, { allowSetup = false } = {}) {

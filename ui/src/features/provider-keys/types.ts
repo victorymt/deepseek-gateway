@@ -1,9 +1,10 @@
-export type KeyAction = "toggle" | "test" | "weight" | "delete"
+export type KeyAction = "toggle" | "test" | "balance" | "weight" | "delete"
 
 export type KeyFeedback = { kind: "success" | "error"; message: string } | null
 
 export type ProviderKeyCopy = {
   actionFailed: string
+  balanceRefreshed: string
   cancel: string
   deleteKey: string
   deleteKeyDescription: (name: string) => string
@@ -21,7 +22,10 @@ export type ProviderKeyCopy = {
   providerSummary: (keys: number, requests: number) => string
   saveWeight: string
   testKey: string
+  refreshBalance: string
   topUp: string
+  total: string
+  used: string
   unavailable: string
   weight: string
   weightInvalid: string

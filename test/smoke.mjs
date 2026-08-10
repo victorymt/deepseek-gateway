@@ -1000,11 +1000,13 @@ test('health and dashboard report every key balance', async () => {
     assert.equal(h.keys.length, 2);
     for (const key of h.keys) {
       assert.equal(key.balance.isAvailable, true);
-      assert.deepEqual(key.balance.infos, [{
-        currency: 'CNY',
-        totalBalance: '88.80',
-        grantedBalance: '8.80',
-        toppedUpBalance: '80.00',
+      assert.deepEqual(key.balance.items, [{
+        planName: 'CNY',
+        remaining: 88.8,
+        granted: 8.8,
+        toppedUp: 80,
+        unit: 'CNY',
+        isValid: true,
       }]);
       assert.equal(key.balanceError, '');
     }
@@ -1048,7 +1050,167 @@ test('non-DeepSeek upstream is never queried for key balance', async () => {
     assert.deepEqual(paths, []);
     const h = await gw.health();
     assert.equal(h.keys[0].balance, null);
-    assert.match(h.keys[0].balanceError, /only supported for DeepSeek/);
+    assert.equal(h.keys[0].balanceError, '');
+    assert.equal(h.providers[0].balanceQueryEnabled, false);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('custom balance scripts support automatic, draft, manual, and live-updated queries', async () => {
+  const upstreamPort = await freePort();
+  const requests = [];
+  let remaining = 12;
+  const upstream = http.createServer((req, res) => {
+    requests.push({
+      path: req.url,
+      authorization: req.headers.authorization,
+      draft: req.headers['x-draft'] || '',
+    });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      plan: req.url === '/quota-v2' ? 'Team' : 'Pro',
+      remaining: req.url === '/quota-v2' ? 25 : remaining,
+      used: 5,
+      total: 30,
+    }));
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+
+  const script = pathName => `({
+    request: {
+      url: "{{baseUrl}}${pathName}",
+      method: "GET",
+      headers: { Authorization: "Bearer {{apiKey}}" }
+    },
+    extractor: function(response) {
+      return {
+        planName: response.plan,
+        remaining: response.remaining,
+        used: response.used,
+        total: response.total,
+        unit: "USD"
+      };
+    }
+  })`;
+  const config = multiProviderConfig({ balanceRefreshMs: 60000 });
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}`;
+  config.providers[0].balanceQuery = {
+    enabled: true,
+    language: 'javascript',
+    code: script('/quota'),
+    timeoutMs: 2000,
+    refreshMs: 10000,
+  };
+
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    await waitFor(async () => {
+      const health = await gw.health();
+      return health.providers[0].keys[0].balance?.items[0]?.remaining === 12;
+    });
+    let health = await gw.health();
+    let alpha = health.providers.find(provider => provider.id === 'alpha');
+    assert.equal(alpha.balanceQueryEnabled, true);
+    assert.deepEqual(alpha.keys[0].balance.items, [{
+      planName: 'Pro',
+      isValid: true,
+      total: 30,
+      used: 5,
+      remaining: 12,
+      unit: 'USD',
+    }]);
+    assert.ok(requests.some(request => (
+      request.path === '/quota'
+      && request.authorization === 'Bearer sk-alpha-ok'
+    )));
+
+    const draftCode = script('/quota').replace(
+      'Authorization: "Bearer {{apiKey}}"',
+      'Authorization: "Bearer {{apiKey}}", "X-Draft": "yes"',
+    );
+    const draft = await fetch(`${gw.base}/api/balance/test`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        providerId: 'alpha',
+        baseUrl: config.providers[0].baseUrl,
+        key: 'sk-unsaved-draft',
+        keyName: 'draft',
+        balanceQuery: {
+          enabled: true,
+          language: 'javascript',
+          code: draftCode,
+          timeoutMs: 2000,
+        },
+      }),
+    });
+    const draftText = await draft.text();
+    assert.equal(draft.status, 200, draftText);
+    assert.equal(JSON.parse(draftText).items[0].remaining, 12);
+    assert.ok(requests.some(request => (
+      request.authorization === 'Bearer sk-unsaved-draft' && request.draft === 'yes'
+    )));
+
+    remaining = 18;
+    const manual = await fetch(`${gw.base}/api/providers/alpha/keys/alpha-key/balance`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: '{}',
+    });
+    const manualText = await manual.text();
+    assert.equal(manual.status, 200, manualText);
+    assert.equal(JSON.parse(manualText).balance.items[0].remaining, 18);
+
+    const blockedBefore = requests.length;
+    const blocked = await fetch(`${gw.base}/api/balance/test`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        providerId: 'alpha',
+        keyName: 'alpha-key',
+        balanceQuery: {
+          enabled: true,
+          language: 'javascript',
+          code: script('/quota').replace(
+            '{{baseUrl}}',
+            `http://localhost:${upstreamPort}`,
+          ),
+          timeoutMs: 2000,
+        },
+      }),
+    });
+    assert.equal(blocked.status, 502);
+    assert.match(await blocked.text(), /provider origin/);
+    assert.equal(requests.length, blockedBefore);
+
+    const updatedCode = script('/quota-v2');
+    const updated = await fetch(`${gw.base}/api/providers/alpha`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        balanceQuery: {
+          enabled: true,
+          language: 'javascript',
+          code: updatedCode,
+          timeoutMs: 2000,
+          refreshMs: 10000,
+        },
+      }),
+    });
+    assert.equal(updated.status, 200, await updated.text());
+    await waitFor(async () => {
+      const current = await gw.health();
+      return current.providers[0].keys[0].balance?.items[0]?.remaining === 25;
+    });
+    health = await gw.health();
+    alpha = health.providers.find(provider => provider.id === 'alpha');
+    assert.equal(alpha.keys[0].balance.items[0].planName, 'Team');
+    assert.ok(requests.some(request => request.path === '/quota-v2'));
+    const persisted = JSON.parse(fs.readFileSync(gw.configPath, 'utf8'));
+    assert.equal(persisted.providers[0].balanceQuery.code, updatedCode);
+    assert.equal(persisted.providers[0].balanceQuery.refreshMs, 10000);
   } finally {
     await gw.stop();
     await new Promise(resolve => upstream.close(resolve));

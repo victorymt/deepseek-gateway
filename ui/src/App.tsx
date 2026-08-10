@@ -123,6 +123,7 @@ const translations = {
     keyDisabled: "Disabled",
     editWeight: "Edit weight",
     testKey: "Test key",
+    refreshBalance: "Refresh balance",
     deleteKey: "Delete key",
     saveWeight: "Save weight",
     weightInvalid: "Weight must be greater than zero.",
@@ -131,6 +132,7 @@ const translations = {
     deleteKeyDescription: (name: string) =>
       `The key ${name} will be removed from this provider immediately.`,
     actionFailed: "Key action failed",
+    balanceRefreshed: "Balance refreshed",
     keyUpdated: "Key updated and applied",
     keyDeleted: "Key deleted",
     keyConnected: (status: number, latencyMs: number) =>
@@ -138,6 +140,8 @@ const translations = {
     lastEnabledKey: "At least one key must remain enabled",
     topUp: "Top-up",
     granted: "Granted",
+    total: "Total",
+    used: "Used",
     weight: "Weight",
     columns: {
       provider: "Provider",
@@ -229,6 +233,7 @@ const translations = {
     keyDisabled: "已停用",
     editWeight: "编辑权重",
     testKey: "测试密钥",
+    refreshBalance: "刷新额度",
     deleteKey: "删除密钥",
     saveWeight: "保存权重",
     weightInvalid: "权重必须大于 0。",
@@ -237,6 +242,7 @@ const translations = {
     deleteKeyDescription: (name: string) =>
       `密钥 ${name} 将立即从当前 Provider 中移除。`,
     actionFailed: "密钥操作失败",
+    balanceRefreshed: "额度已刷新",
     keyUpdated: "密钥已更新并生效",
     keyDeleted: "密钥已删除",
     keyConnected: (status: number, latencyMs: number) =>
@@ -244,6 +250,8 @@ const translations = {
     lastEnabledKey: "至少需要保留一个已启用密钥",
     topUp: "充值",
     granted: "赠送",
+    total: "总额度",
+    used: "已使用",
     weight: "权重",
     columns: {
       provider: "Provider",
@@ -535,6 +543,7 @@ function Dashboard({
               name: health.defaultProvider,
               baseUrl: health.upstream || "",
               enabled: true,
+              balanceQueryEnabled: false,
               modelCount: 0,
               total: health.total,
               keys: health.keys,

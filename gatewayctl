@@ -1,2 +1,20 @@
 #!/usr/bin/env sh
-exec node "$(dirname "$0")/gatewayctl.mjs" "$@"
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+case "${1:-}" in
+  init|start)
+    if [ ! -f "$SCRIPT_DIR/node_modules/.package-lock.json" ] \
+      || [ "$SCRIPT_DIR/package-lock.json" -nt "$SCRIPT_DIR/node_modules/.package-lock.json" ]; then
+      if ! command -v npm >/dev/null 2>&1; then
+        echo "ERROR: npm is required to install gateway runtime dependencies" >&2
+        exit 1
+      fi
+      echo "Installing gateway runtime dependencies..."
+      npm ci --omit=dev --prefix "$SCRIPT_DIR"
+    fi
+    ;;
+esac
+
+exec node "$SCRIPT_DIR/gatewayctl.mjs" "$@"

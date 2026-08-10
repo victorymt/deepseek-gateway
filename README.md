@@ -16,11 +16,11 @@ gateway.mjs  -- 根据请求 model 解析 provider--model
 
 ## 运行要求
 
-- Node.js 18 或更新版本；构建 shadcn 状态面板需要 Node.js 20.19+ 或 22.12+，以及 npm
+- Node.js 18 或更新版本，以及 npm；构建 shadcn 状态面板需要 Node.js 20.19+ 或 22.12+
 - Python 3.10 或更新版本，用于交互式配置和 Codex 配置合并；推荐 Python 3.11+
 - Codex CLI，仅在需要接入 Codex 时使用
 
-网关核心仍是零依赖 Node.js 进程。React/shadcn 状态面板的依赖隔离在 `ui/` 目录中。
+网关使用 `quickjs-emscripten` 隔离执行额度查询脚本；React/shadcn 状态面板的依赖仍隔离在 `ui/` 目录中。`gatewayctl init` 和 `gatewayctl start` 会在 lockfile 更新或依赖缺失时自动运行 `npm ci --omit=dev`。直接运行 `node gateway.mjs` 前需先执行一次 `npm ci --omit=dev`。
 
 ## 快速开始
 
@@ -46,7 +46,7 @@ cd deepseek-gateway
 1. 配置监听地址、冷却、黑名单阈值、重试、超时和请求体上限。
 2. 可选启用网关访问密码；引导模式监听非本机地址时必须使用至少 16 个字符的密码，未填写则自动生成。
 3. 通过网关共用的配置校验器生成并安全写入 `setupPending: true` 的 v2 `keys.json`，此时不要求 Provider 或 API Key。
-4. 自动安装依赖并构建 shadcn 状态面板（可通过 `--no-ui` 跳过）。
+4. 自动安装网关运行依赖，并构建 shadcn 状态面板（可通过 `--no-ui` 跳过面板构建）。
 5. 检查监听地址：已有可访问的网关则直接复用，端口空闲时默认立即启动并继续 Web 配置。
 6. 在状态面板中填写首个 Provider、模型和 API Key。保存成功后会原子退出引导模式，并将它设为默认 Provider 和默认模型。
 7. 在面板的“Codex 配置”页签预览和下载配置，或运行 `./gatewayctl codex` 接入 Codex CLI。
@@ -68,7 +68,7 @@ cd deepseek-gateway
 
 ### 面板操作
 
-“监控面板”按 Provider 分组展示密钥池；每个 Provider 下的 Key 以卡片排列。卡片包含余额、请求数、成功数、错误数、429 次数、处理中请求、累计失败、冷却时间和最后使用时间。余额只会在上游支持余额查询时显示。
+“监控面板”按 Provider 分组展示密钥池；每个 Provider 下的 Key 以卡片排列。卡片包含额度、请求数、成功数、错误数、429 次数、处理中请求、累计失败、冷却时间和最后使用时间。配置了额度查询的 Provider 会定时刷新，也可以从单张 Key 卡片立即刷新。
 
 每张 Key 卡片底部提供以下操作：
 
@@ -171,6 +171,13 @@ cp keys.example.json keys.json
       "name": "DeepSeek",
       "baseUrl": "https://api.deepseek.com",
       "enabled": true,
+      "balanceQuery": {
+        "enabled": true,
+        "language": "javascript",
+        "code": "({ request: { ... }, extractor: function(response) { ... } })",
+        "timeoutMs": 10000,
+        "refreshMs": 300000
+      },
       "models": [
         { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash" }
       ],
@@ -181,6 +188,48 @@ cp keys.example.json keys.json
   ]
 }
 ```
+
+`keys.example.json` 提供了可直接使用的 DeepSeek 额度查询脚本。DeepSeek Provider 未显式设置 `balanceQuery` 时也会使用同一内置脚本；设置 `"balanceQuery": { "enabled": false }` 可以关闭该 Provider 的查询。
+
+## JavaScript 额度查询
+
+在“Provider 管理”中编辑 Provider，可以启用额度查询、套用 DeepSeek 或 OpenRouter 模板、调整超时和刷新周期，并在保存前用当前草稿和指定 Key 测试。脚本需要求值为一个包含 `request` 与 `extractor(response)` 的对象，例如：
+
+```javascript
+({
+  request: {
+    url: "{{baseUrl}}/quota",
+    method: "GET",
+    headers: {
+      Authorization: "Bearer {{apiKey}}",
+      Accept: "application/json"
+    }
+  },
+  extractor: function(response) {
+    return {
+      planName: response.plan,
+      remaining: Number(response.remaining),
+      used: Number(response.used),
+      total: Number(response.total),
+      unit: "USD",
+      isValid: response.active !== false
+    };
+  }
+})
+```
+
+执行分为两个隔离阶段：QuickJS 先计算 `request`，宿主进程再替换占位符并发送 HTTP 请求，最后使用一个全新的 QuickJS 上下文运行 `extractor`。脚本本身不会直接获得 API Key，也不能访问 Node.js、文件系统或网络 API。
+
+`request` 支持以下内容：
+
+- `url`：必填，可使用 `{{baseUrl}}`、`{{apiKey}}`、`{{keyName}}` 和 `{{providerId}}` 占位符。
+- `method`：仅支持 `GET` 或 `POST`，默认 `GET`。
+- `headers`：可选对象；`Host`、`Content-Length`、连接控制和代理相关 Header 会被拒绝。
+- `body`：可选字符串或对象；`GET` 不能携带 body。
+
+`extractor` 可以返回单个额度对象或最多 16 个对象的数组。对象可包含 `planName`、`remaining`、`used`、`total`、`unit`、`extra`、`isValid` 和 `invalidMessage`；兼容 DeepSeek 的模板还会返回 `granted` 与 `toppedUp`。有效结果至少要包含 `remaining`、`used` 或 `total` 之一。
+
+安全限制如下：脚本最大 64 KiB，QuickJS 内存上限 8 MiB、栈上限 512 KiB，单阶段执行最多 500 ms；HTTP 超时可设置为 2 至 30 秒。请求必须与 Provider `baseUrl` 同源，只允许 HTTPS，回环地址可使用 HTTP；不跟随重定向，请求体最大 64 KiB，响应最大 1 MiB。`refreshMs` 可设为 10 秒至 24 小时，未设置时使用全局 `balanceRefreshMs`。
 
 也可以完全使用环境变量，不创建 `keys.json`：
 
@@ -259,7 +308,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 在面板中编辑 Provider 并添加 Key 后，新 Key 会立即加入正在运行的调度池，无需重启网关。未改变的 Key 按 secret 指纹复用原状态，因此改名或调整权重不会清空其统计、冷却、失效状态或余额；删除 Key 也不会中断已经使用它的请求。修改 Provider 的 `baseUrl` 时，新请求立即切换到新上游，旧 runtime 会等待进行中的响应（包括 SSE 长流）结束后再释放连接。
 
-当上游为 `api.deepseek.com` 时，网关启动后会立即通过 DeepSeek `/user/balance` 查询每个 Key 的余额，并按 `balanceRefreshMs` 在后台刷新。其他自定义或 OpenAI 兼容上游不会发起余额请求。查询失败只记录在面板和 `/health` 中，不计入 Key 的业务失败次数；设置为 `0` 可禁用余额查询。
+当上游为 `api.deepseek.com` 且未显式配置时，网关使用内置脚本访问 DeepSeek `/user/balance`。其他 Provider 只有在配置并启用 `balanceQuery` 后才会发起额度请求。网关启动和脚本热更新后会立即查询每个已启用 Key，随后按 Provider 的 `balanceQuery.refreshMs` 或全局 `balanceRefreshMs` 刷新。查询失败只记录在面板和 `/health` 中，不计入 Key 的业务失败次数；全局间隔设置为 `0` 会关闭没有独立刷新周期的后台查询，仍可手动刷新。
 
 | 事件 | 处理 |
 | --- | --- |
@@ -293,14 +342,14 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `setupPending` | - | - | `false` | `true` 表示等待通过 Web UI 配置首个 Provider |
 | `port` | `--port` | `DS_GATEWAY_PORT` | `8787` | 监听端口 |
 | `host` | `--host` | - | `127.0.0.1` | 监听地址 |
-| `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`models`、`keys` 和启用状态 |
+| `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`models`、`keys`、`balanceQuery` 和启用状态 |
 | `defaultProvider` | - | - | 第一个启用项 | 未带别名前缀时使用的 Provider |
 | `defaultModel` | - | - | 默认 Provider 首个模型 | Codex 启动模型别名 |
 | `upstream` | `--upstream` | `DS_UPSTREAM` | `https://api.deepseek.com` | 旧配置/默认 Provider 上游 URL |
 | `keys[]` | `--keys` | `DEEPSEEK_KEYS` | - | 旧配置/默认 Provider Key |
 | `cooldownMs` | `--cooldown-ms` | `DS_COOLDOWN_MS` | `60000` | 429 冷却时间 |
 | `blacklistThreshold` | `--blacklist-threshold` | `DS_BLACKLIST_THRESHOLD` | `3` | 累计失败黑名单阈值；0 表示禁用 |
-| `balanceRefreshMs` | `--balance-refresh-ms` | `DS_BALANCE_REFRESH_MS` | `300000` | Key 余额后台刷新间隔；0 表示禁用 |
+| `balanceRefreshMs` | `--balance-refresh-ms` | `DS_BALANCE_REFRESH_MS` | `300000` | 未单独设置 `balanceQuery.refreshMs` 时的额度后台刷新间隔；0 表示禁用后台刷新 |
 | `maxRetries` | `--max-retries` | `DS_MAX_RETRIES` | `2` | 每次请求最多切换次数 |
 | `timeoutMs` | - | - | `0` | 上游超时；0 表示不限 |
 | `maxBodyBytes` | `--max-body-bytes` | `DS_MAX_BODY_BYTES` | `67108864` | 请求体大小上限；超限返回 413 |
@@ -325,8 +374,10 @@ node gateway.mjs --config /path/to/keys.json
 - `PATCH/DELETE /api/providers/:id`：修改或删除 Provider。
 - `PATCH/DELETE /api/providers/:id/keys/:name`：热更新 Key 的启用状态或权重，或删除 Key。
 - `POST /api/providers/:id/keys/:name/test`：使用指定 Key 测试上游连接，包括已停用 Key。
+- `POST /api/providers/:id/keys/:name/balance`：立即刷新指定 Key 的额度并返回新的 Key 状态。
 - `GET/PATCH /api/settings`：读取或修改脱敏的 Gateway 标量设置；响应只返回 `tokenConfigured`，不会返回令牌内容。
 - `POST /api/models`：通过 Provider 的 Base URL 和 Key 获取上游模型列表；支持 `/v1/models`、`/models` 及兼容子路径回退，不会自动写入配置。
+- `POST /api/balance/test`：测试尚未保存的 `balanceQuery` 草稿；不会修改 Provider 配置。
 - `POST /api/providers/:id/test`：测试 Provider 连接。
 - `GET /api/codex/config`：生成统一 Codex Provider 和模型目录。
 - `GET /login`：输入网关 `token`，签发 24 小时 HttpOnly、SameSite Cookie。
@@ -346,7 +397,8 @@ node gateway.mjs --config /path/to/keys.json
 运行完整测试：
 
 ```bash
-node --test test/config-core.mjs test/gatewayctl.mjs test/smoke.mjs
+npm ci
+node --test test/balance-script.mjs test/config-core.mjs test/gatewayctl.mjs test/smoke.mjs
 python3 -m unittest test/configure_test.py
 npm run lint --prefix ui
 npm run build --prefix ui
@@ -364,4 +416,4 @@ npm run build --prefix ui
 | `-drip` | 分段流式响应 |
 | `-abort` | 流式传输中断 |
 
-测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、重复 secret 拒绝、上游模型发现与 ID 归一化、切换上游时的请求排空、逐 Key 余额、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl`、交互式配置和备份恢复。
+测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、重复 secret 拒绝、上游模型发现与 ID 归一化、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl`、交互式配置和备份恢复。

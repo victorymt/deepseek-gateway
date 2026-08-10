@@ -17,6 +17,13 @@
       "name": "DeepSeek",
       "baseUrl": "https://api.deepseek.com",
       "enabled": true,
+      "balanceQuery": {
+        "enabled": true,
+        "language": "javascript",
+        "code": "({ request: { url: \"{{baseUrl}}/user/balance\", method: \"GET\", headers: { Authorization: \"Bearer {{apiKey}}\", Accept: \"application/json\" } }, extractor: function(response) { return (response.balance_infos || []).map(function(info) { return { planName: String(info.currency || \"\"), remaining: Number(info.total_balance), granted: Number(info.granted_balance), toppedUp: Number(info.topped_up_balance), unit: String(info.currency || \"\"), isValid: response.is_available !== false }; }); } })",
+        "timeoutMs": 10000,
+        "refreshMs": 300000
+      },
       "models": [
         { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash" },
         { "id": "v4-pro", "name": "V4 Pro", "upstreamModel": "deepseek-v4-pro" }

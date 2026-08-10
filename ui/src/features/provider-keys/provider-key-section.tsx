@@ -65,6 +65,7 @@ export function ProviderKeySection({
             key={`${provider.id}:${keyInfo.name}`}
             providerId={provider.id}
             keyInfo={keyInfo}
+            balanceQueryEnabled={provider.balanceQueryEnabled}
             locale={locale}
             copy={copy}
             cannotDisable={keyInfo.enabled !== false && enabledKeyCount === 1}

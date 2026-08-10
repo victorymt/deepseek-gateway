@@ -82,6 +82,18 @@ export function useKeyActions({
     }
   }
 
+  async function refreshBalance() {
+    await runAction(
+      "balance",
+      () =>
+        apiRequest(`${keyUrl}/balance`, {
+          method: "POST",
+          body: "{}",
+        }),
+      copy.balanceRefreshed
+    )
+  }
+
   function updateWeight(weight: number) {
     return runAction(
       "weight",
@@ -102,5 +114,5 @@ export function useKeyActions({
     )
   }
 
-  return { pending, remove, test, toggle, updateWeight }
+  return { pending, refreshBalance, remove, test, toggle, updateWeight }
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react"
 import {
   CheckIcon,
+  FileCode2Icon,
   PencilIcon,
   PlugZapIcon,
   PlusIcon,
@@ -64,7 +65,13 @@ import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
-import type { Provider, ProviderConfig } from "@/gateway-types"
+import { Textarea } from "@/components/ui/textarea"
+import type {
+  BalanceQuery,
+  BalanceResult,
+  Provider,
+  ProviderConfig,
+} from "@/gateway-types"
 import { apiRequest } from "@/lib/api-request"
 
 type ModelDraft = { id: string; name: string; upstreamModel: string }
@@ -77,6 +84,7 @@ type KeyDraft = {
   maskedKey?: string
   fingerprint?: string
 }
+type BalanceQueryDraft = BalanceQuery
 type ProviderDraft = {
   id: string
   name: string
@@ -84,7 +92,58 @@ type ProviderDraft = {
   enabled: boolean
   models: ModelDraft[]
   keys: KeyDraft[]
+  balanceQuery: BalanceQueryDraft
 }
+
+const DEEPSEEK_BALANCE_SCRIPT = `({
+  request: {
+    url: "{{baseUrl}}/user/balance",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "Accept": "application/json"
+    }
+  },
+  extractor: function(response) {
+    return (response.balance_infos || []).map(function(info) {
+      return {
+        planName: String(info.currency || ""),
+        remaining: Number(info.total_balance),
+        granted: Number(info.granted_balance),
+        toppedUp: Number(info.topped_up_balance),
+        unit: String(info.currency || ""),
+        isValid: response.is_available !== false
+      };
+    });
+  }
+})`
+
+const OPENROUTER_BALANCE_SCRIPT = `({
+  request: {
+    url: "{{baseUrl}}/key",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "Accept": "application/json"
+    }
+  },
+  extractor: function(response) {
+    const data = response.data || {};
+    const total = data.limit == null ? undefined : Number(data.limit);
+    const used = data.usage == null ? undefined : Number(data.usage);
+    const remaining = data.limit_remaining == null
+      ? (total == null || used == null ? undefined : total - used)
+      : Number(data.limit_remaining);
+    return {
+      planName: data.is_free_tier ? "Free" : "OpenRouter",
+      remaining: remaining,
+      used: used,
+      total: total,
+      unit: "USD",
+      isValid: Boolean(response.data)
+    };
+  }
+})`
 
 const copy = {
   en: {
@@ -132,6 +191,16 @@ const copy = {
     modelAdded: "Added",
     noModelsFound: "The upstream returned no models.",
     addKey: "Add key",
+    balanceQuery: "Balance query",
+    balanceEnabled: "Balance query enabled",
+    balanceDisabled: "Balance query disabled",
+    balanceCode: "JavaScript",
+    balanceTimeout: "Timeout (ms)",
+    balanceRefresh: "Refresh override (ms)",
+    deepSeekTemplate: "DeepSeek template",
+    openRouterTemplate: "OpenRouter template",
+    testBalance: "Test balance query",
+    balanceTested: (value: string) => `Balance query succeeded · ${value}`,
     cancel: "Cancel",
     save: "Save provider",
     create: "Create provider",
@@ -186,6 +255,16 @@ const copy = {
     modelAdded: "已添加",
     noModelsFound: "上游没有返回模型。",
     addKey: "添加密钥",
+    balanceQuery: "额度查询",
+    balanceEnabled: "已启用额度查询",
+    balanceDisabled: "已停用额度查询",
+    balanceCode: "JavaScript",
+    balanceTimeout: "超时（毫秒）",
+    balanceRefresh: "覆盖刷新周期（毫秒）",
+    deepSeekTemplate: "DeepSeek 模板",
+    openRouterTemplate: "OpenRouter 模板",
+    testBalance: "测试额度查询",
+    balanceTested: (value: string) => `额度查询成功 · ${value}`,
     cancel: "取消",
     save: "保存 Provider",
     create: "创建 Provider",
@@ -204,6 +283,12 @@ const emptyDraft = (): ProviderDraft => ({
   enabled: true,
   models: [{ id: "", name: "", upstreamModel: "" }],
   keys: [{ name: "primary", key: "", weight: 1, enabled: true }],
+  balanceQuery: {
+    enabled: false,
+    language: "javascript",
+    code: "",
+    timeoutMs: 10000,
+  },
 })
 
 function providerDraft(provider: Provider): ProviderDraft {
@@ -222,6 +307,12 @@ function providerDraft(provider: Provider): ProviderDraft {
       key: "",
       enabled: key.enabled !== false,
     })),
+    balanceQuery: provider.balanceQuery ?? {
+      enabled: false,
+      language: "javascript",
+      code: "",
+      timeoutMs: 10000,
+    },
   }
 }
 
@@ -247,6 +338,9 @@ export function ProviderManager({
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([])
   const [fetchingModels, setFetchingModels] = useState(false)
   const [modelFetchError, setModelFetchError] = useState("")
+  const [testingBalance, setTestingBalance] = useState(false)
+  const [balanceTestError, setBalanceTestError] = useState("")
+  const [balanceTestNotice, setBalanceTestNotice] = useState("")
 
   const refresh = useCallback(async () => {
     try {
@@ -270,6 +364,8 @@ export function ProviderManager({
     setError("")
     setFetchedModels([])
     setModelFetchError("")
+    setBalanceTestError("")
+    setBalanceTestNotice("")
     setDialogOpen(true)
   }
 
@@ -279,6 +375,8 @@ export function ProviderManager({
     setError("")
     setFetchedModels([])
     setModelFetchError("")
+    setBalanceTestError("")
+    setBalanceTestNotice("")
     setDialogOpen(true)
   }
 
@@ -383,6 +481,40 @@ export function ProviderManager({
     }
   }
 
+  async function testBalanceQuery() {
+    setTestingBalance(true)
+    setBalanceTestError("")
+    setBalanceTestNotice("")
+    try {
+      const selectedKey =
+        draft.keys.find((item) => item.key.trim()) ?? draft.keys[0]
+      const result = await apiRequest<BalanceResult>("/api/balance/test", {
+        method: "POST",
+        body: JSON.stringify({
+          baseUrl: draft.baseUrl,
+          balanceQuery: draft.balanceQuery,
+          ...(editingId ? { providerId: editingId } : {}),
+          keyName: selectedKey?.name,
+          ...(selectedKey?.key.trim() ? { key: selectedKey.key.trim() } : {}),
+        }),
+      })
+      const first = result.items[0]
+      const remaining =
+        first?.remaining ??
+        (first?.total !== undefined && first?.used !== undefined
+          ? first.total - first.used
+          : undefined)
+      const amount = `${first?.unit ? `${first.unit} ` : ""}${
+        remaining === undefined ? "—" : remaining.toLocaleString(locale)
+      }`
+      setBalanceTestNotice(t.balanceTested(amount))
+    } catch (cause) {
+      setBalanceTestError(cause instanceof Error ? cause.message : t.failed)
+    } finally {
+      setTestingBalance(false)
+    }
+  }
+
   function addFetchedModel(model: FetchedModel) {
     setDraft((value) => {
       if (
@@ -475,6 +607,14 @@ export function ProviderManager({
                     {provider.enabled ? t.enabled : t.disabled}
                   </Badge>
                   {isDefault && <Badge>{t.default}</Badge>}
+                  <Badge
+                    variant={provider.balanceQuery?.enabled ? "secondary" : "outline"}
+                  >
+                    <FileCode2Icon data-icon="inline-start" />
+                    {provider.balanceQuery?.enabled
+                      ? t.balanceEnabled
+                      : t.balanceDisabled}
+                  </Badge>
                 </CardTitle>
                 <CardDescription className="font-mono break-all">
                   {provider.baseUrl}
@@ -696,6 +836,179 @@ export function ProviderManager({
                   }
                 />
               </Field>
+
+              <FieldSet>
+                <FieldLegend>{t.balanceQuery}</FieldLegend>
+                <Field orientation="horizontal">
+                  <FieldContent>
+                    <FieldTitle>
+                      {draft.balanceQuery.enabled
+                        ? t.balanceEnabled
+                        : t.balanceDisabled}
+                    </FieldTitle>
+                  </FieldContent>
+                  <Switch
+                    checked={draft.balanceQuery.enabled}
+                    aria-label={t.balanceQuery}
+                    onCheckedChange={(checked) =>
+                      setDraft((value) => ({
+                        ...value,
+                        balanceQuery: {
+                          ...value.balanceQuery,
+                          enabled: checked,
+                        },
+                      }))
+                    }
+                  />
+                </Field>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setDraft((value) => ({
+                        ...value,
+                        balanceQuery: {
+                          ...value.balanceQuery,
+                          enabled: true,
+                          code: DEEPSEEK_BALANCE_SCRIPT,
+                        },
+                      }))
+                    }
+                  >
+                    <FileCode2Icon data-icon="inline-start" />
+                    {t.deepSeekTemplate}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setDraft((value) => ({
+                        ...value,
+                        balanceQuery: {
+                          ...value.balanceQuery,
+                          enabled: true,
+                          code: OPENROUTER_BALANCE_SCRIPT,
+                        },
+                      }))
+                    }
+                  >
+                    <FileCode2Icon data-icon="inline-start" />
+                    {t.openRouterTemplate}
+                  </Button>
+                </div>
+                {draft.balanceQuery.enabled && (
+                  <>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <Field>
+                        <FieldLabel htmlFor="balance-timeout">
+                          {t.balanceTimeout}
+                        </FieldLabel>
+                        <Input
+                          id="balance-timeout"
+                          type="number"
+                          min="2000"
+                          max="30000"
+                          step="1000"
+                          value={draft.balanceQuery.timeoutMs}
+                          required
+                          onChange={(event) =>
+                            setDraft((value) => ({
+                              ...value,
+                              balanceQuery: {
+                                ...value.balanceQuery,
+                                timeoutMs: Number(event.target.value),
+                              },
+                            }))
+                          }
+                        />
+                      </Field>
+                      <Field>
+                        <FieldLabel htmlFor="balance-refresh">
+                          {t.balanceRefresh}
+                        </FieldLabel>
+                        <Input
+                          id="balance-refresh"
+                          type="number"
+                          min="10000"
+                          max="86400000"
+                          step="1000"
+                          value={draft.balanceQuery.refreshMs ?? ""}
+                          onChange={(event) =>
+                            setDraft((value) => {
+                              const refreshMs = event.target.value
+                                ? Number(event.target.value)
+                                : undefined
+                              const nextQuery = {
+                                ...value.balanceQuery,
+                                refreshMs,
+                              }
+                              if (refreshMs === undefined) {
+                                delete nextQuery.refreshMs
+                              }
+                              return { ...value, balanceQuery: nextQuery }
+                            })
+                          }
+                        />
+                      </Field>
+                    </div>
+                    <Field>
+                      <FieldLabel htmlFor="balance-script">
+                        {t.balanceCode}
+                      </FieldLabel>
+                      <Textarea
+                        id="balance-script"
+                        className="min-h-72 resize-y font-mono text-xs"
+                        value={draft.balanceQuery.code}
+                        required
+                        spellCheck={false}
+                        onChange={(event) =>
+                          setDraft((value) => ({
+                            ...value,
+                            balanceQuery: {
+                              ...value.balanceQuery,
+                              code: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </Field>
+                    {balanceTestError && (
+                      <Alert variant="destructive">
+                        <AlertTitle>{t.failed}</AlertTitle>
+                        <AlertDescription>{balanceTestError}</AlertDescription>
+                      </Alert>
+                    )}
+                    {balanceTestNotice && (
+                      <Alert>
+                        <CheckIcon />
+                        <AlertTitle>{balanceTestNotice}</AlertTitle>
+                      </Alert>
+                    )}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="self-start"
+                      disabled={
+                        testingBalance ||
+                        !draft.balanceQuery.code.trim() ||
+                        (!editingId &&
+                          !draft.keys.some((item) => item.key.trim()))
+                      }
+                      onClick={() => void testBalanceQuery()}
+                    >
+                      {testingBalance ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <RefreshCwIcon data-icon="inline-start" />
+                      )}
+                      {t.testBalance}
+                    </Button>
+                  </>
+                )}
+              </FieldSet>
 
               <FieldSet>
                 <FieldLegend>{t.models}</FieldLegend>

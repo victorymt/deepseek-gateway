@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 
 import {
+  normalizeBalanceQuery,
   normalizeConfig,
   serializableConfig,
 } from '../config-core.mjs';
@@ -62,6 +63,56 @@ test('config validation rejects providers with every key disabled', () => {
       keys: [{ name: 'one', key: 'sk-one', weight: 1, enabled: false }],
     }],
   }), /at least one enabled key/);
+});
+
+test('provider balance query normalizes and persists JavaScript settings', () => {
+  const query = normalizeBalanceQuery({
+    enabled: true,
+    code: '({ request: {}, extractor: function () { return { remaining: 1 }; } })',
+    timeoutMs: 5000,
+    refreshMs: 60000,
+  });
+  assert.deepEqual(query, {
+    enabled: true,
+    language: 'javascript',
+    code: '({ request: {}, extractor: function () { return { remaining: 1 }; } })',
+    timeoutMs: 5000,
+    refreshMs: 60000,
+  });
+
+  const normalized = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      models: [{ id: 'chat', upstreamModel: 'chat' }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+      balanceQuery: query,
+    }],
+  });
+  assert.deepEqual(serializableConfig(normalized).providers[0].balanceQuery, query);
+});
+
+test('provider balance query rejects unsafe configuration values', () => {
+  assert.throws(() => normalizeBalanceQuery({ enabled: true, code: '' }), /code is required/);
+  assert.throws(() => normalizeBalanceQuery({
+    enabled: true,
+    language: 'python',
+    code: '({})',
+  }), /language must be javascript/);
+  assert.throws(() => normalizeBalanceQuery({
+    enabled: true,
+    code: '({})',
+    timeoutMs: 31000,
+  }), /timeoutMs/);
+  assert.deepEqual(normalizeBalanceQuery({ enabled: false, code: '' }), {
+    enabled: false,
+    language: 'javascript',
+    code: '',
+    timeoutMs: 10000,
+  });
 });
 
 test('explicit setup config normalizes only when setup mode is allowed', () => {

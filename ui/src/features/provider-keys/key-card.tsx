@@ -1,5 +1,10 @@
 import { useId } from "react"
-import { CircleDotIcon, PlugZapIcon, Trash2Icon } from "lucide-react"
+import {
+  CircleDotIcon,
+  PlugZapIcon,
+  RefreshCwIcon,
+  Trash2Icon,
+} from "lucide-react"
 
 import type { Locale } from "@/components/language-provider"
 import {
@@ -63,6 +68,7 @@ function StatusBadge({
 export function KeyCard({
   providerId,
   keyInfo,
+  balanceQueryEnabled,
   locale,
   copy,
   cannotDisable,
@@ -72,6 +78,7 @@ export function KeyCard({
 }: {
   providerId: string
   keyInfo: GatewayKey
+  balanceQueryEnabled: boolean
   locale: Locale
   copy: ProviderKeyCopy
   cannotDisable: boolean
@@ -81,13 +88,14 @@ export function KeyCard({
 }) {
   const switchId = useId()
   const enabled = keyInfo.enabled !== false
-  const { pending, remove, test, toggle, updateWeight } = useKeyActions({
-    providerId,
-    keyName: keyInfo.name,
-    copy,
-    onRefresh,
-    onFeedback,
-  })
+  const { pending, refreshBalance, remove, test, toggle, updateWeight } =
+    useKeyActions({
+      providerId,
+      keyName: keyInfo.name,
+      copy,
+      onRefresh,
+      onFeedback,
+    })
   const metrics = [
     [copy.columns.requests, keyInfo.total],
     [copy.columns.success, keyInfo.success],
@@ -109,7 +117,7 @@ export function KeyCard({
         </CardAction>
       </CardHeader>
       <CardContent className="flex flex-1 flex-col gap-5">
-        <KeyBalance keyInfo={keyInfo} copy={copy} />
+        <KeyBalance keyInfo={keyInfo} locale={locale} copy={copy} />
         <div className="grid grid-cols-3 gap-x-4 gap-y-4">
           {metrics.map(([label, value]) => (
             <div key={label} className="flex min-w-0 flex-col gap-1">
@@ -167,6 +175,18 @@ export function KeyCard({
             </FieldLabel>
           </Field>
           <div className="flex items-center gap-1">
+            {balanceQueryEnabled && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={copy.refreshBalance}
+                title={copy.refreshBalance}
+                disabled={pending !== null}
+                onClick={() => void refreshBalance()}
+              >
+                {pending === "balance" ? <Spinner /> : <RefreshCwIcon />}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon-sm"

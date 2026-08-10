@@ -9,11 +9,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough, Transform } from 'node:stream';
+import {
+  effectiveBalanceQuery,
+  executeBalanceQuery,
+} from './balance-script.mjs';
 import { buildCodexArtifacts } from './codex-config.mjs';
 import {
   DEFAULT_UPSTREAM,
   keyFingerprint,
   normalizeBaseUrl,
+  normalizeBalanceQuery,
   normalizeConfig,
   normalizeIdentifier,
   normalizeProvider,
@@ -421,7 +426,7 @@ class KeyPool {
         lastError: k.lastError,
         balance: k.balance ? {
           isAvailable: k.balance.isAvailable,
-          infos: k.balance.infos.map(info => ({ ...info })),
+          items: k.balance.items.map(item => ({ ...item })),
         } : null,
         balanceUpdatedAt: k.balanceUpdatedAt,
         balanceError: k.balanceError,
@@ -430,88 +435,65 @@ class KeyPool {
   }
 }
 
-function normalizeBalance(payload) {
-  if (!payload || !Array.isArray(payload.balance_infos)) throw new Error('invalid balance response');
+async function fetchKeyBalance(runtime, key) {
+  const query = effectiveBalanceQuery(runtime.provider);
+  if (!query) throw Object.assign(new Error('balance query is not configured'), { statusCode: 409 });
+  return executeBalanceQuery({
+    query,
+    provider: runtime.provider,
+    key,
+    agent: runtime.agent,
+    ...(runtime.settings.mock ? { mockResponse: mockBalanceResponse() } : {}),
+  });
+}
+
+function mockBalanceResponse() {
   return {
-    isAvailable: payload.is_available !== false,
-    infos: payload.balance_infos.map(info => ({
-      currency: String(info.currency || ''),
-      totalBalance: String(info.total_balance ?? ''),
-      grantedBalance: String(info.granted_balance ?? ''),
-      toppedUpBalance: String(info.topped_up_balance ?? ''),
-    })).filter(info => info.currency && info.totalBalance),
+    is_available: true,
+    balance_infos: [{
+      currency: 'CNY',
+      total_balance: '88.80',
+      granted_balance: '8.80',
+      topped_up_balance: '80.00',
+    }],
   };
 }
 
-function readJsonResponse(res, maxBytes = 1024 * 1024) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    res.on('data', chunk => {
-      size += chunk.length;
-      if (size > maxBytes) {
-        reject(new Error('balance response too large'));
-        res.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    res.on('end', () => {
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        reject(new Error(`balance request returned ${res.statusCode}`));
-        return;
-      }
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      } catch {
-        reject(new Error('invalid balance response'));
-      }
-    });
-    res.on('error', reject);
-  });
-}
-
-async function fetchKeyBalance(runtime, key) {
-  if (runtime.settings.mock) {
-    return normalizeBalance({
-      is_available: true,
-      balance_infos: [{
-        currency: 'CNY',
-        total_balance: '88.80',
-        granted_balance: '8.80',
-        topped_up_balance: '80.00',
-      }],
-    });
-  }
-
-  const url = new URL('/user/balance', runtime.provider.baseUrl);
-  const mod = url.protocol === 'https:' ? https : http;
-  const payload = await new Promise((resolve, reject) => {
-    const req = mod.request(url, {
-      method: 'GET',
-      headers: { authorization: `Bearer ${key.key}`, accept: 'application/json' },
-      agent: runtime.agent,
-    }, res => readJsonResponse(res).then(resolve, reject));
-    req.setTimeout(10000, () => req.destroy(new Error('balance request timeout')));
-    req.on('error', reject);
-    req.end();
-  });
-  return normalizeBalance(payload);
-}
-
-function supportsBalanceQuery(runtime) {
-  if (runtime.settings.mock) return true;
+async function refreshKeyBalance(runtime, key) {
+  if (key.balanceRefreshPromise) return key.balanceRefreshPromise;
+  const refreshPromise = (async () => {
+    try {
+      key.balance = await fetchKeyBalance(runtime, key);
+      key.balanceUpdatedAt = Date.now();
+      key.balanceError = '';
+      return key.balance;
+    } catch (error) {
+      key.balanceError = error.message;
+      throw error;
+    }
+  })();
+  key.balanceRefreshPromise = refreshPromise;
   try {
-    const hostname = new URL(runtime.provider.baseUrl).hostname.toLowerCase();
-    return hostname === 'api.deepseek.com' || hostname.endsWith('.api.deepseek.com');
-  } catch {
-    return false;
+    return await refreshPromise;
+  } finally {
+    if (key.balanceRefreshPromise === refreshPromise) key.balanceRefreshPromise = null;
   }
 }
 
 function startBalanceRefresh(runtime, log) {
   const { pool, settings } = runtime;
   if (!runtime.provider.enabled) return () => {};
+  const query = effectiveBalanceQuery(runtime.provider);
+  if (!query) {
+    for (const key of pool.keys) {
+      key.balance = null;
+      key.balanceUpdatedAt = null;
+      key.balanceError = '';
+    }
+    return () => {};
+  }
+  const refreshMs = query.refreshMs ?? settings.balanceRefreshMs;
+  if (refreshMs <= 0) return () => {};
   let refreshing = false;
   const refresh = async () => {
     if (refreshing) return;
@@ -519,11 +501,8 @@ function startBalanceRefresh(runtime, log) {
     try {
       await Promise.all(pool.keys.filter(key => key.enabled).map(async key => {
         try {
-          key.balance = await fetchKeyBalance(runtime, key);
-          key.balanceUpdatedAt = Date.now();
-          key.balanceError = '';
+          await refreshKeyBalance(runtime, key);
         } catch (err) {
-          key.balanceError = err.message;
           log(`balance refresh failed provider=${runtime.provider.id} key=${key.name}: ${err.message}`);
         }
       }));
@@ -532,19 +511,18 @@ function startBalanceRefresh(runtime, log) {
     }
   };
 
-  if (settings.balanceRefreshMs <= 0) return () => {};
-  if (!supportsBalanceQuery(runtime)) {
-    for (const key of pool.keys) key.balanceError = 'balance is only supported for DeepSeek';
-    return () => {};
-  }
   refresh();
-  const timer = setInterval(refresh, settings.balanceRefreshMs);
+  const timer = setInterval(refresh, refreshMs);
   timer.unref();
   return () => clearInterval(timer);
 }
 
 function sameKeyConfig(a, b) {
   return JSON.stringify(a.keys) === JSON.stringify(b.keys);
+}
+
+function sameBalanceQuery(a, b) {
+  return JSON.stringify(a.balanceQuery || null) === JSON.stringify(b.balanceQuery || null);
 }
 
 function canReuseRuntime(a, b) {
@@ -641,7 +619,8 @@ class ProviderRegistry {
       const existing = this.entries.get(provider.id);
       if (existing && canReuseRuntime(existing.provider, provider)) {
         const refreshBalance = existing.provider.enabled !== provider.enabled
-          || !sameKeyConfig(existing.provider, provider);
+          || !sameKeyConfig(existing.provider, provider)
+          || !sameBalanceQuery(existing.provider, provider);
         existing.provider = provider;
         existing.settings = this.settings;
         const keyChanges = existing.pool.reconcile(provider.keys, this.settings);
@@ -1155,6 +1134,7 @@ function buildHealth(cfg, registry, uptime) {
       name: provider.name,
       baseUrl: cfg.mock ? 'mock' : provider.baseUrl,
       enabled: provider.enabled,
+      balanceQueryEnabled: Boolean(effectiveBalanceQuery(provider)),
       modelCount: provider.models.length,
       total: stats.total,
       keys: stats.keys,
@@ -1191,6 +1171,7 @@ function maskedKey(key) {
 }
 
 function publicProvider(provider) {
+  const balanceQuery = provider.balanceQuery || effectiveBalanceQuery(provider);
   return {
     id: provider.id,
     name: provider.name,
@@ -1201,6 +1182,7 @@ function publicProvider(provider) {
       alias: providerModelAlias(provider.id, model.id),
     })),
     keys: provider.keys.map(maskedKey),
+    balanceQuery: balanceQuery ? { ...balanceQuery } : null,
   };
 }
 
@@ -1449,6 +1431,53 @@ function resolveModelFetchInput(cfg, registry, payload) {
   return { baseUrl, secret, modelsUrl };
 }
 
+function resolveBalanceTestInput(cfg, registry, payload) {
+  const providerId = payload.providerId ? normalizeIdentifier(payload.providerId, 'providerId') : '';
+  const runtime = providerId ? registry.get(providerId) : null;
+  if (providerId && !runtime) {
+    throw Object.assign(new Error(`provider ${providerId} not found`), { statusCode: 404 });
+  }
+  const baseUrl = normalizeBaseUrl(payload.baseUrl || runtime?.provider.baseUrl, 'baseUrl');
+  const query = normalizeBalanceQuery(payload.balanceQuery, null, 'balanceQuery');
+  if (!query?.enabled) throw new Error('balanceQuery must be enabled for testing');
+  const keyName = String(payload.keyName || runtime?.pool.keys[0]?.name || 'test').trim();
+  let secret = typeof payload.key === 'string' ? payload.key.trim() : '';
+  if (!secret && runtime) {
+    const runtimeKey = runtime.pool.keys.find(item => item.name === keyName);
+    if (!runtimeKey) throw Object.assign(new Error(`key ${keyName} not found`), { statusCode: 404 });
+    secret = runtimeKey.key;
+  }
+  if (!secret) throw new Error('an API key is required to test balanceQuery');
+  const provider = {
+    id: providerId || 'balance-test',
+    baseUrl,
+    balanceQuery: query,
+  };
+  return { provider, query, key: { name: keyName || 'test', key: secret }, runtime };
+}
+
+async function testBalanceQuery(cfg, input) {
+  const reusableAgent = input.runtime?.provider.baseUrl === input.provider.baseUrl
+    ? input.runtime.agent
+    : null;
+  let agent = reusableAgent;
+  if (!cfg.mock && !agent) {
+    const Agent = new URL(input.provider.baseUrl).protocol === 'https:' ? https.Agent : http.Agent;
+    agent = new Agent({ keepAlive: false, maxSockets: 1 });
+  }
+  try {
+    return await executeBalanceQuery({
+      query: input.query,
+      provider: input.provider,
+      key: input.key,
+      agent,
+      ...(cfg.mock ? { mockResponse: mockBalanceResponse() } : {}),
+    });
+  } finally {
+    if (agent && agent !== reusableAgent) agent.destroy();
+  }
+}
+
 async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
   const pathname = parsedUrl.pathname;
   const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent);
@@ -1464,6 +1493,18 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
     const input = managementValidation(() => resolveModelFetchInput(cfg, registry, payload));
     const models = await fetchProviderModels(input.baseUrl, input.secret, input.modelsUrl);
     writeJson(res, 200, { models });
+    return true;
+  }
+
+  if (pathname === '/api/balance/test' && req.method === 'POST') {
+    const payload = await readJsonBody(req);
+    const input = managementValidation(() => resolveBalanceTestInput(cfg, registry, payload));
+    try {
+      writeJson(res, 200, await testBalanceQuery(cfg, input));
+    } catch (error) {
+      if (!error.statusCode) error.statusCode = 502;
+      throw error;
+    }
     return true;
   }
 
@@ -1561,6 +1602,26 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
       }
       const result = await testKeyConnection(runtime, runtimeKey);
       writeJson(res, result.ok ? 200 : 502, result);
+      return true;
+    }
+
+    if (parts.length === 6 && parts[5] === 'balance' && req.method === 'POST') {
+      const runtime = registry.get(providerId);
+      const runtimeKey = runtime?.pool.keys.find(item => item.name === keyName);
+      if (!runtime || !runtimeKey) {
+        throw Object.assign(new Error(`key ${keyName} is not active in provider ${providerId}`), { statusCode: 409 });
+      }
+      if (!effectiveBalanceQuery(runtime.provider)) {
+        throw Object.assign(new Error(`balance query is not configured for provider ${providerId}`), { statusCode: 409 });
+      }
+      try {
+        await refreshKeyBalance(runtime, runtimeKey);
+      } catch (error) {
+        if (!error.statusCode) error.statusCode = 502;
+        throw error;
+      }
+      const result = runtime.pool.stats().keys.find(item => item.name === keyName);
+      writeJson(res, 200, result);
       return true;
     }
 

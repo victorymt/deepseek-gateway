@@ -1,8 +1,27 @@
-export type BalanceInfo = {
-  currency: string
-  totalBalance: string
-  grantedBalance: string
-  toppedUpBalance: string
+export type BalanceQuery = {
+  enabled: boolean
+  language: "javascript"
+  code: string
+  timeoutMs: number
+  refreshMs?: number
+}
+
+export type BalanceItem = {
+  planName?: string
+  extra?: string
+  isValid: boolean
+  invalidMessage?: string
+  total?: number
+  used?: number
+  remaining?: number
+  granted?: number
+  toppedUp?: number
+  unit?: string
+}
+
+export type BalanceResult = {
+  isAvailable: boolean
+  items: BalanceItem[]
 }
 
 export type GatewayKey = {
@@ -12,7 +31,7 @@ export type GatewayKey = {
   state: "healthy" | "cooldown" | "invalid" | string
   invalid: boolean
   lastError: string
-  balance?: { infos: BalanceInfo[]; isAvailable: boolean }
+  balance?: BalanceResult
   balanceError: string
   inFlight: number
   total: number
@@ -30,6 +49,7 @@ export type ProviderHealth = {
   name: string
   baseUrl: string
   enabled: boolean
+  balanceQueryEnabled: boolean
   modelCount: number
   total: Health["total"]
   keys: GatewayKey[]
@@ -78,6 +98,7 @@ export type Provider = {
   enabled: boolean
   models: ProviderModel[]
   keys: MaskedProviderKey[]
+  balanceQuery: BalanceQuery | null
 }
 
 export type ProviderConfig = {

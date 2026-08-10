@@ -31,20 +31,32 @@ test('reports an occupied listen port without an unhandled error stack', async (
   const port = blocker.address().port;
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-port-'));
   const configPath = path.join(runDir, 'keys.json');
-  fs.writeFileSync(configPath, '{}');
+  fs.writeFileSync(configPath, JSON.stringify({
+    schemaVersion: 2,
+    defaultProvider: 'deepseek',
+    defaultModel: 'deepseek-chat',
+    balanceRefreshMs: 1,
+    providers: [{
+      id: 'deepseek',
+      name: 'DeepSeek',
+      baseUrl: 'https://api.deepseek.com',
+      enabled: true,
+      models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat', upstreamModel: 'deepseek-chat' }],
+      keys: [{ name: 'test', key: 'sk-test-ok', weight: 1 }],
+    }],
+  }));
 
   try {
     const result = spawnSync(process.execPath, [
       GATEWAY,
-      '--mock',
       '--config', configPath,
       '--port', String(port),
-      '--keys', 'test=sk-test-ok',
     ], { cwd: ROOT, encoding: 'utf8', timeout: 5000 });
 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /address already in use/);
     assert.match(result.stderr, /--port <port>/);
+    assert.doesNotMatch(result.stderr, /balance refresh failed/);
     assert.doesNotMatch(result.stderr, /Unhandled 'error' event/);
   } finally {
     await new Promise(resolve => blocker.close(resolve));

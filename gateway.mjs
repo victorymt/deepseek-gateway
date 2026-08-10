@@ -668,6 +668,7 @@ class ProviderRegistry {
     this.entries = new Map();
     this.retiredEntries = new Set();
     this.aliases = new Map();
+    this.active = false;
     this.apply(settings);
   }
 
@@ -688,13 +689,19 @@ class ProviderRegistry {
     };
     runtime.retain = () => this.retainRuntime(runtime);
     runtime.release = () => this.releaseRuntime(runtime);
-    runtime.stopBalanceRefresh = startBalanceRefresh(runtime, this.log);
+    if (this.active) runtime.stopBalanceRefresh = startBalanceRefresh(runtime, this.log);
     return runtime;
   }
 
   restartBalanceRefresh(runtime) {
     runtime.stopBalanceRefresh();
-    runtime.stopBalanceRefresh = startBalanceRefresh(runtime, this.log);
+    runtime.stopBalanceRefresh = this.active ? startBalanceRefresh(runtime, this.log) : () => {};
+  }
+
+  activate() {
+    if (this.active) return;
+    this.active = true;
+    for (const runtime of this.entries.values()) this.restartBalanceRefresh(runtime);
   }
 
   destroyRuntime(runtime) {
@@ -785,6 +792,7 @@ class ProviderRegistry {
   }
 
   close() {
+    this.active = false;
     const runtimes = new Set([...this.entries.values(), ...this.retiredEntries]);
     for (const runtime of runtimes) this.destroyRuntime(runtime);
     this.entries.clear();
@@ -1967,6 +1975,7 @@ function main() {
     process.exitCode = 1;
   });
   server.listen(cfg.port, cfg.host, () => {
+    registry.activate();
     const addr = server.address();
     cfg.port = addr.port;
     log(`deepseek-gateway v${VERSION} listening on http://${addr.address}:${addr.port}${cfg.mock ? ' [mock]' : ''}`);

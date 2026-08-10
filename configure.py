@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import http.client
 import json
 import math
 import os
 from pathlib import Path
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -20,6 +22,9 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "keys.json"
+GATEWAY_AVAILABLE = "available"
+GATEWAY_RUNNING = "running"
+GATEWAY_OCCUPIED = "occupied"
 DEFAULTS = {
     "port": 8787,
     "host": "127.0.0.1",
@@ -242,6 +247,40 @@ def local_gateway_url(host: str, port: int) -> str:
     return f"http://{target}:{port}"
 
 
+def gateway_status(config: dict) -> str:
+    base_url = local_gateway_url(config["host"], config["port"])
+    parsed = urlparse(base_url)
+    headers = {}
+    if config.get("token"):
+        headers["Authorization"] = f"Bearer {config['token']}"
+
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=0.5)
+    try:
+        connection.request("GET", "/health", headers=headers)
+        response = connection.getresponse()
+        body = response.read(1024 * 1024)
+        if response.status == 200:
+            payload = json.loads(body)
+            if (
+                isinstance(payload, dict)
+                and payload.get("status") == "ok"
+                and isinstance(payload.get("version"), str)
+                and isinstance(payload.get("providers"), list)
+            ):
+                return GATEWAY_RUNNING
+        return GATEWAY_OCCUPIED
+    except (OSError, http.client.HTTPException, json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    finally:
+        connection.close()
+
+    try:
+        with socket.create_connection((parsed.hostname, parsed.port), timeout=0.25):
+            return GATEWAY_OCCUPIED
+    except OSError:
+        return GATEWAY_AVAILABLE
+
+
 def run_ui_build() -> bool:
     script = ROOT / "build-ui.sh"
     if not script.exists():
@@ -341,9 +380,21 @@ def main() -> int:
             run_ui_build()
         if not args.no_codex and confirm("同步配置到 Codex CLI", True):
             run_codex_setup(config, path, skip_ui=args.no_ui)
-        if not args.no_start and confirm("立即启动网关", False):
-            print("按 Ctrl+C 停止网关。\n")
-            return subprocess.call(["node", str(ROOT / "gateway.mjs"), "--config", str(path)])
+        if not args.no_start:
+            status = gateway_status(config)
+            gateway_url = local_gateway_url(config["host"], config["port"])
+            if status == GATEWAY_RUNNING:
+                print(f"\n检测到网关已在运行：{gateway_url}/")
+                print("若本次修改了配置，请先停止现有进程，再重新启动以加载新配置。")
+                return 0
+            if confirm("立即启动网关", False):
+                if status == GATEWAY_OCCUPIED:
+                    raise RuntimeError(
+                        f"{config['host']}:{config['port']} 已被占用，"
+                        "但无法使用当前网关密码访问 /health；请停止占用进程或修改监听端口"
+                    )
+                print("按 Ctrl+C 停止网关。\n")
+                return subprocess.call(["node", str(ROOT / "gateway.mjs"), "--config", str(path)])
         print(f"\n启动命令：node {ROOT / 'gateway.mjs'} --config {path}")
         return 0
     except (EOFError, KeyboardInterrupt):

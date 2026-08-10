@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +14,69 @@ SPEC.loader.exec_module(configure_module)
 
 
 class ConfigureWizardTests(unittest.TestCase):
+    def test_gateway_status_authenticates_and_recognizes_running_gateway(self):
+        config = {"host": "0.0.0.0", "port": 8787, "token": "gateway-token"}
+        response = MagicMock()
+        response.status = 200
+        response.read.return_value = json.dumps({
+            "status": "ok",
+            "version": "1.0.0",
+            "providers": [],
+        }).encode()
+        connection = MagicMock()
+        connection.getresponse.return_value = response
+
+        with patch.object(configure_module.http.client, "HTTPConnection", return_value=connection) as factory:
+            status = configure_module.gateway_status(config)
+
+        self.assertEqual(status, configure_module.GATEWAY_RUNNING)
+        factory.assert_called_once_with("127.0.0.1", 8787, timeout=0.5)
+        connection.request.assert_called_once_with(
+            "GET",
+            "/health",
+            headers={"Authorization": "Bearer gateway-token"},
+        )
+        connection.close.assert_called_once_with()
+
+    def test_main_does_not_start_a_second_running_gateway(self):
+        args = type("Args", (), {
+            "config": Path("/tmp/keys.json"),
+            "no_ui": True,
+            "no_codex": True,
+            "no_start": False,
+        })()
+        config = {"host": "127.0.0.1", "port": 8787, "token": "gateway-token"}
+
+        with patch.object(configure_module, "parse_args", return_value=args), \
+             patch.object(configure_module, "configure", return_value=config), \
+             patch.object(configure_module, "gateway_status", return_value=configure_module.GATEWAY_RUNNING), \
+             patch.object(configure_module, "confirm") as confirm, \
+             patch.object(configure_module.subprocess, "call") as call:
+            result = configure_module.main()
+
+        self.assertEqual(result, 0)
+        confirm.assert_not_called()
+        call.assert_not_called()
+
+    def test_main_checks_an_occupied_port_before_spawning_node(self):
+        args = type("Args", (), {
+            "config": Path("/tmp/keys.json"),
+            "no_ui": True,
+            "no_codex": True,
+            "no_start": False,
+        })()
+        config = {"host": "127.0.0.1", "port": 8787, "token": "gateway-token"}
+
+        with patch.object(configure_module, "parse_args", return_value=args), \
+             patch.object(configure_module, "configure", return_value=config), \
+             patch.object(configure_module, "gateway_status", return_value=configure_module.GATEWAY_OCCUPIED), \
+             patch.object(configure_module, "confirm", return_value=True), \
+             patch.object(configure_module.subprocess, "call") as call:
+            result = configure_module.main()
+
+        self.assertEqual(result, 1)
+        call.assert_not_called()
+
     def test_ui_build_runs_the_helper_script(self):
         completed = type("Completed", (), {"returncode": 0})()
 

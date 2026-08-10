@@ -28,8 +28,10 @@ export type GatewayKey = {
   name: string
   weight: number
   enabled: boolean
-  state: "healthy" | "cooldown" | "invalid" | string
+  alwaysTry: boolean
+  state: "healthy" | "cooldown" | "invalid" | "unhealthy" | string
   invalid: boolean
+  unhealthy: boolean
   lastError: string
   balance?: BalanceResult
   balanceError: string
@@ -88,6 +90,7 @@ export type MaskedProviderKey = {
   name: string
   weight: number
   enabled: boolean
+  alwaysTry: boolean
   maskedKey: string
   fingerprint: string
 }

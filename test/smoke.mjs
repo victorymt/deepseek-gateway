@@ -230,6 +230,77 @@ test('blacklisted key is removed from scheduling even when it is the only key', 
   }
 });
 
+test('alwaysTry keeps the only key schedulable after the blacklist threshold', async () => {
+  const config = multiProviderConfig({ blacklistThreshold: 2 });
+  config.providers[0].keys[0] = {
+    name: 'alpha-key',
+    key: 'sk-alpha-500',
+    weight: 1,
+    enabled: true,
+    alwaysTry: true,
+  };
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
+  try {
+    for (let i = 0; i < 4; i++) assert.equal((await gw.chat()).status, 500);
+    const key = (await gw.health()).providers
+      .find(provider => provider.id === 'alpha').keys[0];
+    assert.equal(key.alwaysTry, true);
+    assert.equal(key.invalid, false);
+    assert.equal(key.unhealthy, true);
+    assert.equal(key.state, 'unhealthy');
+    assert.equal(key.failureCount, 4);
+    assert.match(key.lastError, /alwaysTry retained after 4 failures/);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('alwaysTry keeps an authentication failure eligible for later requests', async () => {
+  const config = multiProviderConfig();
+  config.providers[0].keys[0] = {
+    name: 'alpha-key',
+    key: 'sk-alpha-401',
+    weight: 1,
+    enabled: true,
+    alwaysTry: true,
+  };
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
+  try {
+    assert.equal((await gw.chat()).status, 401);
+    assert.equal((await gw.chat()).status, 401);
+    const key = (await gw.health()).providers
+      .find(provider => provider.id === 'alpha').keys[0];
+    assert.equal(key.invalid, false);
+    assert.equal(key.unhealthy, true);
+    assert.equal(key.failureCount, 2);
+    assert.match(key.lastError, /retained by alwaysTry/);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('alwaysTry still respects 429 cooldown', async () => {
+  const config = multiProviderConfig({ cooldownMs: 5000 });
+  config.providers[0].keys[0] = {
+    name: 'alpha-key',
+    key: 'sk-alpha-429',
+    weight: 1,
+    enabled: true,
+    alwaysTry: true,
+  };
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
+  try {
+    assert.equal((await gw.chat()).status, 429);
+    const key = (await gw.health()).providers
+      .find(provider => provider.id === 'alpha').keys[0];
+    assert.equal(key.state, 'cooldown');
+    assert.ok(key.cooldownSec > 0);
+    assert.equal((await gw.chat()).status, 502);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('legacy breakerThreshold config still controls the blacklist threshold', async () => {
   const gw = await startGateway('alice=sk-a-500', [], {}, { breakerThreshold: 2 });
   try {
@@ -987,9 +1058,19 @@ test('key API updates routing state, tests one key, and deletes live', async () 
     const update = await fetch(`${gw.base}/api/providers/alpha/keys/alpha-key`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json', origin: gw.base },
-      body: JSON.stringify({ enabled: true, weight: 3 }),
+      body: JSON.stringify({ enabled: true, weight: 3, alwaysTry: true }),
     });
-    assert.equal(update.status, 200, await update.text());
+    const updateText = await update.text();
+    assert.equal(update.status, 200, updateText);
+    const updatedPublicKey = JSON.parse(updateText).providers
+      .find(provider => provider.id === 'alpha').keys
+      .find(key => key.name === 'alpha-key');
+    assert.equal(updatedPublicKey.alwaysTry, true);
+
+    const updatedHealthKey = (await gw.health()).providers
+      .find(provider => provider.id === 'alpha').keys
+      .find(key => key.name === 'alpha-key');
+    assert.equal(updatedHealthKey.alwaysTry, true);
 
     const remove = await fetch(`${gw.base}/api/providers/alpha/keys/alpha-backup`, {
       method: 'DELETE',
@@ -1010,6 +1091,7 @@ test('key API updates routing state, tests one key, and deletes live', async () 
     assert.deepEqual(persistedKeys.map(key => key.name), ['alpha-key']);
     assert.equal(persistedKeys[0].enabled, true);
     assert.equal(persistedKeys[0].weight, 3);
+    assert.equal(persistedKeys[0].alwaysTry, true);
   } finally {
     await gw.stop();
   }
@@ -1501,7 +1583,12 @@ test('merge-config preserves codex profiles', async () => {
   const setup = path.join(ROOT, 'setup-codex.sh');
   for (let i = 0; i < 2; i++) {
     const r = spawnSync('bash', [setup], {
-      env: { ...process.env, CODEX_HOME: codexDir, GATEWAY_URL: 'http://127.0.0.1:8787' },
+      env: {
+        ...process.env,
+        CODEX_HOME: codexDir,
+        GATEWAY_URL: 'http://127.0.0.1:8787',
+        GATEWAY_CONFIG: path.join(ROOT, 'keys.example.json'),
+      },
       encoding: 'utf8',
     });
     assert.equal(r.status, 0, r.stderr);

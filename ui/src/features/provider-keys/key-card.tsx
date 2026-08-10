@@ -3,6 +3,7 @@ import {
   CircleDotIcon,
   PlugZapIcon,
   RefreshCwIcon,
+  Repeat2Icon,
   Trash2Icon,
 } from "lucide-react"
 
@@ -51,7 +52,7 @@ function StatusBadge({
     copy.states[keyInfo.state as keyof ProviderKeyCopy["states"]] ??
     keyInfo.state
   const variant =
-    keyInfo.state === "invalid"
+    keyInfo.state === "invalid" || keyInfo.state === "unhealthy"
       ? "destructive"
       : keyInfo.state === "healthy"
         ? "secondary"
@@ -87,9 +88,17 @@ export function KeyCard({
   onFeedback: (feedback: KeyFeedback) => void
 }) {
   const switchId = useId()
+  const alwaysTryId = useId()
   const enabled = keyInfo.enabled !== false
-  const { pending, refreshBalance, remove, test, toggle, updateWeight } =
-    useKeyActions({
+  const {
+    pending,
+    refreshBalance,
+    remove,
+    setAlwaysTry,
+    test,
+    toggle,
+    updateWeight,
+  } = useKeyActions({
       providerId,
       keyName: keyInfo.name,
       copy,
@@ -112,7 +121,13 @@ export function KeyCard({
         <CardDescription>
           {copy.weight} {keyInfo.weight}
         </CardDescription>
-        <CardAction>
+        <CardAction className="flex items-center gap-1">
+          {keyInfo.alwaysTry && (
+            <Badge variant="outline" title={copy.alwaysTryDescription}>
+              <Repeat2Icon data-icon="inline-start" />
+              {copy.alwaysTry}
+            </Badge>
+          )}
           <StatusBadge keyInfo={keyInfo} copy={copy} />
         </CardAction>
       </CardHeader>
@@ -159,21 +174,40 @@ export function KeyCard({
             {keyInfo.lastError}
           </p>
         )}
-        <div className="flex items-center justify-between gap-3">
-          <Field orientation="horizontal" className="w-auto gap-2">
-            <Switch
-              id={switchId}
-              size="sm"
-              checked={enabled}
-              disabled={pending !== null || cannotDisable}
-              aria-label={enabled ? copy.keyEnabled : copy.keyDisabled}
-              title={cannotDisable ? copy.lastEnabledKey : undefined}
-              onCheckedChange={(checked) => void toggle(checked)}
-            />
-            <FieldLabel htmlFor={switchId}>
-              {enabled ? copy.keyEnabled : copy.keyDisabled}
-            </FieldLabel>
-          </Field>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <Field orientation="horizontal" className="w-auto gap-2">
+              <Switch
+                id={switchId}
+                size="sm"
+                checked={enabled}
+                disabled={pending !== null || cannotDisable}
+                aria-label={enabled ? copy.keyEnabled : copy.keyDisabled}
+                title={cannotDisable ? copy.lastEnabledKey : undefined}
+                onCheckedChange={(checked) => void toggle(checked)}
+              />
+              <FieldLabel htmlFor={switchId}>
+                {enabled ? copy.keyEnabled : copy.keyDisabled}
+              </FieldLabel>
+            </Field>
+            <Field orientation="horizontal" className="w-auto gap-2">
+              <Switch
+                id={alwaysTryId}
+                size="sm"
+                checked={keyInfo.alwaysTry}
+                disabled={pending !== null}
+                aria-label={copy.alwaysTry}
+                title={copy.alwaysTryDescription}
+                onCheckedChange={(checked) => void setAlwaysTry(checked)}
+              />
+              <FieldLabel
+                htmlFor={alwaysTryId}
+                title={copy.alwaysTryDescription}
+              >
+                {copy.alwaysTry}
+              </FieldLabel>
+            </Field>
+          </div>
           <div className="flex items-center gap-1">
             {balanceQueryEnabled && (
               <Button

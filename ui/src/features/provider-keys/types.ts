@@ -1,4 +1,10 @@
-export type KeyAction = "toggle" | "test" | "balance" | "weight" | "delete"
+export type KeyAction =
+  | "toggle"
+  | "alwaysTry"
+  | "test"
+  | "balance"
+  | "weight"
+  | "delete"
 
 export type KeyFeedback = { kind: "success" | "error"; message: string } | null
 
@@ -17,6 +23,8 @@ export type ProviderKeyCopy = {
   keyDeleted: string
   keyDisabled: string
   keyEnabled: string
+  alwaysTry: string
+  alwaysTryDescription: string
   keyUpdated: string
   lastEnabledKey: string
   providerSummary: (keys: number, requests: number) => string
@@ -45,6 +53,7 @@ export type ProviderKeyCopy = {
     disabled: string
     healthy: string
     invalid: string
+    unhealthy: string
   }
 }
 

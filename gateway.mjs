@@ -279,12 +279,14 @@ class KeyPool {
   createKeyState(key) {
     return {
       ...key,
+      alwaysTry: key.alwaysTry === true,
       inFlight: 0,
       success: 0,
       errors: 0,
       ratelimited: 0,
       failureCount: 0,
       invalid: false,
+      unhealthy: false,
       throttleUntil: 0,
       lastUsed: 0,
       lastError: '',
@@ -309,6 +311,7 @@ class KeyPool {
       existing.key = key.key;
       existing.weight = key.weight;
       existing.enabled = key.enabled;
+      existing.alwaysTry = key.alwaysTry === true;
       return existing;
     });
 
@@ -321,7 +324,12 @@ class KeyPool {
 
   pickKey(exclude = []) {
     const now = Date.now();
-    const avail = this.keys.filter(k => k.enabled && !exclude.includes(k.name) && !k.invalid && now >= k.throttleUntil);
+    const avail = this.keys.filter(k => (
+      k.enabled
+      && !exclude.includes(k.name)
+      && (k.alwaysTry || !k.invalid)
+      && now >= k.throttleUntil
+    ));
     if (!avail.length) return null;
     let best = null;
     let bestScore = Infinity;
@@ -344,6 +352,7 @@ class KeyPool {
 
   markInvalid(key, reason) {
     key.invalid = true;
+    key.unhealthy = false;
     key.throttleUntil = 0;
     key.lastError = reason;
   }
@@ -351,6 +360,13 @@ class KeyPool {
   recordFailure(key, reason) {
     key.failureCount++;
     key.lastError = reason;
+    if (key.alwaysTry) {
+      key.unhealthy = true;
+      if (this.blacklistThreshold > 0 && key.failureCount >= this.blacklistThreshold) {
+        key.lastError = `alwaysTry retained after ${key.failureCount} failures: ${reason}`;
+      }
+      return;
+    }
     if (this.blacklistThreshold > 0 && key.failureCount >= this.blacklistThreshold) {
       this.markInvalid(key, `blacklisted after ${key.failureCount} failures: ${reason}`);
     }
@@ -376,6 +392,10 @@ class KeyPool {
     if (s < 400) {
       key.success++;
       this.total.success++;
+      if (key.alwaysTry) {
+        key.invalid = false;
+        key.unhealthy = false;
+      }
       if (!key.invalid) {
         key.throttleUntil = 0;
         key.lastError = '';
@@ -391,7 +411,12 @@ class KeyPool {
       key.lastError = '429 rate limited';
     } else if (s === 401 || s === 402 || s === 403) {
       key.failureCount++;
-      this.markInvalid(key, `${s} invalid key`);
+      if (key.alwaysTry) {
+        key.unhealthy = true;
+        key.lastError = `${s} invalid key; retained by alwaysTry`;
+      } else {
+        this.markInvalid(key, `${s} invalid key`);
+      }
     } else if (s >= 500) {
       this.recordFailure(key, `http ${s}`);
     }
@@ -413,8 +438,9 @@ class KeyPool {
 
   state(key) {
     if (!key.enabled) return 'disabled';
-    if (key.invalid) return 'invalid';
+    if (key.invalid && !key.alwaysTry) return 'invalid';
     if (key.throttleUntil > Date.now()) return 'cooldown';
+    if (key.invalid || key.unhealthy) return 'unhealthy';
     return 'healthy';
   }
 
@@ -427,6 +453,7 @@ class KeyPool {
         state: this.state(k),
         weight: k.weight,
         enabled: k.enabled,
+        alwaysTry: k.alwaysTry,
         inFlight: k.inFlight,
         total: k.success + k.errors,
         success: k.success,
@@ -434,6 +461,7 @@ class KeyPool {
         ratelimited: k.ratelimited,
         failureCount: k.failureCount,
         invalid: k.invalid,
+        unhealthy: k.unhealthy || (k.alwaysTry && k.invalid),
         cooldownSec: k.throttleUntil > now ? Math.ceil((k.throttleUntil - now) / 1000) : 0,
         lastUsed: k.lastUsed,
         lastError: k.lastError,
@@ -1387,6 +1415,7 @@ function maskedKey(key) {
     name: key.name,
     weight: key.weight,
     enabled: key.enabled,
+    alwaysTry: key.alwaysTry === true,
     maskedKey: `****${suffix}`,
     fingerprint,
   };
@@ -1850,7 +1879,7 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
 
     if (parts.length === 5 && req.method === 'PATCH') {
       const payload = await readJsonBody(req);
-      const allowed = new Set(['enabled', 'weight']);
+      const allowed = new Set(['enabled', 'weight', 'alwaysTry']);
       const unknown = Object.keys(payload).filter(field => !allowed.has(field));
       if (unknown.length) {
         throw Object.assign(new Error(`unknown key settings: ${unknown.join(', ')}`), { statusCode: 400 });
@@ -1861,10 +1890,14 @@ async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
       if (Object.hasOwn(payload, 'weight') && typeof payload.weight !== 'number') {
         throw Object.assign(new Error('key weight must be a number'), { statusCode: 400 });
       }
+      if (Object.hasOwn(payload, 'alwaysTry') && typeof payload.alwaysTry !== 'boolean') {
+        throw Object.assign(new Error('key alwaysTry must be a boolean'), { statusCode: 400 });
+      }
       const updatedKey = {
         ...key,
         ...(Object.hasOwn(payload, 'enabled') ? { enabled: payload.enabled } : {}),
         ...(Object.hasOwn(payload, 'weight') ? { weight: payload.weight } : {}),
+        ...(Object.hasOwn(payload, 'alwaysTry') ? { alwaysTry: payload.alwaysTry } : {}),
       };
       const keys = provider.keys.map(item => item.name === keyName ? updatedKey : item);
       const statusCode = payload.enabled === false ? 409 : 400;
@@ -1999,7 +2032,7 @@ function dashboardHtml() {
   .pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
   .healthy { background: var(--mint-soft); color: var(--mint); border: 1px solid #286c5e; }
   .cooldown { background: var(--amber-soft); color: var(--amber); border: 1px solid #795b2e; }
-  .invalid { background: var(--coral-soft); color: var(--coral); border: 1px solid #80433e; }
+  .invalid, .unhealthy { background: var(--coral-soft); color: var(--coral); border: 1px solid #80433e; }
   .balance { min-width: 128px; }
   .balance-line { white-space: nowrap; font: 600 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
   .balance-off { margin-top: 3px; color: var(--coral); font-size: 10px; }
@@ -2114,9 +2147,10 @@ async function tick() {
     rows.innerHTML = '';
     for (const k of h.keys) {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td><span class="key-name">' + esc(k.name) + '</span></td>' +
+      tr.innerHTML = '<td><span class="key-name">' + esc(k.name) + '</span>' +
+        (k.alwaysTry ? ' <span class="dim">alwaysTry</span>' : '') + '</td>' +
         '<td><span class="pill ' + esc(k.state) + '">' + esc(k.state) + '</span>' +
-        (k.invalid ? ' <span class="dim">' + esc(k.lastError || '') + '</span>' : '') + '</td>' +
+        (k.invalid || k.unhealthy ? ' <span class="dim">' + esc(k.lastError || '') + '</span>' : '') + '</td>' +
         balanceCell(k) +
         '<td>' + k.inFlight + '</td>' +
         '<td>' + k.total + '</td>' +

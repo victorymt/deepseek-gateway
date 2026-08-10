@@ -89,6 +89,7 @@ type KeyDraft = {
   key: string
   weight: number
   enabled: boolean
+  alwaysTry: boolean
   maskedKey?: string
   fingerprint?: string
 }
@@ -174,6 +175,9 @@ const copy = {
     upstream: "Upstream model",
     weight: "Weight",
     keyEnabled: "Key enabled",
+    alwaysTry: "Always try",
+    alwaysTryDescription:
+      "Keep this key eligible after authentication or upstream failures.",
     fingerprint: "Fingerprint",
     edit: "Edit provider",
     test: "Test connection",
@@ -241,6 +245,8 @@ const copy = {
     upstream: "上游模型",
     weight: "权重",
     keyEnabled: "启用密钥",
+    alwaysTry: "始终尝试",
+    alwaysTryDescription: "鉴权或上游失败后，后续请求仍可继续使用此密钥。",
     fingerprint: "指纹",
     edit: "编辑 Provider",
     test: "测试连接",
@@ -298,7 +304,15 @@ const emptyDraft = (): ProviderDraft => ({
   upstreamFormat: "responses",
   enabled: true,
   models: [{ id: "", name: "", upstreamModel: "" }],
-  keys: [{ name: "primary", key: "", weight: 1, enabled: true }],
+  keys: [
+    {
+      name: "primary",
+      key: "",
+      weight: 1,
+      enabled: true,
+      alwaysTry: false,
+    },
+  ],
   balanceQuery: {
     enabled: false,
     language: "javascript",
@@ -323,6 +337,7 @@ function providerDraft(provider: Provider): ProviderDraft {
       ...key,
       key: "",
       enabled: key.enabled !== false,
+      alwaysTry: key.alwaysTry === true,
     })),
     balanceQuery: provider.balanceQuery ?? {
       enabled: false,
@@ -404,11 +419,12 @@ export function ProviderManager({
     try {
       const payload = {
         ...draft,
-        keys: draft.keys.map(({ name, key, weight, enabled }) => ({
+        keys: draft.keys.map(({ name, key, weight, enabled, alwaysTry }) => ({
           name,
           key,
           weight,
           enabled,
+          alwaysTry,
         })),
       }
       const next = await apiRequest<ProviderConfig>(
@@ -1262,6 +1278,7 @@ export function ProviderManager({
                           key: "",
                           weight: 1,
                           enabled: true,
+                          alwaysTry: false,
                         },
                       ],
                     }))
@@ -1347,36 +1364,59 @@ export function ProviderManager({
                         }
                       />
                     </Field>
-                    <Field
-                      data-disabled={
-                        key.enabled &&
-                        draft.keys.filter((item) => item.enabled).length === 1
-                          ? true
-                          : undefined
-                      }
-                    >
-                      <FieldLabel htmlFor={`key-enabled-${index}`}>
-                        {t.keyEnabled}
-                      </FieldLabel>
-                      <Switch
-                        id={`key-enabled-${index}`}
-                        checked={key.enabled}
-                        disabled={
+                    <div className="flex flex-col gap-3">
+                      <Field
+                        data-disabled={
                           key.enabled &&
                           draft.keys.filter((item) => item.enabled).length === 1
+                            ? true
+                            : undefined
                         }
-                        onCheckedChange={(checked) =>
-                          setDraft((value) => ({
-                            ...value,
-                            keys: value.keys.map((item, itemIndex) =>
-                              itemIndex === index
-                                ? { ...item, enabled: checked }
-                                : item
-                            ),
-                          }))
-                        }
-                      />
-                    </Field>
+                      >
+                        <FieldLabel htmlFor={`key-enabled-${index}`}>
+                          {t.keyEnabled}
+                        </FieldLabel>
+                        <Switch
+                          id={`key-enabled-${index}`}
+                          checked={key.enabled}
+                          disabled={
+                            key.enabled &&
+                            draft.keys.filter((item) => item.enabled).length ===
+                              1
+                          }
+                          onCheckedChange={(checked) =>
+                            setDraft((value) => ({
+                              ...value,
+                              keys: value.keys.map((item, itemIndex) =>
+                                itemIndex === index
+                                  ? { ...item, enabled: checked }
+                                  : item
+                              ),
+                            }))
+                          }
+                        />
+                      </Field>
+                      <Field>
+                        <FieldLabel htmlFor={`key-always-try-${index}`}>
+                          {t.alwaysTry}
+                        </FieldLabel>
+                        <Switch
+                          id={`key-always-try-${index}`}
+                          checked={key.alwaysTry}
+                          title={t.alwaysTryDescription}
+                          onCheckedChange={(checked) =>
+                            setDraft((value) => ({
+                              ...value,
+                              keys: value.keys.map((item, itemIndex) =>
+                                itemIndex === index
+                                  ? { ...item, alwaysTry: checked }
+                                  : item
+                              ),
+                            }))
+                          }
+                        />
+                      </Field>
+                    </div>
                     <Button
                       type="button"
                       variant="ghost"

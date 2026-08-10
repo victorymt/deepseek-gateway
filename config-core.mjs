@@ -144,10 +144,13 @@ export function normalizeProvider(input, existing = null) {
     const enabled = key.enabled === undefined
       ? (existingKeys.get(keyName)?.enabled ?? true)
       : key.enabled === true;
+    const alwaysTry = key.alwaysTry === undefined
+      ? (existingKeys.get(keyName)?.alwaysTry ?? false)
+      : key.alwaysTry === true;
     if (!keyName || keyName.length > 100) throw new Error(`provider ${id} key name is invalid`);
     if (!secret) throw new Error(`provider ${id} key ${keyName} secret is required`);
     if (!Number.isFinite(weight) || weight <= 0) throw new Error(`provider ${id} key ${keyName} weight must be greater than zero`);
-    return { name: keyName, key: secret, weight, enabled };
+    return { name: keyName, key: secret, weight, enabled, alwaysTry };
   });
 
   return {
@@ -316,6 +319,7 @@ export function serializableConfig(config) {
         key: key.key,
         weight: key.weight,
         enabled: key.enabled,
+        ...(key.alwaysTry ? { alwaysTry: true } : {}),
       })),
     })),
   };

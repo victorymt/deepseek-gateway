@@ -26,10 +26,34 @@ test('legacy config normalizes and serializes as canonical v2', () => {
   assert.equal(stored.providers[0].upstreamFormat, 'responses');
   assert.equal(stored.providers[0].keys[0].key, 'sk-legacy');
   assert.equal(stored.providers[0].keys[0].enabled, true);
+  assert.equal(normalized.providers[0].keys[0].alwaysTry, false);
+  assert.equal(stored.providers[0].keys[0].alwaysTry, undefined);
   assert.deepEqual(stored.customField, { keep: true });
   assert.equal(stored.upstream, undefined);
   assert.equal(stored.keys, undefined);
   assert.equal(stored.breakerThreshold, undefined);
+});
+
+test('provider key alwaysTry defaults to false and persists when enabled', () => {
+  const normalized = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      models: [{ id: 'chat', upstreamModel: 'chat' }],
+      keys: [
+        { name: 'primary', key: 'sk-primary', alwaysTry: true },
+        { name: 'backup', key: 'sk-backup' },
+      ],
+    }],
+  });
+  const storedKeys = serializableConfig(normalized).providers[0].keys;
+
+  assert.equal(normalized.providers[0].keys[1].alwaysTry, false);
+  assert.equal(storedKeys[0].alwaysTry, true);
+  assert.equal(storedKeys[1].alwaysTry, undefined);
 });
 
 test('provider upstream format defaults to Responses and accepts Chat Completions', () => {

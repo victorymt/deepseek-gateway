@@ -60,6 +60,18 @@ export function useKeyActions({
     )
   }
 
+  async function setAlwaysTry(checked: boolean) {
+    await runAction(
+      "alwaysTry",
+      () =>
+        apiRequest(keyUrl, {
+          method: "PATCH",
+          body: JSON.stringify({ alwaysTry: checked }),
+        }),
+      copy.keyUpdated
+    )
+  }
+
   async function test() {
     setPending("test")
     onFeedback(null)
@@ -114,5 +126,13 @@ export function useKeyActions({
     )
   }
 
-  return { pending, refreshBalance, remove, test, toggle, updateWeight }
+  return {
+    pending,
+    refreshBalance,
+    remove,
+    setAlwaysTry,
+    test,
+    toggle,
+    updateWeight,
+  }
 }

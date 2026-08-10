@@ -183,7 +183,13 @@ cp keys.example.json keys.json
         { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash" }
       ],
       "keys": [
-        { "name": "primary", "key": "sk-你的Key", "weight": 1, "enabled": true }
+        {
+          "name": "primary",
+          "key": "sk-你的Key",
+          "weight": 1,
+          "enabled": true,
+          "alwaysTry": true
+        }
       ]
     }
   ]
@@ -326,11 +332,13 @@ Codex 配置仍固定使用 `wire_api = "responses"`。上游协议只在 Provid
 | --- | --- |
 | 正常响应 | 记录成功并清除冷却状态，不清零累计失败数 |
 | `429` | 优先使用 `Retry-After`，否则按 `cooldownMs` 冷却，并切换 Key 重试 |
-| `5xx` / 网络错误 | 增加累计失败数；达到 `blacklistThreshold` 后标记为 `invalid` |
-| `401` / `402` / `403` | 立即标记为 `invalid`，永久移出当前进程的调度池 |
+| `5xx` / 网络错误 | 增加累计失败数；达到 `blacklistThreshold` 后标记为 `invalid`；`alwaysTry` Key 只记录异常，仍保留在调度池 |
+| `401` / `402` / `403` | 立即标记为 `invalid`，永久移出当前进程的调度池；`alwaysTry` Key 只记录异常，后续请求仍会尝试 |
 | 全部 Key 冷却或失效 | 返回 `502 no keys available`，不再强行调度不可用 Key |
 
 正常情况下，调度器先排除停用、冷却和失效 Key，再选择 `inFlight / weight` 最小的 Key，平分时使用轮询游标。`inFlight` 会保持到响应体完整结束，因此长时间 SSE 请求也参与并发均衡。每个 Provider 至少需要保留一个 `enabled: true` 的 Key。
+
+Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会将它自动移出调度池。失败 Key 仍会从当前请求的后续重试中排除，避免同一请求重复调用；新的请求可以再次选择它。`429` 是例外：无论是否启用 `alwaysTry`，网关都会尊重 `Retry-After` 或 `cooldownMs`。因此只有一个 `alwaysTry` Key 时，普通失败后的每个新请求仍会调用该 Key，限流冷却期间则返回 `502 no keys available`。Web UI 会将这种状态显示为“异常但继续尝试”。
 
 每个请求最多切换 `min(maxRetries, 已启用 Key 数量 - 1)` 次。失败切换发生在向客户端写出响应头之前；流式传输开始后的上游中断会记录为该 Key 的网络错误。
 
@@ -356,6 +364,7 @@ Codex 配置仍固定使用 `wire_api = "responses"`。上游协议只在 Provid
 | `host` | `--host` | - | `127.0.0.1` | 监听地址 |
 | `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`upstreamFormat`、`models`、`keys`、`balanceQuery` 和启用状态 |
 | `providers[].upstreamFormat` | - | - | `responses` | 上游协议，可选 `responses` 或 `chat-completions` |
+| `providers[].keys[].alwaysTry` | - | - | `false` | 鉴权或上游失败后仍允许新的请求继续调度该 Key；仍尊重 429 冷却和手动停用 |
 | `defaultProvider` | - | - | 第一个启用项 | 未带别名前缀时使用的 Provider |
 | `defaultModel` | - | - | 默认 Provider 首个模型 | Codex 启动模型别名 |
 | `upstream` | `--upstream` | `DS_UPSTREAM` | `https://api.deepseek.com` | 旧配置/默认 Provider 上游 URL |

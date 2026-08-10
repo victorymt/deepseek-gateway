@@ -1688,6 +1688,10 @@ test('setup script is idempotent and dry-run is pure', async () => {
   assert.match(merged, /model = "alpha--shared"/);
   const catalog = JSON.parse(fs.readFileSync(path.join(codexDir, 'gateway-models.json'), 'utf8'));
   assert.deepEqual(catalog.models.map(model => model.slug), ['alpha--shared', 'beta--shared']);
+  assert.ok(
+    catalog.models.every(model => model.supports_search_tool === false),
+    'catalog models must not enable supports_search_tool (hides MCP tools in Codex CLI)',
+  );
 
   const validate = spawnSync('python3', ['-c', `
 import sys, tomllib

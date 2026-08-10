@@ -63,6 +63,12 @@ export function buildModelCatalog(config) {
         priority: priority++,
         visibility: 'list',
         supported_in_api: true,
+        // Codex CLI hides MCP tools (ToolExposure::Deferred) when
+        // supports_search_tool is true and the upstream does not implement
+        // tool_search (see deepseek-ai/awesome-deepseek-agent#341 and
+        // openai/codex#36382). DeepSeek upstreams do not support it, so the
+        // catalog always disables the flag regardless of the template.
+        supports_search_tool: false,
       });
     }
   }

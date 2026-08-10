@@ -7,6 +7,7 @@ export type BalanceInfo = {
 
 export type GatewayKey = {
   name: string
+  weight: number
   state: "healthy" | "cooldown" | "invalid" | string
   invalid: boolean
   lastError: string

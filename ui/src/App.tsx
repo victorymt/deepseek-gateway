@@ -25,6 +25,7 @@ import {
   CardAction,
   CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
@@ -46,20 +47,12 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { Button } from "@/components/ui/button"
-import type { GatewayKey, Health } from "@/gateway-types"
+import type { GatewayKey, Health, ProviderHealth } from "@/gateway-types"
 
 type ConnectionState = "connecting" | "live" | "offline" | "auth"
 
@@ -120,6 +113,13 @@ const translations = {
     keysSynced: (count: number) =>
       `${count} ${count === 1 ? "key" : "keys"} · synced just now`,
     waitingForKeys: "Waiting for key data",
+    providerSummary: (keys: number, requests: number) =>
+      `${keys} ${keys === 1 ? "key" : "keys"} · ${requests} requests`,
+    enabledProvider: "Enabled",
+    disabledProvider: "Disabled",
+    topUp: "Top-up",
+    granted: "Granted",
+    weight: "Weight",
     columns: {
       provider: "Provider",
       key: "Key",
@@ -200,6 +200,13 @@ const translations = {
     connectionHealth: "连接状态",
     keysSynced: (count: number) => `${count} 个密钥 · 刚刚同步`,
     waitingForKeys: "等待密钥数据",
+    providerSummary: (keys: number, requests: number) =>
+      `${keys} 个密钥 · ${requests} 次请求`,
+    enabledProvider: "已启用",
+    disabledProvider: "已停用",
+    topUp: "充值",
+    granted: "赠送",
+    weight: "权重",
     columns: {
       provider: "Provider",
       key: "密钥",
@@ -370,7 +377,7 @@ function StatusBadge({
   )
 }
 
-function BalanceCell({
+function KeyBalance({
   keyInfo,
   locale,
 }: {
@@ -378,43 +385,204 @@ function BalanceCell({
   locale: Locale
 }) {
   const infos = keyInfo.balance?.infos ?? []
+  const t = translations[locale]
 
   if (!infos.length) {
-    return <TableCell className="text-muted-foreground">—</TableCell>
+    return (
+      <div className="flex min-h-20 flex-col gap-1">
+        <p className="text-xs text-muted-foreground">{t.columns.balance}</p>
+        <p className="font-mono text-2xl font-semibold tabular-nums">—</p>
+        {keyInfo.balanceError && (
+          <p className="line-clamp-2 text-xs text-destructive">
+            {keyInfo.balanceError}
+          </p>
+        )}
+      </div>
+    )
   }
 
   return (
-    <TableCell>
-      <div className="flex flex-col gap-1 font-mono text-xs">
-        {infos.map((info) => (
-          <span key={`${keyInfo.name}-${info.currency}`}>
-            <span className="text-muted-foreground">{info.currency}</span>{" "}
-            {info.totalBalance}
-          </span>
-        ))}
+    <div className="flex min-h-20 flex-col gap-2">
+      <div className="flex items-center gap-2">
+        <p className="text-xs text-muted-foreground">{t.columns.balance}</p>
         {!keyInfo.balance?.isAvailable && (
-          <span className="text-destructive">
-            {translations[locale].unavailable}
-          </span>
+          <Badge variant="destructive">{t.unavailable}</Badge>
         )}
       </div>
-    </TableCell>
+      <div className="flex flex-wrap gap-x-6 gap-y-2">
+        {infos.map((info) => (
+          <div
+            key={`${keyInfo.name}-${info.currency}`}
+            className="flex flex-col gap-1"
+          >
+            <p className="font-mono text-2xl font-semibold tabular-nums">
+              <span className="mr-2 text-sm font-medium text-muted-foreground">
+                {info.currency}
+              </span>
+              {info.totalBalance}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {t.topUp} {info.toppedUpBalance} · {t.granted}{" "}
+              {info.grantedBalance}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 
-function LoadingRows() {
+function KeyCard({ keyInfo, locale }: { keyInfo: GatewayKey; locale: Locale }) {
+  const t = translations[locale]
+  const metrics = [
+    [t.columns.requests, keyInfo.total],
+    [t.columns.success, keyInfo.success],
+    [t.columns.errors, keyInfo.errors],
+    [t.columns.rateLimited, keyInfo.ratelimited],
+    [t.columns.inFlight, keyInfo.inFlight],
+    [t.columns.failures, keyInfo.failureCount],
+  ] as const
+
   return (
-    <>
-      {Array.from({ length: 3 }, (_, index) => (
-        <TableRow key={`loading-${index}`}>
-          {Array.from({ length: 12 }, (_, cellIndex) => (
-            <TableCell key={cellIndex}>
-              <Skeleton className="h-4 w-16" />
-            </TableCell>
+    <Card size="sm" className="min-h-72">
+      <CardHeader>
+        <CardTitle className="font-mono">{keyInfo.name}</CardTitle>
+        <CardDescription>
+          {t.weight} {keyInfo.weight}
+        </CardDescription>
+        <CardAction>
+          <StatusBadge keyInfo={keyInfo} locale={locale} />
+        </CardAction>
+      </CardHeader>
+      <CardContent className="flex flex-1 flex-col gap-5">
+        <KeyBalance keyInfo={keyInfo} locale={locale} />
+        <div className="grid grid-cols-3 gap-x-4 gap-y-4">
+          {metrics.map(([label, value]) => (
+            <div key={label} className="flex min-w-0 flex-col gap-1">
+              <p
+                className="truncate text-xs text-muted-foreground"
+                title={label}
+              >
+                {label}
+              </p>
+              <p className="font-mono text-base font-medium tabular-nums">
+                {formatNumber(value, locale)}
+              </p>
+            </div>
           ))}
-        </TableRow>
-      ))}
-    </>
+        </div>
+      </CardContent>
+      <CardFooter className="flex-col items-stretch gap-2">
+        <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs">
+          <span className="text-muted-foreground">
+            {t.columns.cooldown}{" "}
+            <span className="font-mono text-foreground">
+              {keyInfo.cooldownSec ? `${keyInfo.cooldownSec}s` : "—"}
+            </span>
+          </span>
+          <span className="text-muted-foreground">
+            {t.columns.lastUsed}{" "}
+            <span className="font-mono text-foreground">
+              {keyInfo.lastUsed
+                ? new Date(keyInfo.lastUsed).toLocaleTimeString(locale)
+                : "—"}
+            </span>
+          </span>
+        </div>
+        {keyInfo.lastError && (
+          <p
+            className="truncate text-xs text-destructive"
+            title={keyInfo.lastError}
+          >
+            {keyInfo.lastError}
+          </p>
+        )}
+      </CardFooter>
+    </Card>
+  )
+}
+
+function ProviderKeySection({
+  provider,
+  locale,
+}: {
+  provider: ProviderHealth
+  locale: Locale
+}) {
+  const t = translations[locale]
+
+  return (
+    <section
+      className="flex flex-col gap-4"
+      aria-labelledby={`provider-${provider.id}`}
+    >
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3
+              id={`provider-${provider.id}`}
+              className="text-lg font-semibold"
+            >
+              {provider.name}
+            </h3>
+            <Badge variant={provider.enabled ? "secondary" : "outline"}>
+              {provider.enabled ? t.enabledProvider : t.disabledProvider}
+            </Badge>
+          </div>
+          <p className="truncate font-mono text-xs text-muted-foreground">
+            {provider.id} · {provider.baseUrl}
+          </p>
+        </div>
+        <p className="font-mono text-xs text-muted-foreground">
+          {t.providerSummary(provider.keys.length, provider.total.requests)}
+        </p>
+      </header>
+      <div className="grid items-stretch gap-3 md:grid-cols-2">
+        {provider.keys.map((keyInfo) => (
+          <KeyCard
+            key={`${provider.id}:${keyInfo.name}`}
+            keyInfo={keyInfo}
+            locale={locale}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function LoadingKeyCards() {
+  return (
+    <section className="flex flex-col gap-4">
+      <div className="flex items-end justify-between gap-4">
+        <div className="flex flex-col gap-2">
+          <Skeleton className="h-5 w-32" />
+          <Skeleton className="h-3 w-56" />
+        </div>
+        <Skeleton className="h-3 w-28" />
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        {Array.from({ length: 2 }, (_, index) => (
+          <Card key={index} size="sm" className="min-h-72">
+            <CardHeader>
+              <CardTitle>
+                <Skeleton className="h-4 w-28" />
+              </CardTitle>
+              <CardAction>
+                <Skeleton className="h-5 w-16" />
+              </CardAction>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-5">
+              <Skeleton className="h-16 w-40" />
+              <div className="grid grid-cols-3 gap-4">
+                {Array.from({ length: 6 }, (_, metric) => (
+                  <Skeleton key={metric} className="h-9 w-full" />
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </section>
   )
 }
 
@@ -523,20 +691,25 @@ function Dashboard({
     tokens: 0,
   }
   const refreshedAt = new Date().toLocaleTimeString(locale)
-  const providerKeys = health
-    ? health.providers?.flatMap((provider) =>
-        provider.keys.map((keyInfo) => ({
-          providerId: provider.id,
-          providerName: provider.name,
-          keyInfo,
-        })),
-      ) ??
-      health.keys.map((keyInfo) => ({
-        providerId: health.defaultProvider,
-        providerName: health.defaultProvider,
-        keyInfo,
-      }))
+  const providers = health
+    ? health.providers?.length
+      ? health.providers
+      : [
+          {
+            id: health.defaultProvider,
+            name: health.defaultProvider,
+            baseUrl: health.upstream,
+            enabled: true,
+            modelCount: 0,
+            total: health.total,
+            keys: health.keys,
+          },
+        ]
     : []
+  const keyCount = providers.reduce(
+    (count, provider) => count + provider.keys.length,
+    0
+  )
 
   return (
     <main className="min-h-svh bg-background text-foreground">
@@ -548,9 +721,7 @@ function Dashboard({
               <p className="font-mono text-xs font-semibold text-primary">
                 {t.operations}
               </p>
-              <h1 className="text-3xl font-semibold sm:text-4xl">
-                {t.title}
-              </h1>
+              <h1 className="text-3xl font-semibold sm:text-4xl">{t.title}</h1>
               <p className="text-sm text-muted-foreground">{t.subtitle}</p>
             </div>
           </div>
@@ -583,7 +754,10 @@ function Dashboard({
         )}
 
         <Tabs defaultValue="dashboard" className="flex flex-col gap-5">
-          <TabsList variant="line" className="w-full justify-start overflow-x-auto">
+          <TabsList
+            variant="line"
+            className="w-full justify-start overflow-x-auto"
+          >
             <TabsTrigger
               value="dashboard"
               aria-label={t.navigation.dashboard}
@@ -623,148 +797,83 @@ function Dashboard({
               className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"
               aria-label={t.metricsLabel}
             >
-          <MetricCard
-            label={t.metrics.requests}
-            value={totals.requests}
-            note={t.metrics.lifetime}
-            badge={t.metrics.total}
-            loading={loading}
-            locale={locale}
-          />
-          <MetricCard
-            label={t.metrics.success}
-            value={totals.success}
-            note={t.metrics.lifetime}
-            badge={t.metrics.ok}
-            loading={loading}
-            locale={locale}
-          />
-          <MetricCard
-            label={t.metrics.errors}
-            value={totals.errors}
-            note={t.metrics.lifetime}
-            badge={t.metrics.fail}
-            loading={loading}
-            locale={locale}
-          />
-          <MetricCard
-            label={t.metrics.rateLimited}
-            value={totals.ratelimited}
-            note={t.metrics.upstream}
-            badge="HTTP 429"
-            loading={loading}
-            locale={locale}
-          />
-          <MetricCard
-            label={t.metrics.tokens}
-            value={totals.tokens}
-            note={t.metrics.lifetime}
-            badge={t.metrics.usage}
-            loading={loading}
-            locale={locale}
-          />
+              <MetricCard
+                label={t.metrics.requests}
+                value={totals.requests}
+                note={t.metrics.lifetime}
+                badge={t.metrics.total}
+                loading={loading}
+                locale={locale}
+              />
+              <MetricCard
+                label={t.metrics.success}
+                value={totals.success}
+                note={t.metrics.lifetime}
+                badge={t.metrics.ok}
+                loading={loading}
+                locale={locale}
+              />
+              <MetricCard
+                label={t.metrics.errors}
+                value={totals.errors}
+                note={t.metrics.lifetime}
+                badge={t.metrics.fail}
+                loading={loading}
+                locale={locale}
+              />
+              <MetricCard
+                label={t.metrics.rateLimited}
+                value={totals.ratelimited}
+                note={t.metrics.upstream}
+                badge="HTTP 429"
+                loading={loading}
+                locale={locale}
+              />
+              <MetricCard
+                label={t.metrics.tokens}
+                value={totals.tokens}
+                note={t.metrics.lifetime}
+                badge={t.metrics.usage}
+                loading={loading}
+                locale={locale}
+              />
             </section>
 
-            <Card>
-          <CardHeader className="border-b">
-            <div>
-              <CardDescription>{t.keyPool}</CardDescription>
-              <CardTitle>{t.connectionHealth}</CardTitle>
-            </div>
-            <CardAction className="font-mono text-xs text-muted-foreground">
-              {health ? t.keysSynced(providerKeys.length) : t.waitingForKeys}
-            </CardAction>
-          </CardHeader>
-          <CardContent className="p-0">
-            <Table className="min-w-[1160px]">
-              <TableHeader>
-                <TableRow className="bg-muted/50 hover:bg-muted/50">
-                  <TableHead className="sticky left-0 z-10 bg-muted/50">
-                    {t.columns.provider}
-                  </TableHead>
-                  <TableHead>
-                    {t.columns.key}
-                  </TableHead>
-                  <TableHead>{t.columns.state}</TableHead>
-                  <TableHead>{t.columns.balance}</TableHead>
-                  <TableHead>{t.columns.inFlight}</TableHead>
-                  <TableHead>{t.columns.requests}</TableHead>
-                  <TableHead>{t.columns.success}</TableHead>
-                  <TableHead>{t.columns.errors}</TableHead>
-                  <TableHead>{t.columns.rateLimited}</TableHead>
-                  <TableHead>{t.columns.failures}</TableHead>
-                  <TableHead>{t.columns.cooldown}</TableHead>
-                  <TableHead>{t.columns.lastUsed}</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {loading && !health ? <LoadingRows /> : null}
-                {!loading && providerKeys.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={12} className="p-0">
-                      <Empty className="rounded-none border-0">
-                        <EmptyHeader>
-                          <EmptyMedia variant="icon">
-                            <KeyRoundIcon />
-                          </EmptyMedia>
-                          <EmptyTitle>{t.noKeys}</EmptyTitle>
-                          <EmptyDescription>
-                            {t.noKeysDescription}
-                          </EmptyDescription>
-                        </EmptyHeader>
-                      </Empty>
-                    </TableCell>
-                  </TableRow>
-                ) : null}
-                {providerKeys.map(({ providerId, providerName, keyInfo }) => (
-                  <TableRow key={`${providerId}:${keyInfo.name}`}>
-                    <TableCell className="sticky left-0 z-10 bg-card font-mono font-medium">
-                      <span className="flex flex-col gap-0.5">
-                        <span>{providerName}</span>
-                        <span className="text-xs font-normal text-muted-foreground">
-                          {providerId}
-                        </span>
-                      </span>
-                    </TableCell>
-                    <TableCell className="font-mono font-medium">
-                      {keyInfo.name}
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge keyInfo={keyInfo} locale={locale} />
-                    </TableCell>
-                    <BalanceCell keyInfo={keyInfo} locale={locale} />
-                    <TableCell className="font-mono tabular-nums">
-                      {keyInfo.inFlight}
-                    </TableCell>
-                    <TableCell className="font-mono tabular-nums">
-                      {keyInfo.total}
-                    </TableCell>
-                    <TableCell className="font-mono text-primary tabular-nums">
-                      {keyInfo.success}
-                    </TableCell>
-                    <TableCell className="font-mono text-destructive tabular-nums">
-                      {keyInfo.errors}
-                    </TableCell>
-                    <TableCell className="font-mono tabular-nums">
-                      {keyInfo.ratelimited}
-                    </TableCell>
-                    <TableCell className="font-mono tabular-nums">
-                      {keyInfo.failureCount}
-                    </TableCell>
-                    <TableCell className="font-mono tabular-nums">
-                      {keyInfo.cooldownSec ? `${keyInfo.cooldownSec}s` : "—"}
-                    </TableCell>
-                    <TableCell className="font-mono text-muted-foreground">
-                      {keyInfo.lastUsed
-                        ? new Date(keyInfo.lastUsed).toLocaleTimeString(locale)
-                        : "—"}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-            </Card>
+            <section className="flex flex-col gap-6" aria-label={t.keyPool}>
+              <header className="flex flex-wrap items-end justify-between gap-3">
+                <div className="flex flex-col gap-1">
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {t.keyPool}
+                  </p>
+                  <h2 className="text-xl font-semibold">
+                    {t.connectionHealth}
+                  </h2>
+                </div>
+                <p className="font-mono text-xs text-muted-foreground">
+                  {health ? t.keysSynced(keyCount) : t.waitingForKeys}
+                </p>
+              </header>
+
+              {loading && !health ? <LoadingKeyCards /> : null}
+              {!loading && keyCount === 0 ? (
+                <Empty className="border">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <KeyRoundIcon />
+                    </EmptyMedia>
+                    <EmptyTitle>{t.noKeys}</EmptyTitle>
+                    <EmptyDescription>{t.noKeysDescription}</EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              ) : null}
+              {providers.map((provider) => (
+                <ProviderKeySection
+                  key={provider.id}
+                  provider={provider}
+                  locale={locale}
+                />
+              ))}
+            </section>
 
             <footer className="flex justify-between gap-4 font-mono text-xs text-muted-foreground">
               <span>{t.autoRefresh}</span>

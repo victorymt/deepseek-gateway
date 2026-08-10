@@ -31,14 +31,13 @@ cd deepseek-gateway
 ./configure.py
 ```
 
-首次运行先构建 shadcn 状态面板：
+首次运行会由配置脚本自动构建 shadcn 状态面板。也可以手动构建：
 
 ```bash
-cd ui
-npm ci
-npm run build
-cd ..
+./build-ui.sh
 ```
+
+`setup-codex.sh` 在 UI 不存在或源码更新后也会自动构建；使用 `--skip-ui` 可跳过，使用 `--build-ui` 可强制重建。
 
 如果未构建 `ui/dist`，网关会自动使用内嵌的兼容面板。
 
@@ -48,8 +47,9 @@ cd ..
 2. 隐藏输入一个或多个 DeepSeek API Key，并为初始 Provider 设置名称和权重。
 3. 可选启用网关访问密码。
 4. 安全写入 `keys.json`。
-5. 可选同步 Codex CLI 配置。
-6. 可选立即启动网关。
+5. 自动安装依赖并构建 shadcn 状态面板（可通过 `--no-ui` 跳过）。
+6. 可选同步 Codex CLI 配置。
+7. 可选立即启动网关。
 
 启动后可在面板的“Provider 管理”中添加、编辑、测试或删除其他上游。首次通过面板修改时，旧版 `{ upstream, keys }` 配置会以 v2 结构原子写回。
 
@@ -98,6 +98,7 @@ node gateway.mjs --config keys.json
 --config PATH  指定配置文件，默认 ./keys.json
 --no-codex     不询问 Codex CLI 接入
 --no-start     不询问立即启动网关
+--no-ui        跳过 shadcn 状态面板构建
 ```
 
 ## 手工配置

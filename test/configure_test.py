@@ -14,6 +14,26 @@ SPEC.loader.exec_module(configure_module)
 
 
 class ConfigureWizardTests(unittest.TestCase):
+    def test_ui_build_runs_the_helper_script(self):
+        completed = type("Completed", (), {"returncode": 0})()
+
+        with patch.object(configure_module.subprocess, "run", return_value=completed) as run:
+            result = configure_module.run_ui_build()
+
+        self.assertTrue(result)
+        run.assert_called_once_with([str(ROOT / "build-ui.sh")], check=False)
+
+    def test_codex_setup_can_skip_ui_build(self):
+        config = {"host": "127.0.0.1", "port": 8787}
+        completed = type("Completed", (), {"returncode": 0})()
+
+        with patch.object(configure_module, "prompt_text", return_value="deepseek--v4-flash"), \
+             patch.object(configure_module.subprocess, "run", return_value=completed) as run:
+            configure_module.run_codex_setup(config, Path("/tmp/keys.json"), skip_ui=True)
+
+        command = run.call_args.args[0]
+        self.assertEqual(command, [str(ROOT / "setup-codex.sh"), "--skip-ui"])
+
     def test_v2_edits_default_provider_without_flattening_config(self):
         original = {
             "schemaVersion": 2,

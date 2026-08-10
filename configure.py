@@ -242,12 +242,30 @@ def local_gateway_url(host: str, port: int) -> str:
     return f"http://{target}:{port}"
 
 
-def run_codex_setup(config: dict, config_path: Path) -> None:
+def run_ui_build() -> bool:
+    script = ROOT / "build-ui.sh"
+    if not script.exists():
+        print(f"WARNING: 找不到 {script}，将使用内嵌兼容面板。", file=sys.stderr)
+        return False
+    result = subprocess.run([str(script)], check=False)
+    if result.returncode:
+        print(
+            f"WARNING: build-ui.sh 退出码为 {result.returncode}，将使用内嵌兼容面板。",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def run_codex_setup(config: dict, config_path: Path, *, skip_ui: bool = False) -> None:
     env = os.environ.copy()
     env["GATEWAY_URL"] = local_gateway_url(config["host"], config["port"])
     env["GATEWAY_CONFIG"] = str(config_path)
     env["MODEL"] = prompt_text("Codex 默认模型别名", env.get("MODEL", "deepseek--v4-flash"))
-    result = subprocess.run([str(ROOT / "setup-codex.sh")], env=env, check=False)
+    command = [str(ROOT / "setup-codex.sh")]
+    if skip_ui:
+        command.append("--skip-ui")
+    result = subprocess.run(command, env=env, check=False)
     if result.returncode:
         raise RuntimeError(f"setup-codex.sh 退出码为 {result.returncode}")
     print("启动 Codex 前请设置：export DEEPSEEK_GATEWAY_TOKEN='<网关密码>'")
@@ -310,6 +328,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="配置文件路径（默认 ./keys.json）")
     parser.add_argument("--no-codex", action="store_true", help="不询问 Codex CLI 接入")
     parser.add_argument("--no-start", action="store_true", help="不询问立即启动网关")
+    parser.add_argument("--no-ui", action="store_true", help="跳过 shadcn 状态面板构建")
     return parser.parse_args()
 
 
@@ -318,8 +337,10 @@ def main() -> int:
     path = args.config.expanduser().resolve()
     try:
         config = configure(path)
+        if not args.no_ui:
+            run_ui_build()
         if not args.no_codex and confirm("同步配置到 Codex CLI", True):
-            run_codex_setup(config, path)
+            run_codex_setup(config, path, skip_ui=args.no_ui)
         if not args.no_start and confirm("立即启动网关", False):
             print("按 Ctrl+C 停止网关。\n")
             return subprocess.call(["node", str(ROOT / "gateway.mjs"), "--config", str(path)])

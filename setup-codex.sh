@@ -19,6 +19,8 @@ setup-codex.sh — point Codex CLI at the local multi-provider gateway
 
 Usage:
   ./setup-codex.sh                install gateway config (backs up existing files)
+  ./setup-codex.sh --build-ui     force rebuild the shadcn dashboard first
+  ./setup-codex.sh --skip-ui      skip the dashboard build
   ./setup-codex.sh --undo         restore the latest backup
   ./setup-codex.sh --dry-run      show what would be written, change nothing
 
@@ -33,7 +35,10 @@ EOF
 [ "${1:-}" = "--help" ] && usage && exit 0
 
 DRY=""
+UI_MODE="auto"
 case "${1:-}" in
+  --build-ui) UI_MODE="force" ;;
+  --skip-ui) UI_MODE="skip" ;;
   --undo)
     if [ ! -d "$BACKUP_DIR" ]; then echo "no backups found in $BACKUP_DIR"; exit 1; fi
     CONFIG_BACKUP="$(ls -1 "$BACKUP_DIR"/config.toml.* 2>/dev/null | tail -1 || true)"
@@ -53,6 +58,31 @@ fi
 if ! command -v node >/dev/null 2>&1; then
   echo "ERROR: node is required for model catalog generation" >&2
   exit 1
+fi
+
+if [ "$UI_MODE" != "skip" ]; then
+  UI_DIST="$SCRIPT_DIR/ui/dist/index.html"
+  UI_NEEDS_BUILD=0
+  if [ "$UI_MODE" = "force" ] || [ ! -f "$UI_DIST" ]; then
+    UI_NEEDS_BUILD=1
+  elif [ -n "$(find "$SCRIPT_DIR/ui/src" "$SCRIPT_DIR/ui/package.json" "$SCRIPT_DIR/ui/package-lock.json" "$SCRIPT_DIR/ui/index.html" -type f -newer "$UI_DIST" -print -quit 2>/dev/null)" ]; then
+    UI_NEEDS_BUILD=1
+  fi
+  if [ "$UI_NEEDS_BUILD" -eq 1 ]; then
+    if [ -n "$DRY" ]; then
+      echo "[dry-run] $SCRIPT_DIR/build-ui.sh"
+    elif "$SCRIPT_DIR/build-ui.sh"; then
+      echo "dashboard UI is ready: $UI_DIST"
+    else
+      if [ "$UI_MODE" = "force" ]; then
+        echo "ERROR: dashboard UI build failed" >&2
+        exit 1
+      fi
+      echo "WARNING: dashboard UI build failed; gateway will use the embedded fallback panel" >&2
+    fi
+  else
+    echo "dashboard UI is up to date: $UI_DIST"
+  fi
 fi
 
 run() {

@@ -102,6 +102,15 @@ async function startGateway(keys, extra = [], env = {}, config = {}, options = {
       const text = await res.text();
       return { status: res.status, headers: res.headers, text };
     },
+    async responses(body = {}, headers = {}, query = '') {
+      const res = await fetch(`${base}/v1/responses${query}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ model: 'deepseek-v4-flash', input: 'hello', ...body }),
+      });
+      const text = await res.text();
+      return { status: res.status, headers: res.headers, text };
+    },
     async stop() {
       child.kill('SIGKILL');
       await new Promise(r => child.on('exit', r));
@@ -406,6 +415,133 @@ test('provider-scoped aliases route identical upstream model names without cross
     assert.equal(h.total.requests, 2);
   } finally {
     await gw.stop();
+  }
+});
+
+test('Chat Completions providers adapt Responses JSON and SSE while direct Chat stays passthrough', async () => {
+  const upstreamPort = await freePort();
+  const requests = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      requests.push({ url: req.url, body });
+      if (req.url === '/v1/chat/completions?trace=direct') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          id: 'chatcmpl-direct',
+          object: 'chat.completion',
+          model: body.model,
+          choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'direct' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }));
+        return;
+      }
+      if (req.url !== '/v1/chat/completions?trace=adapted') {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: `unexpected path ${req.url}` } }));
+        return;
+      }
+      if (!body.stream) {
+        const responseBody = JSON.stringify({
+          id: 'chatcmpl-json',
+          object: 'chat.completion',
+          created: 100,
+          model: body.model,
+          choices: [{
+            finish_reason: 'stop',
+            message: { role: 'assistant', reasoning_content: 'checked', content: 'adapted json' },
+          }],
+          usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 },
+        });
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(responseBody),
+          etag: 'upstream-chat-body',
+        });
+        res.end(responseBody);
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      const frames = [
+        'data: {"id":"chatcmpl-sse","created":101,"model":"same-upstream-model","choices":[{"delta":{"content":"adapted "}}]}\n\n',
+        'data: {"id":"chatcmpl-sse","model":"same-upstream-model","choices":[{"delta":{"content":"stream"},"finish_reason":"stop"}]}\n\n',
+        'data: {"id":"chatcmpl-sse","model":"same-upstream-model","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
+        'data: [DONE]\n\n',
+      ];
+      res.write(frames[0].slice(0, 47));
+      res.write(frames[0].slice(47) + frames[1]);
+      res.end(frames[2] + frames[3]);
+    });
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+
+  const config = multiProviderConfig({
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--shared',
+    providers: [{
+      id: 'alpha',
+      name: 'Alpha Chat',
+      baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+      upstreamFormat: 'chat-completions',
+      enabled: true,
+      models: [{ id: 'shared', name: 'Shared', upstreamModel: 'same-upstream-model' }],
+      keys: [{ name: 'alpha-key', key: 'sk-alpha', weight: 1, enabled: true }],
+    }],
+  });
+  const gw = await startGateway('', [], {}, config, { mock: false, keysArg: false });
+  try {
+    const nonStream = await gw.responses({
+      model: 'alpha--shared',
+      instructions: 'Use tools carefully.',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'inspect' }] }],
+    }, {}, '?trace=adapted');
+    assert.equal(nonStream.status, 200, nonStream.text);
+    assert.equal(nonStream.headers.get('x-gateway-provider'), 'alpha');
+    assert.equal(nonStream.headers.get('content-encoding'), null);
+    assert.equal(nonStream.headers.get('etag'), null);
+    const response = JSON.parse(nonStream.text);
+    assert.equal(response.object, 'response');
+    assert.deepEqual(response.output.map(item => item.type), ['reasoning', 'message']);
+    assert.equal(response.output[1].content[0].text, 'adapted json');
+    assert.equal(response.usage.total_tokens, 7);
+    assert.equal((await gw.health()).providers[0].upstreamFormat, 'chat-completions');
+
+    assert.equal(requests[0].url, '/v1/chat/completions?trace=adapted');
+    assert.equal(requests[0].body.model, 'same-upstream-model');
+    assert.deepEqual(requests[0].body.messages.map(message => message.role), ['system', 'user']);
+
+    const stream = await gw.responses({ model: 'alpha--shared', input: 'stream', stream: true }, {}, '?trace=adapted');
+    assert.equal(stream.status, 200, stream.text);
+    assert.match(stream.headers.get('content-type'), /text\/event-stream/);
+    assert.match(stream.text, /"type":"response\.output_text\.delta"/);
+    assert.match(stream.text, /"delta":"adapted "/);
+    assert.equal((stream.text.match(/event: response\.completed/g) || []).length, 1);
+    assert.doesNotMatch(stream.text, /data: \[DONE\]/);
+
+    const direct = await fetch(`${gw.base}/v1/chat/completions?trace=direct`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'alpha--shared', messages: [{ role: 'user', content: 'direct' }] }),
+    });
+    const directBody = await direct.json();
+    assert.equal(direct.status, 200);
+    assert.equal(directBody.object, 'chat.completion');
+    assert.equal(directBody.choices[0].message.content, 'direct');
+    assert.equal(requests.at(-1).url, '/v1/chat/completions?trace=direct');
+
+    const unsupported = await gw.responses({
+      model: 'alpha--shared',
+      input: 'search',
+      tools: [{ type: 'web_search' }],
+    }, {}, '?trace=adapted');
+    assert.equal(unsupported.status, 400);
+    assert.match(unsupported.text, /web_search/);
+    assert.equal(requests.length, 3);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
   }
 });
 

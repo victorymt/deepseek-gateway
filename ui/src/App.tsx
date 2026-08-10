@@ -542,6 +542,7 @@ function Dashboard({
               id: health.defaultProvider,
               name: health.defaultProvider,
               baseUrl: health.upstream || "",
+              upstreamFormat: "responses" as const,
               enabled: true,
               balanceQueryEnabled: false,
               modelCount: 0,

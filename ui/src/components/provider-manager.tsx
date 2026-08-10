@@ -61,6 +61,14 @@ import {
   FieldTitle,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
@@ -89,6 +97,7 @@ type ProviderDraft = {
   id: string
   name: string
   baseUrl: string
+  upstreamFormat: "responses" | "chat-completions"
   enabled: boolean
   models: ModelDraft[]
   keys: KeyDraft[]
@@ -178,6 +187,9 @@ const copy = {
     providerIdHint: "Lowercase letters, numbers, and hyphens.",
     name: "Display name",
     baseUrl: "Base URL",
+    upstreamFormat: "Upstream API format",
+    responsesFormat: "Responses",
+    chatCompletionsFormat: "Chat Completions",
     modelId: "Model ID",
     modelName: "Model name",
     upstreamModel: "Upstream model",
@@ -242,6 +254,9 @@ const copy = {
     providerIdHint: "仅使用小写字母、数字和连字符。",
     name: "显示名称",
     baseUrl: "Base URL",
+    upstreamFormat: "上游 API 格式",
+    responsesFormat: "Responses",
+    chatCompletionsFormat: "Chat Completions",
     modelId: "模型 ID",
     modelName: "模型名称",
     upstreamModel: "上游模型",
@@ -280,6 +295,7 @@ const emptyDraft = (): ProviderDraft => ({
   id: "",
   name: "",
   baseUrl: "https://",
+  upstreamFormat: "responses",
   enabled: true,
   models: [{ id: "", name: "", upstreamModel: "" }],
   keys: [{ name: "primary", key: "", weight: 1, enabled: true }],
@@ -296,6 +312,7 @@ function providerDraft(provider: Provider): ProviderDraft {
     id: provider.id,
     name: provider.name,
     baseUrl: provider.baseUrl,
+    upstreamFormat: provider.upstreamFormat,
     enabled: provider.enabled,
     models: provider.models.map(({ id, name, upstreamModel }) => ({
       id,
@@ -606,6 +623,11 @@ export function ProviderManager({
                   <Badge variant={provider.enabled ? "secondary" : "outline"}>
                     {provider.enabled ? t.enabled : t.disabled}
                   </Badge>
+                  <Badge variant="outline">
+                    {provider.upstreamFormat === "chat-completions"
+                      ? t.chatCompletionsFormat
+                      : t.responsesFormat}
+                  </Badge>
                   {isDefault && <Badge>{t.default}</Badge>}
                   <Badge
                     variant={provider.balanceQuery?.enabled ? "secondary" : "outline"}
@@ -824,6 +846,47 @@ export function ProviderManager({
                     }))
                   }
                 />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="provider-upstream-format">
+                  {t.upstreamFormat}
+                </FieldLabel>
+                <Select
+                  items={[
+                    { value: "responses", label: t.responsesFormat },
+                    {
+                      value: "chat-completions",
+                      label: t.chatCompletionsFormat,
+                    },
+                  ]}
+                  value={draft.upstreamFormat}
+                  onValueChange={(value) =>
+                    setDraft((current) => ({
+                      ...current,
+                      upstreamFormat:
+                        value === "chat-completions"
+                          ? "chat-completions"
+                          : "responses",
+                    }))
+                  }
+                >
+                  <SelectTrigger
+                    id="provider-upstream-format"
+                    className="w-full"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="responses">
+                        {t.responsesFormat}
+                      </SelectItem>
+                      <SelectItem value="chat-completions">
+                        {t.chatCompletionsFormat}
+                      </SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
               </Field>
               <Field orientation="horizontal">
                 <FieldContent>

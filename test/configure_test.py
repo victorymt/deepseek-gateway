@@ -191,7 +191,11 @@ class ConfigureWizardTests(unittest.TestCase):
             self.assertNotIn("keys", saved)
             self.assertEqual(saved["providers"][0]["baseUrl"], original["providers"][0]["baseUrl"])
             self.assertEqual(saved["providers"][0]["keys"], original["providers"][0]["keys"])
-            self.assertEqual(saved["providers"][1], original["providers"][1])
+            self.assertEqual(
+                saved["providers"][1],
+                {**original["providers"][1], "upstreamFormat": "responses"},
+            )
+            self.assertEqual(saved["providers"][0]["upstreamFormat"], "responses")
             self.assertEqual(saved["providers"][0]["models"], original["providers"][0]["models"])
             self.assertEqual(saved["customField"], original["customField"])
             configure_keys.assert_not_called()

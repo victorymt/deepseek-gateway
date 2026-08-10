@@ -48,6 +48,7 @@ export type ProviderHealth = {
   id: string
   name: string
   baseUrl: string
+  upstreamFormat: "responses" | "chat-completions"
   enabled: boolean
   balanceQueryEnabled: boolean
   modelCount: number
@@ -95,6 +96,7 @@ export type Provider = {
   id: string
   name: string
   baseUrl: string
+  upstreamFormat: "responses" | "chat-completions"
   enabled: boolean
   models: ProviderModel[]
   keys: MaskedProviderKey[]

@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const DEFAULT_UPSTREAM = 'https://api.deepseek.com';
+export const UPSTREAM_FORMATS = ['responses', 'chat-completions'];
 export const DEFAULT_MODELS = [
   { id: 'v4-flash', name: 'V4 Flash', upstreamModel: 'deepseek-v4-flash' },
   { id: 'v4-pro', name: 'V4 Pro', upstreamModel: 'deepseek-v4-pro' },
@@ -48,6 +49,14 @@ export function normalizeIdentifier(value, field) {
     throw new Error(`${field} must use lowercase letters, numbers, and single hyphens`);
   }
   return id;
+}
+
+export function normalizeUpstreamFormat(value, field = 'upstreamFormat') {
+  const format = String(value || 'responses').trim().toLowerCase();
+  if (!UPSTREAM_FORMATS.includes(format)) {
+    throw new Error(`${field} must be one of: ${UPSTREAM_FORMATS.join(', ')}`);
+  }
+  return format;
 }
 
 export function normalizeNumber(value, field, { min = 0, max = Infinity, integer = false } = {}) {
@@ -100,6 +109,10 @@ export function normalizeProvider(input, existing = null) {
   const name = String(input.name ?? existing?.name ?? id).trim();
   if (!name || name.length > 100) throw new Error(`provider ${id} name is required and must be at most 100 characters`);
   const baseUrl = normalizeBaseUrl(input.baseUrl ?? input.upstream ?? existing?.baseUrl, `provider ${id} baseUrl`);
+  const upstreamFormat = normalizeUpstreamFormat(
+    input.upstreamFormat ?? existing?.upstreamFormat,
+    `provider ${id} upstreamFormat`,
+  );
   const enabled = input.enabled === undefined ? (existing?.enabled ?? true) : input.enabled === true;
   const rawModels = input.models ?? existing?.models ?? [];
   const rawKeys = input.keys ?? existing?.keys ?? [];
@@ -141,6 +154,7 @@ export function normalizeProvider(input, existing = null) {
     id,
     name,
     baseUrl,
+    upstreamFormat,
     enabled,
     models,
     keys,

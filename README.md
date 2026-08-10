@@ -1,6 +1,6 @@
 # deepseek-gateway
 
-本地多 Provider Codex 网关。它把多个 OpenAI Responses 兼容上游接入同一个地址，每个 Provider 拥有独立 KeyPool、冷却、失败状态和统计。Codex 只配置一个 Gateway Provider，并可直接通过 `/model` 在 `provider--model` 别名之间切换。
+本地多 Provider Codex 网关。它把多个 OpenAI Responses 或 Chat Completions 兼容上游接入同一个地址，每个 Provider 拥有独立 KeyPool、冷却、失败状态和统计。Codex 只配置一个 Gateway Provider，并可直接通过 `/model` 在 `provider--model` 别名之间切换。
 
 ```text
 Codex / API client
@@ -11,7 +11,7 @@ gateway.mjs  -- 根据请求 model 解析 provider--model
         |
         +-- DeepSeek KeyPool  -- deepseek--v4-flash
         +-- OpenRouter KeyPool -- openrouter--claude-sonnet
-        +-- 其他 Responses 兼容 Provider
+        +-- Responses / Chat Completions 兼容 Provider
 ```
 
 ## 运行要求
@@ -53,7 +53,7 @@ cd deepseek-gateway
 
 默认 `init` 不会在终端询问 Provider 或 API Key。需要纯终端流程时使用 `./gatewayctl init --cli-provider`，它会保留原有的 Provider、Key 和 Codex 配置步骤。已有完整 Provider 配置再次运行 `init` 时会被保留，不会重置为引导模式。
 
-启动后可在面板的“Provider 管理”中添加、编辑、测试或删除其他上游，并在“Gateway 设置”中管理监听参数、运行策略和访问令牌。手工创建的旧版 `{ upstream, keys }` 配置仍可加载，并会在首次通过面板修改时以 v2 结构原子写回。
+启动后可在面板的“Provider 管理”中添加、编辑、测试或删除其他上游，选择 Responses 或 Chat Completions 上游格式，并在“Gateway 设置”中管理监听参数、运行策略和访问令牌。手工创建的旧版 `{ upstream, keys }` 配置仍可加载，并会在首次通过面板修改时以 v2 结构原子写回。
 
 如果向导中没有选择立即启动，运行：
 
@@ -170,6 +170,7 @@ cp keys.example.json keys.json
       "id": "deepseek",
       "name": "DeepSeek",
       "baseUrl": "https://api.deepseek.com",
+      "upstreamFormat": "responses",
       "enabled": true,
       "balanceQuery": {
         "enabled": true,
@@ -302,6 +303,17 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 网关根据 `model` 精确匹配 `${providerId}--${modelId}`，选定 Provider 后把模型字段改写为 `upstreamModel`。带 `--` 但未命中的别名会返回 `400`；未带前缀的旧模型名仍由 `defaultProvider` 原样转发。响应头 `X-Gateway-Provider`、`X-Gateway-Model` 和 `X-Gateway-Key` 可用于核对路由结果。
 
+### Chat Completions 上游
+
+Provider 的 `upstreamFormat` 支持两个值：
+
+- `responses`：默认值，保持原有路径、请求体和响应透传行为。
+- `chat-completions`：客户端调用 `/v1/responses` 时，网关把请求转换后转发至上游 `/v1/chat/completions`，再将 JSON 或 SSE 转回 Responses 格式。客户端直接调用 `/v1/chat/completions` 时仍原样透传。
+
+转换支持文本、输入图片、function/custom/namespace 工具、工具结果、reasoning、结构化输出、流式 usage 和缺失 `[DONE]` 时的终止事件补全。`previous_response_id`、`item_reference`、后台响应、托管 `web_search`/`file_search`/computer 工具以及 `input_file` 无法无损映射，网关会返回明确的 `400`，不会静默丢弃字段。
+
+Codex 配置仍固定使用 `wire_api = "responses"`。上游协议只在 Provider 中选择，不需要改动 Codex 配置。
+
 ## 调度策略
 
 每个 Provider 的 KeyPool 分别维护并发数、成功数、错误数、429 次数、累计失败数、冷却截止时间和失效状态。同名上游模型不会共享 Key、冷却或失败状态。
@@ -342,7 +354,8 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `setupPending` | - | - | `false` | `true` 表示等待通过 Web UI 配置首个 Provider |
 | `port` | `--port` | `DS_GATEWAY_PORT` | `8787` | 监听端口 |
 | `host` | `--host` | - | `127.0.0.1` | 监听地址 |
-| `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`models`、`keys`、`balanceQuery` 和启用状态 |
+| `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`upstreamFormat`、`models`、`keys`、`balanceQuery` 和启用状态 |
+| `providers[].upstreamFormat` | - | - | `responses` | 上游协议，可选 `responses` 或 `chat-completions` |
 | `defaultProvider` | - | - | 第一个启用项 | 未带别名前缀时使用的 Provider |
 | `defaultModel` | - | - | 默认 Provider 首个模型 | Codex 启动模型别名 |
 | `upstream` | `--upstream` | `DS_UPSTREAM` | `https://api.deepseek.com` | 旧配置/默认 Provider 上游 URL |
@@ -416,4 +429,4 @@ npm run build --prefix ui
 | `-drip` | 分段流式响应 |
 | `-abort` | 流式传输中断 |
 
-测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、重复 secret 拒绝、上游模型发现与 ID 归一化、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl`、交互式配置和备份恢复。
+测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、重复 secret 拒绝、上游模型发现与 ID 归一化、Responses 与 Chat Completions 双向转换、工具调用和分片 SSE 终止事件、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl`、交互式配置和备份恢复。

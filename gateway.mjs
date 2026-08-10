@@ -10,6 +10,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough, Transform } from 'node:stream';
 import {
+  ChatCompletionsSseTransform,
+  chatCompletionToResponses,
+  chatCompletionToResponsesSse,
+  chatCompletionsSseToResponses,
+  normalizeChatCompletionsError,
+  responsesRequestToChatCompletions,
+} from './chat-completions-adapter.mjs';
+import {
   effectiveBalanceQuery,
   executeBalanceQuery,
 } from './balance-script.mjs';
@@ -396,6 +404,11 @@ class KeyPool {
     re.lastIndex = Math.max(0, this._usageBuf.length - s.length);
     let m;
     while ((m = re.exec(this._usageBuf)) !== null) this.total.tokens += Number(m[1]);
+  }
+
+  recordTokens(totalTokens) {
+    const value = Number(totalTokens);
+    if (Number.isFinite(value) && value > 0) this.total.tokens += value;
   }
 
   state(key) {
@@ -878,7 +891,14 @@ async function fetchProviderModels(baseUrl, secret, modelsUrl = '') {
   throw new Error(`all model endpoints failed: ${lastError?.message || 'no candidates'}`);
 }
 
-function resolveRequestRoute(registry, body) {
+function rewriteResponsesRequestUrl(requestUrl) {
+  const url = new URL(requestUrl || '/', 'http://gateway.local');
+  if (url.pathname === '/v1/responses') url.pathname = '/v1/chat/completions';
+  else if (url.pathname === '/responses') url.pathname = '/chat/completions';
+  return `${url.pathname}${url.search}`;
+}
+
+function resolveRequestRoute(registry, body, requestUrl) {
   if (registry.settings.setupPending) {
     throw Object.assign(new Error('gateway setup required'), { statusCode: 503 });
   }
@@ -901,23 +921,47 @@ function resolveRequestRoute(registry, body) {
   if (!runtime || !runtime.provider.enabled) {
     throw Object.assign(new Error('default provider is unavailable'), { statusCode: 503 });
   }
-  if (!aliasRoute) {
-    return { runtime, body, requestedModel, gatewayModel: requestedModel || registry.settings.defaultModel };
+  let routedBody = body;
+  let upstreamModel;
+  if (aliasRoute) {
+    parsed.model = aliasRoute.model.upstreamModel;
+    routedBody = Buffer.from(JSON.stringify(parsed));
+    upstreamModel = aliasRoute.model.upstreamModel;
   }
-  parsed.model = aliasRoute.model.upstreamModel;
+
+  const pathname = new URL(requestUrl || '/', 'http://gateway.local').pathname;
+  const shouldAdapt = runtime.provider.upstreamFormat === 'chat-completions'
+    && ['/v1/responses', '/responses'].includes(pathname);
+  let responseAdapter = null;
+  let upstreamRequestPath = requestUrl;
+  if (shouldAdapt) {
+    if (!parsed) throw Object.assign(new Error('Responses request body must be valid JSON'), { statusCode: 400 });
+    const adapted = responsesRequestToChatCompletions(parsed);
+    routedBody = Buffer.from(JSON.stringify(adapted.payload));
+    upstreamRequestPath = rewriteResponsesRequestUrl(requestUrl);
+    responseAdapter = {
+      type: 'chat-completions',
+      context: adapted.context,
+      stream: adapted.payload.stream === true,
+    };
+  }
+
   return {
     runtime,
-    body: Buffer.from(JSON.stringify(parsed)),
+    body: routedBody,
     requestedModel,
-    gatewayModel: requestedModel,
-    upstreamModel: aliasRoute.model.upstreamModel,
+    gatewayModel: requestedModel || registry.settings.defaultModel,
+    ...(upstreamModel ? { upstreamModel } : {}),
+    upstreamRequestPath,
+    responseAdapter,
   };
 }
 
-async function forwardOnce(runtime, key, clientReq, body) {
+async function forwardOnce(runtime, key, clientReq, route) {
   const { settings } = runtime;
-  if (settings.mock) return mockResponse(key, body);
-  const u = upstreamRequestUrl(runtime.provider.baseUrl, clientReq.url);
+  const { body } = route;
+  if (settings.mock) return mockResponse(key, body, route.responseAdapter?.type);
+  const u = upstreamRequestUrl(runtime.provider.baseUrl, route.upstreamRequestPath || clientReq.url);
   const headers = {};
   for (const [h, v] of Object.entries(clientReq.headers)) {
     if (HOP_HEADERS.has(h) || h === 'host' || h === 'authorization' || h === 'content-length') continue;
@@ -925,6 +969,7 @@ async function forwardOnce(runtime, key, clientReq, body) {
   }
   headers.authorization = `Bearer ${key.key}`;
   headers.host = u.host;
+  if (route.responseAdapter) headers['accept-encoding'] = 'identity';
   if (body.length) headers['content-length'] = body.length;
   return new Promise((resolve, reject) => {
     const mod = u.protocol === 'https:' ? https : http;
@@ -959,7 +1004,7 @@ async function relay(route, clientReq, clientRes, log) {
       attempted.push(k.name);
       k.inFlight++;
       try {
-        const r = await forwardOnce(runtime, k, clientReq, body);
+        const r = await forwardOnce(runtime, k, clientReq, route);
         const status = r.statusCode;
         if (status < 400) {
           res = r;
@@ -992,29 +1037,174 @@ async function relay(route, clientReq, clientRes, log) {
       return;
     }
     log(`${res.statusCode} ${clientReq.method} ${clientReq.url} provider=${provider.id} model=${route.gatewayModel} key=${key.name} ${ms}ms`);
-    relayResponse(clientRes, res, key, pool, res.statusCode >= 400, route, releaseRuntime);
+    await relayResponse(clientRes, res, key, pool, res.statusCode >= 400, route, releaseRuntime);
   } catch (error) {
     releaseRuntime();
     throw error;
   }
 }
 
-function relayResponse(clientRes, upRes, key, pool, preRecorded, route, releaseRuntime) {
+function responseHeaders(upRes, key, route, { transformed = false, contentType = '' } = {}) {
   const headers = {};
   for (const [h, v] of Object.entries(upRes.headers)) {
     if (HOP_HEADERS.has(h)) continue;
+    if (transformed && ['content-length', 'content-encoding', 'content-md5', 'etag'].includes(h)) continue;
     headers[h] = Array.isArray(v) ? v.join(', ') : v;
   }
+  if (contentType) headers['content-type'] = contentType;
   headers['x-gateway-key'] = key.name;
   headers['x-gateway-provider'] = route.runtime.provider.id;
   headers['x-gateway-model'] = route.gatewayModel;
-  clientRes.writeHead(upRes.statusCode, headers);
-  const tracker = new Transform({
-    transform(chunk, enc, cb) {
-      if (pool) pool.trackTokens(chunk);
-      cb(null, chunk);
-    },
+  return headers;
+}
+
+function readUpstreamBody(upRes, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let settled = false;
+    const fail = error => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    upRes.on('data', chunk => {
+      if (settled) return;
+      size += chunk.length;
+      if (maxBytes && size > maxBytes) {
+        const error = new Error('upstream response body too large');
+        fail(error);
+        upRes.destroy(error);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    upRes.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+    upRes.on('error', fail);
+    upRes.on('aborted', () => fail(new Error('upstream response aborted')));
   });
+}
+
+async function relayAdaptedResponse(clientRes, upRes, key, pool, route, finish) {
+  const adapter = route.responseAdapter;
+  const contentType = String(upRes.headers['content-type'] || '').toLowerCase();
+  const isSse = contentType.includes('text/event-stream');
+
+  if (upRes.statusCode >= 400) {
+    try {
+      const body = await readUpstreamBody(upRes, route.runtime.settings.maxBodyBytes);
+      let payload;
+      try { payload = JSON.parse(body.toString('utf8')); } catch { payload = { message: body.toString('utf8') }; }
+      const output = Buffer.from(JSON.stringify(normalizeChatCompletionsError(payload, upRes.statusCode)));
+      const headers = responseHeaders(upRes, key, route, {
+        transformed: true,
+        contentType: 'application/json; charset=utf-8',
+      });
+      headers['content-length'] = output.length;
+      clientRes.writeHead(upRes.statusCode, headers);
+      clientRes.end(output);
+      finish({ status: upRes.statusCode });
+    } catch {
+      finish({ networkError: true });
+      if (!clientRes.headersSent) clientRes.writeHead(502, { 'content-type': 'application/json' });
+      if (!clientRes.writableEnded) {
+        clientRes.end(JSON.stringify({ error: { message: 'failed to read upstream error response' } }));
+      }
+    }
+    return;
+  }
+
+  if (adapter.stream && isSse) {
+    const headers = responseHeaders(upRes, key, route, {
+      transformed: true,
+      contentType: 'text/event-stream; charset=utf-8',
+    });
+    headers['cache-control'] = 'no-cache';
+    clientRes.writeHead(upRes.statusCode, headers);
+    const transformer = new ChatCompletionsSseTransform(adapter.context, {
+      onUsage: usage => pool.recordTokens(usage?.total_tokens),
+    });
+    let upstreamFailed = false;
+    const failStream = (message, type) => {
+      if (upstreamFailed) return;
+      upstreamFailed = true;
+      upRes.unpipe?.(transformer);
+      transformer.fail(message, type);
+      transformer.end();
+    };
+    upRes.on('error', error => failStream(`Upstream stream error: ${error.message}`, 'stream_error'));
+    upRes.on('aborted', () => failStream('Upstream Chat Completions stream was aborted', 'stream_aborted'));
+    transformer.on('error', () => {
+      finish({ networkError: true });
+      if (!clientRes.writableEnded) clientRes.destroy();
+    });
+    transformer.on('end', () => {
+      finish(upstreamFailed || transformer.state.terminal === 'failed' ? { networkError: true } : { status: 200 });
+    });
+    upRes.pipe(transformer).pipe(clientRes);
+    clientRes.on('close', () => {
+      if (!clientRes.writableEnded) {
+        upstreamFailed = true;
+        finish({ clientAbort: true });
+        upRes.destroy();
+        transformer.destroy();
+      }
+    });
+    return;
+  }
+
+  try {
+    const body = await readUpstreamBody(upRes, route.runtime.settings.maxBodyBytes);
+    let converted;
+    let usage;
+    if (isSse) {
+      const result = chatCompletionsSseToResponses(body.toString('utf8'), adapter.context);
+      converted = result.response;
+      usage = result.usage;
+    } else {
+      const payload = JSON.parse(body.toString('utf8'));
+      if (adapter.stream) {
+        const result = chatCompletionToResponsesSse(payload, adapter.context);
+        pool.recordTokens(result.usage?.total_tokens);
+        const output = Buffer.from(result.body);
+        const headers = responseHeaders(upRes, key, route, {
+          transformed: true,
+          contentType: 'text/event-stream; charset=utf-8',
+        });
+        headers['cache-control'] = 'no-cache';
+        headers['content-length'] = output.length;
+        clientRes.writeHead(upRes.statusCode, headers);
+        clientRes.end(output);
+        finish({ status: 200 });
+        return;
+      }
+      converted = chatCompletionToResponses(payload, adapter.context);
+      usage = converted.usage;
+    }
+    pool.recordTokens(usage?.total_tokens);
+    const output = Buffer.from(JSON.stringify(converted));
+    const headers = responseHeaders(upRes, key, route, {
+      transformed: true,
+      contentType: 'application/json; charset=utf-8',
+    });
+    headers['content-length'] = output.length;
+    clientRes.writeHead(upRes.statusCode, headers);
+    clientRes.end(output);
+    finish({ status: 200 });
+  } catch (error) {
+    finish({ networkError: true });
+    if (!clientRes.headersSent) {
+      clientRes.writeHead(error.statusCode || 502, { 'content-type': 'application/json' });
+    }
+    if (!clientRes.writableEnded) clientRes.end(JSON.stringify({ error: { message: error.message } }));
+  }
+}
+
+async function relayResponse(clientRes, upRes, key, pool, preRecorded, route, releaseRuntime) {
   let settled = false;
   const finish = result => {
     if (settled) return;
@@ -1025,6 +1215,18 @@ function relayResponse(clientRes, upRes, key, pool, preRecorded, route, releaseR
       releaseRuntime();
     }
   };
+  if (route.responseAdapter?.type === 'chat-completions') {
+    await relayAdaptedResponse(clientRes, upRes, key, pool, route, finish);
+    return;
+  }
+  const headers = responseHeaders(upRes, key, route);
+  clientRes.writeHead(upRes.statusCode, headers);
+  const tracker = new Transform({
+    transform(chunk, enc, cb) {
+      if (pool) pool.trackTokens(chunk);
+      cb(null, chunk);
+    },
+  });
   upRes.on('end', () => finish({ status: 200 }));
   upRes.on('error', () => {
     finish({ networkError: true });
@@ -1043,7 +1245,7 @@ function relayResponse(clientRes, upRes, key, pool, preRecorded, route, releaseR
   });
 }
 
-function mockResponse(key, body) {
+function mockResponse(key, body, responseAdapter = '') {
   return new Promise(resolve => {
     let behavior = 'ok';
     const parts = String(key.key).split('-');
@@ -1066,11 +1268,26 @@ function mockResponse(key, body) {
       }
       if (behavior === '429') headers['retry-after'] = '1';
       const pt = new PassThrough();
-      const frames = [
-        JSON.stringify({ type: 'response.output_item.added', gateway_key_name: key.name }),
-        JSON.stringify({ type: 'response.output_text.delta', delta: 'hello' }),
-        JSON.stringify({ type: 'response.completed', usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 } }),
-      ];
+      const frames = responseAdapter === 'chat-completions'
+        ? [
+            JSON.stringify({
+              id: 'chatcmpl-mock', object: 'chat.completion.chunk', model,
+              choices: [{ index: 0, delta: { role: 'assistant', content: 'hello' }, finish_reason: null }],
+            }),
+            JSON.stringify({
+              id: 'chatcmpl-mock', object: 'chat.completion.chunk', model,
+              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+            }),
+            JSON.stringify({
+              id: 'chatcmpl-mock', object: 'chat.completion.chunk', model,
+              choices: [], usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+            }),
+          ]
+        : [
+            JSON.stringify({ type: 'response.output_item.added', gateway_key_name: key.name }),
+            JSON.stringify({ type: 'response.output_text.delta', delta: 'hello' }),
+            JSON.stringify({ type: 'response.completed', usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 } }),
+          ];
       const writeAll = () => {
         if (stream && status === 200) {
           pt.write(frames.map(f => `data: ${f}\n\n`).join('') + 'data: [DONE]\n\n');
@@ -1078,6 +1295,7 @@ function mockResponse(key, body) {
           pt.write(JSON.stringify({
             id: 'mock-1', object: 'chat.completion', model,
             gateway_key_name: key.name,
+            choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'hello' } }],
             usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
           }));
         } else {
@@ -1097,7 +1315,10 @@ function mockResponse(key, body) {
         }, 60);
         pt.on('close', () => clearInterval(iv));
       } else if (behavior === 'abort' && stream) {
-        pt.write('data: {"type":"response.output_item.added","gateway_key_name":"' + key.name + '"}\n\n');
+        const first = responseAdapter === 'chat-completions'
+          ? JSON.stringify({ id: 'chatcmpl-abort', model, choices: [{ delta: { content: 'partial' } }] })
+          : JSON.stringify({ type: 'response.output_item.added', gateway_key_name: key.name });
+        pt.write(`data: ${first}\n\n`);
         setTimeout(() => pt.destroy(new Error('mock abort')), 60);
       } else {
         writeAll();
@@ -1133,6 +1354,7 @@ function buildHealth(cfg, registry, uptime) {
       id: provider.id,
       name: provider.name,
       baseUrl: cfg.mock ? 'mock' : provider.baseUrl,
+      upstreamFormat: provider.upstreamFormat,
       enabled: provider.enabled,
       balanceQueryEnabled: Boolean(effectiveBalanceQuery(provider)),
       modelCount: provider.models.length,
@@ -1176,6 +1398,7 @@ function publicProvider(provider) {
     id: provider.id,
     name: provider.name,
     baseUrl: provider.baseUrl,
+    upstreamFormat: provider.upstreamFormat,
     enabled: provider.enabled,
     models: provider.models.map(model => ({
       ...model,
@@ -2060,7 +2283,7 @@ async function handleRequest(cfg, registry, req, res, log, startedAt) {
     return;
   }
   const body = await readBody(req, cfg.maxBodyBytes);
-  const route = resolveRequestRoute(registry, body);
+  const route = resolveRequestRoute(registry, body, req.url);
   await relay(route, req, res, log);
 }
 

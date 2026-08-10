@@ -16,6 +16,7 @@
       "id": "deepseek",
       "name": "DeepSeek",
       "baseUrl": "https://api.deepseek.com",
+      "upstreamFormat": "responses",
       "enabled": true,
       "balanceQuery": {
         "enabled": true,

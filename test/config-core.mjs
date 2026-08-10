@@ -4,6 +4,7 @@ import assert from 'node:assert';
 import {
   normalizeBalanceQuery,
   normalizeConfig,
+  normalizeUpstreamFormat,
   serializableConfig,
 } from '../config-core.mjs';
 
@@ -22,12 +23,33 @@ test('legacy config normalizes and serializes as canonical v2', () => {
   assert.equal(stored.defaultModel, 'deepseek--v4-flash');
   assert.equal(stored.blacklistThreshold, 4);
   assert.equal(stored.providers[0].baseUrl, 'https://legacy.example/v1');
+  assert.equal(stored.providers[0].upstreamFormat, 'responses');
   assert.equal(stored.providers[0].keys[0].key, 'sk-legacy');
   assert.equal(stored.providers[0].keys[0].enabled, true);
   assert.deepEqual(stored.customField, { keep: true });
   assert.equal(stored.upstream, undefined);
   assert.equal(stored.keys, undefined);
   assert.equal(stored.breakerThreshold, undefined);
+});
+
+test('provider upstream format defaults to Responses and accepts Chat Completions', () => {
+  assert.equal(normalizeUpstreamFormat(undefined), 'responses');
+  assert.equal(normalizeUpstreamFormat('chat-completions'), 'chat-completions');
+  assert.throws(() => normalizeUpstreamFormat('anthropic'), /must be one of/);
+
+  const normalized = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      upstreamFormat: 'chat-completions',
+      models: [{ id: 'chat', upstreamModel: 'chat' }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+    }],
+  });
+  assert.equal(serializableConfig(normalized).providers[0].upstreamFormat, 'chat-completions');
 });
 
 test('config validation rejects duplicate key secrets', () => {

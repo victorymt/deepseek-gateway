@@ -191,6 +191,7 @@ cp keys.example.json keys.json
       "name": "DeepSeek",
       "baseUrl": "https://api.deepseek.com",
       "upstreamFormat": "responses",
+      "supportsEncryptedAgentMessages": false,
       "enabled": true,
       "balanceQuery": {
         "enabled": true,
@@ -364,6 +365,12 @@ Provider 的 `upstreamFormat` 支持两个值：
 
 转换支持文本、输入图片、function/custom/namespace 工具、工具结果、reasoning、结构化输出、流式 usage 和缺失 `[DONE]` 时的终止事件补全。与 cc-switch 的 ProxyChat 路径一致，Responses 的 `web_search` hosted tool 会在本地转换时过滤，并在没有其他可转换工具时同步删除 `tool_choice` 和 `parallel_tool_calls`，避免 Chat Completions 上游返回协议错误；这只是兼容过滤，不会在本地执行网页搜索。`previous_response_id`、`item_reference`、后台响应、`file_search`/computer 工具以及 `input_file` 无法无损映射，网关仍返回明确的 `400`。
 
+### Multi-agent 子代理消息
+
+Codex MultiAgentV2 通过自定义 Provider 派发子代理时，会把任务放在 `agent_message.content[].encrypted_content`。未经转换时，兼容层可能返回 `Responses content type encrypted_content is not supported by Chat Completions upstreams`，或者原生 Responses 上游返回未知 `encrypted_content` 类型。
+
+网关默认只在 `agent_message` 内将该项改写为 `input_text`，并把外层改写成 `message(role=user)`；这既适用于原生 Responses Provider，也适用于 Responses 到 Chat Completions 的本地转换。普通 message 内容和 reasoning item 的 `encrypted_content` 不会被全局改写。只有上游原生支持 OpenAI Responses Multi-agent 加密消息时，才应设置 `supportsEncryptedAgentMessages: true` 关闭兼容解包并原样透传。Chat Completions Provider 不允许开启该能力，Web UI 切换协议时也会自动关闭它。
+
 生成 Codex 模型目录时会按上游格式选择工具 profile。`chat-completions` 使用 ProxyChat profile，保留 Codex 的 freeform `apply_patch`，由本地网关把 Responses 请求和可转换工具调用转换成 Chat Completions，并过滤 hosted web search；`responses` 使用 NativeResponses profile，删除 `apply_patch_tool_type`、`model_messages` 和自定义 `tools`，并通过 `shell_type = "shell_command"` 提供编辑能力，避免向原生 Responses 上游发送不兼容的 custom 工具。
 
 两个 profile 默认都不包含 `web_search_tool_type`；只有 Responses 模型配置 `supportsHostedWebSearch: true` 时才会按模型模板显式恢复。该目录字段只描述能力，Codex 仍可能从运行时默认配置生成 `web_search`，因此 Chat Completions 路径始终以请求时过滤为最终保障。Codex 配置固定使用 `wire_api = "responses"` 并请求本地网关，上游协议只在 Provider 路由中选择，不需要也不应按上游格式改动 Codex Provider。
@@ -411,8 +418,9 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 | `setupPending` | - | - | `false` | `true` 表示等待通过 Web UI 配置首个 Provider |
 | `port` | `--port` | `DS_GATEWAY_PORT` | `8787` | 监听端口 |
 | `host` | `--host` | - | `127.0.0.1` | 监听地址 |
-| `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`upstreamFormat`、`models`、`keys`、`balanceQuery` 和启用状态 |
+| `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`upstreamFormat`、代理消息能力、`models`、`keys`、`balanceQuery` 和启用状态 |
 | `providers[].upstreamFormat` | - | - | `responses` | 上游协议，可选 `responses` 或 `chat-completions` |
+| `providers[].supportsEncryptedAgentMessages` | - | - | `false` | 是否让原生 Responses 上游直接处理 Multi-agent `agent_message`；仅允许用于 `responses` Provider。默认关闭时，网关会兼容解包 Codex 自定义 Provider 发出的子代理任务 |
 | `providers[].models[].id` | - | - | - | Codex 路由模型 ID，支持 `.`, `_`, `/`, `:`、`+` 和单连字符；不能包含保留分隔符 `--` |
 | `providers[].models[].inputModalities` | - | - | `["text"]` | 模型输入能力，可选 `text`、`image`；必须包含 `text`。图片仅对显式启用 `image` 的模型放行 |
 | `providers[].models[].supportsHostedWebSearch` | - | - | `false` | 是否向 Codex 暴露 Responses Hosted Web Search；仅允许用于 `responses` Provider |

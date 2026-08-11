@@ -163,6 +163,40 @@ function textFromParts(value) {
   return value.map(part => typeof part === 'string' ? part : String(part?.text || '')).filter(Boolean).join('\n\n');
 }
 
+function normalizeAgentMessageItem(item) {
+  if (!isObject(item) || item.type !== 'agent_message') return item;
+  const content = Array.isArray(item.content)
+    ? item.content.map(part => (
+      isObject(part)
+      && part.type === 'encrypted_content'
+      && typeof part.encrypted_content === 'string'
+        ? { type: 'input_text', text: part.encrypted_content }
+        : part
+    ))
+    : item.content;
+  return {
+    type: 'message',
+    role: 'user',
+    content,
+    ...(item.id !== undefined ? { id: item.id } : {}),
+  };
+}
+
+export function normalizeAgentMessagesForUpstream(payload) {
+  if (!isObject(payload)) return payload;
+  if (Array.isArray(payload.input)) {
+    let changed = false;
+    const input = payload.input.map(item => {
+      const normalized = normalizeAgentMessageItem(item);
+      if (normalized !== item) changed = true;
+      return normalized;
+    });
+    return changed ? { ...payload, input } : payload;
+  }
+  const input = normalizeAgentMessageItem(payload.input);
+  return input === payload.input ? payload : { ...payload, input };
+}
+
 function responseContentToChat(content, role) {
   if (content === null || content === undefined || typeof content === 'string') return content ?? null;
   if (!Array.isArray(content)) throw adapterError('message content must be a string or array');
@@ -394,6 +428,7 @@ function chatToolChoice(choice, context) {
 
 export function responsesRequestToChatCompletions(payload) {
   if (!isObject(payload)) throw adapterError('Responses request body must be a JSON object');
+  payload = normalizeAgentMessagesForUpstream(payload);
   if (payload.tools !== undefined && !Array.isArray(payload.tools)) throw adapterError('tools must be an array');
   if (payload.previous_response_id) throw adapterError('previous_response_id is not supported by Chat Completions upstreams');
   if (payload.background === true) throw adapterError('background responses are not supported by Chat Completions upstreams');

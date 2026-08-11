@@ -18,6 +18,7 @@ const provider: Provider = {
   name: "DeepSeek",
   baseUrl: "https://api.deepseek.com",
   upstreamFormat: "responses",
+  supportsEncryptedAgentMessages: true,
   enabled: true,
   models: [
     {
@@ -70,6 +71,7 @@ describe("provider editor state", () => {
       timeoutMs: 10000,
     })
     expect(draft.models[0].supportsHostedWebSearch).toBe(true)
+    expect(draft.supportsEncryptedAgentMessages).toBe(true)
 
     draft.models[0].inputModalities.push("image")
     expect(provider.models[0].inputModalities).toEqual(["text"])
@@ -88,6 +90,7 @@ describe("provider editor state", () => {
     })
     expect(keys[0]).not.toHaveProperty("maskedKey")
     expect(keys[0]).not.toHaveProperty("fingerprint")
+    expect(payload.supportsEncryptedAgentMessages).toBe(true)
   })
 
   test("sends the original key name only when a masked key is renamed", () => {
@@ -198,6 +201,7 @@ describe("provider editor state", () => {
     const chatDraft = setProviderUpstreamFormat(draft, "chat-completions")
 
     expect(chatDraft.upstreamFormat).toBe("chat-completions")
+    expect(chatDraft.supportsEncryptedAgentMessages).toBe(false)
     expect(chatDraft.models[0].supportsHostedWebSearch).toBe(false)
     expect(setProviderUpstreamFormat(chatDraft, "chat-completions")).toBe(
       chatDraft

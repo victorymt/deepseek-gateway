@@ -108,6 +108,13 @@ export function normalizeHostedWebSearch(value, field = 'supportsHostedWebSearch
   return value === true;
 }
 
+export function normalizeEncryptedAgentMessages(value, field = 'supportsEncryptedAgentMessages') {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value === true;
+}
+
 export function canExposeHostedWebSearch(provider, model) {
   return provider?.upstreamFormat === 'responses'
     && model?.supportsHostedWebSearch === true;
@@ -167,6 +174,17 @@ export function normalizeProvider(input, existing = null) {
     input.upstreamFormat ?? existing?.upstreamFormat,
     `provider ${id} upstreamFormat`,
   );
+  const supportsEncryptedAgentMessages = normalizeEncryptedAgentMessages(
+    input.supportsEncryptedAgentMessages === undefined
+      ? existing?.supportsEncryptedAgentMessages
+      : input.supportsEncryptedAgentMessages,
+    `provider ${id} supportsEncryptedAgentMessages`,
+  );
+  if (supportsEncryptedAgentMessages && upstreamFormat !== 'responses') {
+    throw new Error(
+      `provider ${id} supportsEncryptedAgentMessages requires responses upstreamFormat`,
+    );
+  }
   const enabled = input.enabled === undefined ? (existing?.enabled ?? true) : input.enabled === true;
   const rawModels = input.models ?? existing?.models ?? [];
   const rawKeys = input.keys ?? existing?.keys ?? [];
@@ -241,6 +259,7 @@ export function normalizeProvider(input, existing = null) {
     name,
     baseUrl,
     upstreamFormat,
+    supportsEncryptedAgentMessages,
     enabled,
     models,
     keys,
@@ -408,8 +427,14 @@ export function serializableConfig(config) {
     adminToken: config.adminToken,
     defaultProvider: config.defaultProvider,
     defaultModel: config.defaultModel,
-    providers: config.providers.map(provider => ({
+    providers: config.providers.map(({
+      supportsEncryptedAgentMessages,
+      ...provider
+    }) => ({
       ...provider,
+      ...(supportsEncryptedAgentMessages
+        ? { supportsEncryptedAgentMessages: true }
+        : {}),
       models: provider.models.map(({
         supportsHostedWebSearch,
         ...model

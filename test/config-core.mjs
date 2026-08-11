@@ -133,6 +133,56 @@ test('provider upstream format defaults to Responses and accepts Chat Completion
   assert.equal(serializableConfig(normalized).providers[0].upstreamFormat, 'chat-completions');
 });
 
+test('encrypted agent message passthrough is explicit and limited to Responses providers', () => {
+  const baseProvider = {
+    id: 'alpha',
+    baseUrl: 'https://alpha.example/v1',
+    models: [{ id: 'chat', upstreamModel: 'chat' }],
+    keys: [{ name: 'one', key: 'sk-one' }],
+  };
+  const defaults = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [baseProvider],
+  });
+  assert.equal(defaults.providers[0].supportsEncryptedAgentMessages, false);
+  assert.equal(
+    serializableConfig(defaults).providers[0].supportsEncryptedAgentMessages,
+    undefined,
+  );
+
+  const passthrough = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{ ...baseProvider, supportsEncryptedAgentMessages: true }],
+  });
+  assert.equal(passthrough.providers[0].supportsEncryptedAgentMessages, true);
+  assert.equal(
+    serializableConfig(passthrough).providers[0].supportsEncryptedAgentMessages,
+    true,
+  );
+
+  assert.throws(() => normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      ...baseProvider,
+      upstreamFormat: 'chat-completions',
+      supportsEncryptedAgentMessages: true,
+    }],
+  }), /requires responses upstreamFormat/);
+
+  assert.throws(() => normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{ ...baseProvider, supportsEncryptedAgentMessages: 'true' }],
+  }), /must be a boolean/);
+});
+
 test('model input modalities default to text and normalize image capability', () => {
   assert.deepEqual(normalizeInputModalities(undefined), ['text']);
   assert.deepEqual(normalizeInputModalities(['image', 'text', 'image']), ['text', 'image']);

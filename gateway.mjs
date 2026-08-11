@@ -15,6 +15,7 @@ import {
   chatCompletionToResponses,
   chatCompletionToResponsesSse,
   chatCompletionsSseToResponses,
+  normalizeAgentMessagesForUpstream,
   normalizeChatCompletionsError,
   responsesRequestToChatCompletions,
 } from './chat-completions-adapter.mjs';
@@ -1050,17 +1051,29 @@ function resolveRequestRoute(registry, body, requestUrl) {
       { statusCode: 400 },
     );
   }
+  const pathname = new URL(requestUrl || '/', 'http://gateway.local').pathname;
+  const isResponsesRequest = ['/v1/responses', '/responses'].includes(pathname);
   let routedBody = body;
   let upstreamModel;
+  if (
+    parsed
+    && isResponsesRequest
+    && !runtime.provider.supportsEncryptedAgentMessages
+  ) {
+    const normalized = normalizeAgentMessagesForUpstream(parsed);
+    if (normalized !== parsed) {
+      parsed = normalized;
+      routedBody = Buffer.from(JSON.stringify(parsed));
+    }
+  }
   if (aliasRoute) {
     parsed.model = aliasRoute.model.upstreamModel;
     routedBody = Buffer.from(JSON.stringify(parsed));
     upstreamModel = aliasRoute.model.upstreamModel;
   }
 
-  const pathname = new URL(requestUrl || '/', 'http://gateway.local').pathname;
   const shouldAdapt = runtime.provider.upstreamFormat === 'chat-completions'
-    && ['/v1/responses', '/responses'].includes(pathname);
+    && isResponsesRequest;
   let responseAdapter = null;
   let upstreamRequestPath = requestUrl;
   if (shouldAdapt) {
@@ -1752,6 +1765,7 @@ function publicProvider(provider) {
     name: provider.name,
     baseUrl: provider.baseUrl,
     upstreamFormat: provider.upstreamFormat,
+    supportsEncryptedAgentMessages: provider.supportsEncryptedAgentMessages === true,
     enabled: provider.enabled,
     models: provider.models.map(model => ({
       ...model,

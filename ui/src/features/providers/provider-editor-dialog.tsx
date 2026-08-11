@@ -186,6 +186,32 @@ export function ProviderEditorDialog({
                 </SelectContent>
               </Select>
             </Field>
+            <Field
+              orientation="horizontal"
+              data-disabled={
+                draft.upstreamFormat === "chat-completions" || undefined
+              }
+            >
+              <FieldContent>
+                <FieldTitle>{t.encryptedAgentMessages}</FieldTitle>
+                <FieldDescription>
+                  {draft.upstreamFormat === "chat-completions"
+                    ? t.encryptedAgentMessagesUnavailable
+                    : t.encryptedAgentMessagesDescription}
+                </FieldDescription>
+              </FieldContent>
+              <Switch
+                aria-label={t.encryptedAgentMessages}
+                checked={draft.supportsEncryptedAgentMessages}
+                disabled={draft.upstreamFormat === "chat-completions"}
+                onCheckedChange={(checked) =>
+                  setDraft((value) => ({
+                    ...value,
+                    supportsEncryptedAgentMessages: checked,
+                  }))
+                }
+              />
+            </Field>
             <Field orientation="horizontal">
               <FieldContent>
                 <FieldTitle>{t.enabled}</FieldTitle>

@@ -18,6 +18,7 @@
       "name": "DeepSeek",
       "baseUrl": "https://api.deepseek.com",
       "upstreamFormat": "responses",
+      "supportsEncryptedAgentMessages": false,
       "enabled": true,
       "balanceQuery": {
         "enabled": true,

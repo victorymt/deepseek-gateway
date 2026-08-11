@@ -33,6 +33,7 @@ export type ProviderDraft = {
   name: string
   baseUrl: string
   upstreamFormat: "responses" | "chat-completions"
+  supportsEncryptedAgentMessages: boolean
   enabled: boolean
   models: ModelDraft[]
   keys: KeyDraft[]
@@ -101,6 +102,7 @@ export function createEmptyProviderDraft(): ProviderDraft {
     name: "",
     baseUrl: "https://",
     upstreamFormat: "responses",
+    supportsEncryptedAgentMessages: false,
     enabled: true,
     models: [
       {
@@ -135,6 +137,8 @@ export function providerToDraft(provider: Provider): ProviderDraft {
     name: provider.name,
     baseUrl: provider.baseUrl,
     upstreamFormat: provider.upstreamFormat,
+    supportsEncryptedAgentMessages:
+      provider.supportsEncryptedAgentMessages === true,
     enabled: provider.enabled,
     models: provider.models.map(
       ({
@@ -207,6 +211,7 @@ export function providerDraftPayload(
     name: draft.name,
     baseUrl: draft.baseUrl,
     upstreamFormat: draft.upstreamFormat,
+    supportsEncryptedAgentMessages: draft.supportsEncryptedAgentMessages,
     enabled: draft.enabled,
     models: draft.models,
     balanceQuery: draft.balanceQuery,
@@ -305,6 +310,10 @@ export function setProviderUpstreamFormat(
   return {
     ...draft,
     upstreamFormat,
+    supportsEncryptedAgentMessages:
+      upstreamFormat === "chat-completions"
+        ? false
+        : draft.supportsEncryptedAgentMessages,
     models:
       upstreamFormat === "chat-completions"
         ? draft.models.map((model) => ({

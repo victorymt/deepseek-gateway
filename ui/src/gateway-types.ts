@@ -113,6 +113,7 @@ export type Provider = {
   name: string
   baseUrl: string
   upstreamFormat: "responses" | "chat-completions"
+  supportsEncryptedAgentMessages: boolean
   enabled: boolean
   models: ProviderModel[]
   keys: MaskedProviderKey[]

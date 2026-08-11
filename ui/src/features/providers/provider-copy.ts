@@ -37,6 +37,11 @@ export const providerCopy = {
     upstreamFormat: "Upstream API format",
     responsesFormat: "Responses",
     chatCompletionsFormat: "Chat Completions",
+    encryptedAgentMessages: "Native agent messages",
+    encryptedAgentMessagesDescription:
+      "Pass MultiAgentV2 agent_message items to the Responses upstream unchanged.",
+    encryptedAgentMessagesUnavailable:
+      "Native agent messages require a Responses upstream.",
     modelId: "Model ID",
     modelName: "Model name",
     upstreamModel: "Upstream model",
@@ -118,6 +123,11 @@ export const providerCopy = {
     upstreamFormat: "上游 API 格式",
     responsesFormat: "Responses",
     chatCompletionsFormat: "Chat Completions",
+    encryptedAgentMessages: "原生代理消息透传",
+    encryptedAgentMessagesDescription:
+      "将 MultiAgentV2 agent_message 项不经兼容转换直接发送给 Responses 上游。",
+    encryptedAgentMessagesUnavailable:
+      "原生代理消息透传要求上游使用 Responses 协议。",
     modelId: "模型 ID",
     modelName: "模型名称",
     upstreamModel: "上游模型",

@@ -742,6 +742,125 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
     assert.equal(requests.at(-1).body.tools, undefined);
     assert.equal(requests.at(-1).body.tool_choice, undefined);
     assert.equal(requests.at(-1).body.parallel_tool_calls, undefined);
+
+    const agentMessage = await gw.responses({
+      model: 'alpha--shared',
+      input: [{
+        type: 'agent_message',
+        id: 'amsg_chat_task',
+        author: '/root',
+        recipient: '/root/child',
+        content: [
+          { type: 'input_text', text: 'Message Type: NEW_TASK\nPayload:\n' },
+          { type: 'encrypted_content', encrypted_content: 'CHAT-SUBAGENT-9502' },
+        ],
+      }],
+    }, {}, '?trace=adapted');
+    assert.equal(agentMessage.status, 200, agentMessage.text);
+    const agentRequest = requests.at(-1).body;
+    assert.equal(agentRequest.messages[0].role, 'user');
+    assert.match(agentRequest.messages[0].content, /Message Type: NEW_TASK/);
+    assert.match(agentRequest.messages[0].content, /CHAT-SUBAGENT-9502/);
+    assert.doesNotMatch(JSON.stringify(agentRequest), /agent_message|encrypted_content/);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('Responses providers normalize agent messages by default and allow explicit native passthrough', async () => {
+  const upstreamPort = await freePort();
+  const requests = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      requests.push({ url: req.url, raw, body: JSON.parse(raw) });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'resp_native',
+        object: 'response',
+        status: 'completed',
+        model: requests.at(-1).body.model,
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 },
+      }));
+    });
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+
+  const config = multiProviderConfig({
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--shared',
+    providers: [
+      {
+        id: 'alpha',
+        name: 'Compatible Responses',
+        baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        upstreamFormat: 'responses',
+        enabled: true,
+        models: [{ id: 'shared', name: 'Shared', upstreamModel: 'same-upstream-model' }],
+        keys: [{ name: 'alpha-key', key: 'sk-alpha', weight: 1 }],
+      },
+      {
+        id: 'beta',
+        name: 'Native Responses',
+        baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        upstreamFormat: 'responses',
+        supportsEncryptedAgentMessages: true,
+        enabled: true,
+        models: [{ id: 'shared', name: 'Shared', upstreamModel: 'same-upstream-model' }],
+        keys: [{ name: 'beta-key', key: 'sk-beta', weight: 1 }],
+      },
+    ],
+  });
+  const agentInput = [{
+    type: 'agent_message',
+    id: 'amsg_native_task',
+    author: '/root',
+    recipient: '/root/child',
+    content: [
+      { type: 'input_text', text: 'Message Type: NEW_TASK\nPayload:\n' },
+      { type: 'encrypted_content', encrypted_content: 'NATIVE-SUBAGENT-9502' },
+    ],
+  }];
+  const gw = await startGateway('', [], {}, config, { mock: false, keysArg: false });
+  try {
+    const compatible = await gw.responses({
+      model: 'alpha--shared',
+      input: agentInput,
+    }, {}, '?trace=compatible');
+    assert.equal(compatible.status, 200, compatible.text);
+
+    const native = await gw.responses({
+      model: 'beta--shared',
+      input: agentInput,
+    }, {}, '?trace=native');
+    assert.equal(native.status, 200, native.text);
+
+    assert.equal(requests[0].url, '/v1/responses?trace=compatible');
+    assert.deepEqual(requests[0].body, {
+      model: 'same-upstream-model',
+      input: [{
+        type: 'message',
+        role: 'user',
+        id: 'amsg_native_task',
+        content: [
+          { type: 'input_text', text: 'Message Type: NEW_TASK\nPayload:\n' },
+          { type: 'input_text', text: 'NATIVE-SUBAGENT-9502' },
+        ],
+      }],
+    });
+    assert.equal(requests[1].url, '/v1/responses?trace=native');
+    assert.deepEqual(requests[1].body, {
+      model: 'same-upstream-model',
+      input: agentInput,
+    });
+
+    const publicConfig = await gw.providers();
+    assert.equal(publicConfig.providers[0].supportsEncryptedAgentMessages, false);
+    assert.equal(publicConfig.providers[1].supportsEncryptedAgentMessages, true);
   } finally {
     await gw.stop();
     await new Promise(resolve => upstream.close(resolve));

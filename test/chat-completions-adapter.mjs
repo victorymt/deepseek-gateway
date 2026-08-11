@@ -6,6 +6,7 @@ import {
   ChatCompletionsSseTransform,
   chatCompletionToResponses,
   chatCompletionToResponsesSse,
+  normalizeAgentMessagesForUpstream,
   normalizeChatCompletionsError,
   responsesRequestToChatCompletions,
 } from '../chat-completions-adapter.mjs';
@@ -88,6 +89,72 @@ test('Responses input images convert to Chat image URLs with data URL and detail
     { type: 'text', text: 'What is shown?' },
     { type: 'image_url', image_url: { url: imageUrl, detail: 'high' } },
   ]);
+});
+
+test('MultiAgentV2 agent messages unwrap without rewriting ordinary encrypted content', () => {
+  const request = {
+    model: 'provider-model',
+    input: [
+      {
+        type: 'agent_message',
+        id: 'amsg_task',
+        author: '/root',
+        recipient: '/root/child',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\n',
+          },
+          { type: 'encrypted_content', encrypted_content: 'SUBAGENT-TASK-9502' },
+        ],
+      },
+      {
+        type: 'reasoning',
+        encrypted_content: 'opaque-reasoning-token',
+        summary: [{ type: 'summary_text', text: 'checking' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'ack' }],
+      },
+    ],
+  };
+  const original = JSON.stringify(request);
+
+  const normalized = normalizeAgentMessagesForUpstream(request);
+  assert.deepEqual(normalized.input[0], {
+    type: 'message',
+    role: 'user',
+    id: 'amsg_task',
+    content: [
+      {
+        type: 'input_text',
+        text: 'Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\n',
+      },
+      { type: 'input_text', text: 'SUBAGENT-TASK-9502' },
+    ],
+  });
+  assert.deepEqual(normalized.input[1], request.input[1]);
+  assert.equal(JSON.stringify(request), original, 'normalization must not mutate the request');
+
+  const { payload } = responsesRequestToChatCompletions(request);
+  assert.match(payload.messages[0].content, /Message Type: NEW_TASK/);
+  assert.match(payload.messages[0].content, /SUBAGENT-TASK-9502/);
+  assert.equal(payload.messages[1].reasoning_content, 'checking');
+  assert.doesNotMatch(JSON.stringify(payload), /agent_message|encrypted_content|opaque-reasoning-token/);
+
+  assert.throws(
+    () => responsesRequestToChatCompletions({
+      model: 'provider-model',
+      input: [{
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'encrypted_content', encrypted_content: 'ordinary-message' }],
+      }],
+    }),
+    /Responses content type encrypted_content/,
+  );
 });
 
 test('Responses request conversion filters hosted web search for Chat Completions upstreams', () => {

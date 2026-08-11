@@ -61,6 +61,12 @@ cd deepseek-gateway
 ./gatewayctl start --config keys.json
 ```
 
+在另一个终端中可以优雅停止由 `gatewayctl` 或配置向导启动的实例：
+
+```bash
+./gatewayctl stop --config keys.json
+```
+
 默认地址：
 
 - 状态面板：`http://127.0.0.1:8787/`
@@ -163,12 +169,17 @@ JSON 可以使用字符串数组，也可以为单个 Key 覆盖名称、权重�
 ./gatewayctl validate --config keys.json
 ./gatewayctl doctor --config keys.json
 ./gatewayctl start --config keys.json --quiet
+./gatewayctl stop --config keys.json
 ./gatewayctl codex --config keys.json --dry-run
 ```
 
 - `validate` 使用网关配置核心完成迁移、规范化和完整校验。
 - `doctor` 检查 Node.js、配置、Dashboard 构建和本地网关状态；网关未启动只会报告警告。
-- `start` 和 `codex` 分别向网关进程及 Codex 配置工具转发其余参数。
+- `start` 在前台运行网关，并在当前用户的私有运行目录中登记 PID、实际监听地址和随机实例标识。一个配置文件只能对应一个受托管实例。
+- `stop` 先通过带认证的 `/health` 校验运行记录中的实例标识，再发送 `SIGTERM` 并等待请求排空；重复停止会成功返回，身份不匹配时不会发送信号，也不会自动使用 `SIGKILL`。
+- `codex` 向 Codex 配置工具转发其余参数。
+
+运行记录位于 `$XDG_RUNTIME_DIR/deepseek-gateway/`；没有设置 `XDG_RUNTIME_DIR` 时使用当前用户专属的临时目录。直接执行 `node gateway.mjs` 属于非托管启动，不会被 `gatewayctl stop` 停止。若 `start` 使用了仅存在于命令行的 `--token` 覆盖，停止时需要传入相同的 `--token`，或者设置 `DS_GATEWAY_TOKEN`。
 
 ## 手工配置
 
@@ -482,7 +493,7 @@ node gateway.mjs --config /path/to/keys.json
 
 ```bash
 npm ci
-node --test test/balance-script.mjs test/chat-completions-adapter.mjs test/codex-config.mjs test/config-core.mjs test/gatewayctl.mjs test/key-import.mjs test/smoke.mjs
+node --test test/balance-script.mjs test/chat-completions-adapter.mjs test/codex-config.mjs test/config-core.mjs test/gateway-runtime.mjs test/gatewayctl.mjs test/key-import.mjs test/smoke.mjs
 python3 -m unittest test/configure_test.py
 npm test --prefix ui
 npm run lint --prefix ui
@@ -501,4 +512,4 @@ npm run build --prefix ui
 | `-drip` | 分段流式响应 |
 | `-abort` | 流式传输中断 |
 
-测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、批量解析与原子导入、重复 secret 拒绝、上游模型发现与 ID 归一化、Responses 与 Chat Completions 双向转换、工具调用和分片 SSE 终止事件、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl`、交互式配置和备份恢复。
+测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、批量解析与原子导入、重复 secret 拒绝、上游模型发现与 ID 归一化、Responses 与 Chat Completions 双向转换、工具调用和分片 SSE 终止事件、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl` 托管启动和安全停止、交互式配置及备份恢复。

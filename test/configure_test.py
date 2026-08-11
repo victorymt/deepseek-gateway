@@ -92,6 +92,36 @@ class ConfigureWizardTests(unittest.TestCase):
         self.assertEqual(result, 1)
         call.assert_not_called()
 
+    def test_main_starts_gateway_through_gatewayctl(self):
+        args = type("Args", (), {
+            "config": Path("/tmp/keys.json"),
+            "no_ui": True,
+            "no_codex": True,
+            "no_start": False,
+            "cli_provider": False,
+        })()
+        config = {"host": "127.0.0.1", "port": 8787, "token": "gateway-token"}
+
+        with patch.object(configure_module, "parse_args", return_value=args), \
+             patch.object(configure_module, "load_existing", return_value={}), \
+             patch.object(configure_module, "connection_config", return_value=config), \
+             patch.object(configure_module, "configure", return_value=config), \
+             patch.object(configure_module, "gateway_status", side_effect=[
+                 configure_module.GATEWAY_AVAILABLE,
+                 configure_module.GATEWAY_AVAILABLE,
+             ]), \
+             patch.object(configure_module, "confirm", return_value=True), \
+             patch.object(configure_module.subprocess, "call", return_value=0) as call:
+            result = configure_module.main()
+
+        self.assertEqual(result, 0)
+        call.assert_called_once_with([
+            str(ROOT / "gatewayctl"),
+            "start",
+            "--config",
+            "/tmp/keys.json",
+        ])
+
     def test_ui_build_runs_the_helper_script(self):
         completed = type("Completed", (), {"returncode": 0})()
 

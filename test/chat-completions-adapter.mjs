@@ -6,10 +6,10 @@ import {
   ChatCompletionsSseTransform,
   chatCompletionToResponses,
   chatCompletionToResponsesSse,
-  normalizeAgentMessagesForUpstream,
   normalizeChatCompletionsError,
   responsesRequestToChatCompletions,
 } from '../chat-completions-adapter.mjs';
+import { normalizeAgentMessagesForUpstream } from '../responses-request-normalizer.mjs';
 
 function parseEvents(text) {
   return text

@@ -571,7 +571,7 @@ def main() -> int:
                         "但无法使用当前网关密码访问 /health；请停止占用进程或修改监听端口"
                     )
                 print("按 Ctrl+C 停止网关。\n")
-                return subprocess.call(["node", str(ROOT / "gateway.mjs"), "--config", str(path)])
+                return subprocess.call([str(ROOT / "gatewayctl"), "start", "--config", str(path)])
         print(f"\n启动命令：{ROOT / 'gatewayctl'} start --config {path}")
         return 0
     except (EOFError, KeyboardInterrupt):

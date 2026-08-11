@@ -15,10 +15,15 @@ import {
   chatCompletionToResponses,
   chatCompletionToResponsesSse,
   chatCompletionsSseToResponses,
-  normalizeAgentMessagesForUpstream,
   normalizeChatCompletionsError,
   responsesRequestToChatCompletions,
 } from './chat-completions-adapter.mjs';
+import { normalizeAgentMessagesForUpstream } from './responses-request-normalizer.mjs';
+import {
+  claimGatewayRuntime,
+  releaseGatewayRuntime,
+  updateGatewayRuntime,
+} from './gateway-runtime.mjs';
 import {
   effectiveBalanceQuery,
   executeBalanceQuery,
@@ -1008,6 +1013,58 @@ function requestHasImageInput(payload) {
     && payload.messages.some(message => contentHasImageInput(message?.content));
 }
 
+function prepareUpstreamRequest({
+  body,
+  payload,
+  aliasRoute,
+  runtime,
+  requestUrl,
+  isResponsesRequest,
+}) {
+  let preparedPayload = payload;
+  let upstreamModel;
+  if (aliasRoute) {
+    upstreamModel = aliasRoute.model.upstreamModel;
+    preparedPayload = { ...preparedPayload, model: upstreamModel };
+  }
+
+  const shouldAdapt = runtime.provider.upstreamFormat === 'chat-completions'
+    && isResponsesRequest;
+  if (shouldAdapt) {
+    if (!preparedPayload) {
+      throw Object.assign(new Error('Responses request body must be valid JSON'), { statusCode: 400 });
+    }
+    const adapted = responsesRequestToChatCompletions(preparedPayload);
+    return {
+      body: Buffer.from(JSON.stringify(adapted.payload)),
+      upstreamModel,
+      upstreamRequestPath: rewriteResponsesRequestUrl(requestUrl),
+      responseAdapter: {
+        type: 'chat-completions',
+        context: adapted.context,
+        stream: adapted.payload.stream === true,
+      },
+    };
+  }
+
+  if (
+    preparedPayload
+    && isResponsesRequest
+    && !runtime.provider.supportsEncryptedAgentMessages
+  ) {
+    preparedPayload = normalizeAgentMessagesForUpstream(preparedPayload);
+  }
+
+  return {
+    body: preparedPayload === payload
+      ? body
+      : Buffer.from(JSON.stringify(preparedPayload)),
+    upstreamModel,
+    upstreamRequestPath: requestUrl,
+    responseAdapter: null,
+  };
+}
+
 function resolveRequestRoute(registry, body, requestUrl) {
   if (registry.settings.setupPending) {
     throw Object.assign(new Error('gateway setup required'), { statusCode: 503 });
@@ -1053,50 +1110,24 @@ function resolveRequestRoute(registry, body, requestUrl) {
   }
   const pathname = new URL(requestUrl || '/', 'http://gateway.local').pathname;
   const isResponsesRequest = ['/v1/responses', '/responses'].includes(pathname);
-  let routedBody = body;
-  let upstreamModel;
-  if (
-    parsed
-    && isResponsesRequest
-    && !runtime.provider.supportsEncryptedAgentMessages
-  ) {
-    const normalized = normalizeAgentMessagesForUpstream(parsed);
-    if (normalized !== parsed) {
-      parsed = normalized;
-      routedBody = Buffer.from(JSON.stringify(parsed));
-    }
-  }
-  if (aliasRoute) {
-    parsed.model = aliasRoute.model.upstreamModel;
-    routedBody = Buffer.from(JSON.stringify(parsed));
-    upstreamModel = aliasRoute.model.upstreamModel;
-  }
-
-  const shouldAdapt = runtime.provider.upstreamFormat === 'chat-completions'
-    && isResponsesRequest;
-  let responseAdapter = null;
-  let upstreamRequestPath = requestUrl;
-  if (shouldAdapt) {
-    if (!parsed) throw Object.assign(new Error('Responses request body must be valid JSON'), { statusCode: 400 });
-    const adapted = responsesRequestToChatCompletions(parsed);
-    routedBody = Buffer.from(JSON.stringify(adapted.payload));
-    upstreamRequestPath = rewriteResponsesRequestUrl(requestUrl);
-    responseAdapter = {
-      type: 'chat-completions',
-      context: adapted.context,
-      stream: adapted.payload.stream === true,
-    };
-  }
+  const prepared = prepareUpstreamRequest({
+    body,
+    payload: parsed,
+    aliasRoute,
+    runtime,
+    requestUrl,
+    isResponsesRequest,
+  });
 
   return {
     runtime,
-    body: routedBody,
+    body: prepared.body,
     clientPath: pathname,
     requestedModel,
     gatewayModel: requestedModel || registry.settings.defaultModel,
-    ...(upstreamModel ? { upstreamModel } : {}),
-    upstreamRequestPath,
-    responseAdapter,
+    ...(prepared.upstreamModel ? { upstreamModel: prepared.upstreamModel } : {}),
+    upstreamRequestPath: prepared.upstreamRequestPath,
+    responseAdapter: prepared.responseAdapter,
   };
 }
 
@@ -1709,7 +1740,7 @@ function addTotals(target, source) {
   return target;
 }
 
-function buildHealth(cfg, registry, uptime) {
+function buildHealth(cfg, registry, uptime, instanceId) {
   const total = emptyTotals();
   const providers = cfg.providers.map(provider => {
     const runtime = registry.get(provider.id);
@@ -1731,6 +1762,7 @@ function buildHealth(cfg, registry, uptime) {
   const defaultStats = defaultRuntime ? defaultRuntime.pool.stats() : { keys: [] };
   return {
     status: 'ok',
+    instanceId,
     setupRequired: cfg.setupPending === true,
     version: VERSION,
     mock: cfg.mock,
@@ -2508,7 +2540,7 @@ async function handleLogin(cfg, req, res) {
   res.end();
 }
 
-async function handleRequest(cfg, registry, req, res, log, startedAt) {
+async function handleRequest(cfg, registry, req, res, log, startedAt, instanceId) {
   const requestUrl = req.url || '/';
   if (maybeSendUiAsset(requestUrl, res)) return;
   const parsedUrl = new URL(requestUrl, 'http://gateway.local');
@@ -2558,7 +2590,7 @@ async function handleRequest(cfg, registry, req, res, log, startedAt) {
   }
   if (url === '/health') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(buildHealth(cfg, registry, Date.now() - startedAt)));
+    res.end(JSON.stringify(buildHealth(cfg, registry, Date.now() - startedAt, instanceId)));
     return;
   }
   if (url.startsWith('/api/')) {
@@ -2579,12 +2611,13 @@ function makeLog(quiet) {
 }
 
 let shutdownStarted = false;
-async function shutdown(server, registry) {
+async function shutdown(server, registry, runtimeHandle) {
   if (shutdownStarted) return;
   shutdownStarted = true;
   server.close();
   await registry.waitForIdle(2000);
   registry.close();
+  releaseGatewayRuntime(runtimeHandle);
   process.exit(0);
 }
 
@@ -2602,10 +2635,28 @@ function main() {
     process.exit(1);
   }
   const log = makeLog(cfg.quiet);
-  const registry = new ProviderRegistry(cfg, log);
   const startedAt = Date.now();
+  const instanceId = crypto.randomUUID();
+  let runtimeHandle = null;
+  if (process.env.DS_GATEWAY_MANAGED === '1') {
+    try {
+      runtimeHandle = claimGatewayRuntime({
+        configPath: cfg.configPath,
+        instanceId,
+        host: cfg.host,
+        port: cfg.port,
+        startedAt,
+      });
+    } catch (error) {
+      console.error(`ERROR: Cannot create gateway runtime record: ${error.message}`);
+      process.exit(1);
+    }
+  }
+  process.once('exit', () => releaseGatewayRuntime(runtimeHandle));
+
+  const registry = new ProviderRegistry(cfg, log);
   const server = http.createServer((req, res) => {
-    handleRequest(cfg, registry, req, res, log, startedAt).catch(err => {
+    handleRequest(cfg, registry, req, res, log, startedAt, instanceId).catch(err => {
       const code = err.statusCode || 500;
       log(`${code} ${req.method} ${req.url} ${err.message}`);
       if (!res.headersSent) res.writeHead(code, { 'content-type': 'application/json' });
@@ -2614,6 +2665,7 @@ function main() {
   });
   server.once('error', error => {
     registry.close();
+    releaseGatewayRuntime(runtimeHandle);
     if (error.code === 'EADDRINUSE') {
       console.error(
         `ERROR: Cannot listen on http://${cfg.host}:${cfg.port}: address already in use. ` +
@@ -2625,15 +2677,30 @@ function main() {
     process.exitCode = 1;
   });
   server.listen(cfg.port, cfg.host, () => {
-    registry.activate();
     const addr = server.address();
     cfg.port = addr.port;
+    if (runtimeHandle) {
+      try {
+        runtimeHandle = updateGatewayRuntime(runtimeHandle, {
+          host: addr.address,
+          port: addr.port,
+        });
+      } catch (error) {
+        console.error(`ERROR: Cannot update gateway runtime record: ${error.message}`);
+        server.close();
+        registry.close();
+        releaseGatewayRuntime(runtimeHandle);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    registry.activate();
     log(`deepseek-gateway v${VERSION} listening on http://${addr.address}:${addr.port}${cfg.mock ? ' [mock]' : ''}`);
     log(`providers: ${cfg.providers.filter(provider => provider.enabled).map(provider => `${provider.id}(${provider.keys.length} keys)`).join(', ')}`);
     log(`dashboard: http://${addr.address}:${addr.port}/`);
   });
-  process.on('SIGINT', () => shutdown(server, registry));
-  process.on('SIGTERM', () => shutdown(server, registry));
+  process.on('SIGINT', () => shutdown(server, registry, runtimeHandle));
+  process.on('SIGTERM', () => shutdown(server, registry, runtimeHandle));
 }
 
 main();

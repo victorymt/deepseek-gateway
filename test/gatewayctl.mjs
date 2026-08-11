@@ -45,9 +45,23 @@ test('gatewayctl forwards init, start, and codex arguments', () => {
   const explicitStart = commandInvocation('start', ['--config', '/tmp/explicit.json', '--mock'], env);
   assert.deepEqual(explicitStart.args.slice(-3), ['--config', '/tmp/explicit.json', '--mock']);
 
-  const codex = commandInvocation('codex', ['--config', '/tmp/codex.json', '--auth', 'required', '--dry-run'], env);
-  assert.deepEqual(codex.args, ['--auth', 'required', '--dry-run']);
-  assert.equal(codex.env.GATEWAY_CONFIG, '/tmp/codex.json');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gatewayctl-codex-'));
+  const codexPath = path.join(directory, 'codex.json');
+  fs.writeFileSync(codexPath, JSON.stringify(validConfig({ port: 9123 })));
+  try {
+    const codex = commandInvocation('codex', ['--config', codexPath, '--auth', 'required', '--dry-run'], env);
+    assert.deepEqual(codex.args, ['--auth', 'required', '--dry-run']);
+    assert.equal(codex.env.GATEWAY_CONFIG, codexPath);
+    assert.equal(codex.env.GATEWAY_URL, 'http://127.0.0.1:9123');
+
+    const overridden = commandInvocation('codex', ['--config', codexPath], {
+      ...env,
+      GATEWAY_URL: 'https://gateway.example',
+    });
+    assert.equal(overridden.env.GATEWAY_URL, 'https://gateway.example');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('gatewayctl validates config and doctor accepts an offline gateway', () => {
@@ -71,6 +85,16 @@ test('gatewayctl validates config and doctor accepts an offline gateway', () => 
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('gatewayctl codex rejects an explicitly missing config', () => {
+  const missing = path.join(os.tmpdir(), `missing-gateway-${process.pid}.json`);
+  const result = spawnSync(GATEWAYCTL, ['codex', '--config', missing, '--dry-run'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /cannot read config/);
 });
 
 test('gatewayctl validate and doctor recognize setup-pending config', () => {

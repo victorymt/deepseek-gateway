@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import {
   CheckCircle2Icon,
   RefreshCwIcon,
@@ -39,6 +39,7 @@ import { apiRequest } from "@/lib/api-request"
 
 type Draft = Record<GatewaySettingField, string> & {
   token: string
+  adminToken: string
 }
 
 const numberFields: GatewaySettingField[] = [
@@ -67,7 +68,10 @@ const copy = {
     timeoutMs: "Upstream timeout (ms)",
     maxBodyBytes: "Maximum body size (bytes)",
     token: "New gateway token",
+    adminToken: "New admin token",
     tokenPlaceholder: "Leave blank to keep the current token",
+    adminTokenDescription:
+      "Used only for console login and management APIs. Keep it separate from the inference token.",
     clearToken: "Clear gateway token",
     clearTokenDescription: "Remove the token stored in the config file.",
     clearTokenConfirmTitle: "Disable gateway authentication?",
@@ -107,7 +111,10 @@ const copy = {
     timeoutMs: "上游超时（毫秒）",
     maxBodyBytes: "请求体上限（字节）",
     token: "新的 Gateway 令牌",
+    adminToken: "新的管理令牌",
     tokenPlaceholder: "留空则保留当前令牌",
+    adminTokenDescription:
+      "仅用于控制台登录和管理 API，必须与推理令牌不同。",
     clearToken: "清除 Gateway 令牌",
     clearTokenDescription: "删除配置文件中保存的 Gateway 令牌。",
     clearTokenConfirmTitle: "关闭 Gateway 认证？",
@@ -143,6 +150,7 @@ const emptyDraft = (): Draft => ({
   timeoutMs: "",
   maxBodyBytes: "",
   token: "",
+  adminToken: "",
 })
 
 function draftFromSettings(settings: GatewaySettings): Draft {
@@ -156,6 +164,7 @@ function draftFromSettings(settings: GatewaySettings): Draft {
     timeoutMs: String(settings.persisted.timeoutMs),
     maxBodyBytes: String(settings.persisted.maxBodyBytes),
     token: "",
+    adminToken: "",
   }
 }
 
@@ -168,28 +177,45 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
   const [clearDialogOpen, setClearDialogOpen] = useState(false)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState(false)
+  const [dirty, setDirty] = useState(false)
+  const activeRequest = useRef<AbortController | null>(null)
+  const requestSequence = useRef(0)
 
   const refresh = useCallback(async () => {
+    const sequence = ++requestSequence.current
+    activeRequest.current?.abort()
+    const controller = new AbortController()
+    activeRequest.current = controller
     setLoading(true)
     try {
-      const next = await apiRequest<GatewaySettings>("/api/settings")
+      const next = await apiRequest<GatewaySettings>("/api/settings", {
+        signal: controller.signal,
+      })
+      if (sequence !== requestSequence.current) return
       setSettings(next)
       setDraft(draftFromSettings(next))
+      setDirty(false)
       setError("")
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : t.failed)
+      if (!controller.signal.aborted && sequence === requestSequence.current) {
+        setError(cause instanceof Error ? cause.message : "Request failed")
+      }
     } finally {
-      setLoading(false)
+      if (sequence === requestSequence.current) setLoading(false)
     }
-  }, [t.failed])
+  }, [])
 
   useEffect(() => {
     const timer = window.setTimeout(() => void refresh(), 0)
-    return () => window.clearTimeout(timer)
+    return () => {
+      window.clearTimeout(timer)
+      activeRequest.current?.abort()
+    }
   }, [refresh])
 
   function update(field: keyof Draft, value: string | boolean) {
     setDraft((current) => ({ ...current, [field]: value }))
+    setDirty(true)
     setNotice(false)
   }
 
@@ -197,6 +223,10 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
     event.preventDefault()
     if (!settings?.writable) return
     setSaving(true)
+    const sequence = ++requestSequence.current
+    activeRequest.current?.abort()
+    const controller = new AbortController()
+    activeRequest.current = controller
     setError("")
     setNotice(false)
     try {
@@ -205,38 +235,53 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
       }
       for (const field of numberFields) payload[field] = Number(draft[field])
       if (draft.token) payload.token = draft.token
+      if (draft.adminToken) payload.adminToken = draft.adminToken
       const next = await apiRequest<GatewaySettings>("/api/settings", {
         method: "PATCH",
         body: JSON.stringify(payload),
+        signal: controller.signal,
       })
+      if (sequence !== requestSequence.current) return
       setSettings(next)
       setDraft(draftFromSettings(next))
+      setDirty(false)
       setNotice(true)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : t.failed)
+      if (!controller.signal.aborted && sequence === requestSequence.current) {
+        setError(cause instanceof Error ? cause.message : t.failed)
+      }
     } finally {
-      setSaving(false)
+      if (sequence === requestSequence.current) setSaving(false)
     }
   }
 
   async function clearToken() {
     if (!settings?.writable || settings.overrides.token) return
     setSaving(true)
+    const sequence = ++requestSequence.current
+    activeRequest.current?.abort()
+    const controller = new AbortController()
+    activeRequest.current = controller
     setError("")
     setNotice(false)
     try {
       const next = await apiRequest<GatewaySettings>("/api/settings", {
         method: "PATCH",
         body: JSON.stringify({ clearToken: true }),
+        signal: controller.signal,
       })
+      if (sequence !== requestSequence.current) return
       setSettings(next)
       setDraft(draftFromSettings(next))
+      setDirty(false)
       setNotice(true)
       setClearDialogOpen(false)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : t.failed)
+      if (!controller.signal.aborted && sequence === requestSequence.current) {
+        setError(cause instanceof Error ? cause.message : t.failed)
+      }
     } finally {
-      setSaving(false)
+      if (sequence === requestSequence.current) setSaving(false)
     }
   }
 
@@ -296,7 +341,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
           size="icon"
           aria-label={t.refresh}
           title={t.refresh}
-          disabled={loading}
+          disabled={loading || saving || dirty}
           onClick={() => void refresh()}
         >
           {loading ? <Spinner /> : <RefreshCwIcon />}
@@ -402,6 +447,35 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
                       ? t.authFromConfig
                       : t.authDisabled}
                 </FieldDescription>
+              </Field>
+
+              <Field data-disabled={!settings.writable ? true : undefined}>
+                <FieldLabel htmlFor="setting-admin-token">
+                  {t.adminToken}
+                  <Badge
+                    variant={
+                      settings.effective.adminTokenConfigured
+                        ? "secondary"
+                        : "outline"
+                    }
+                  >
+                    {settings.effective.adminTokenConfigured
+                      ? t.configured
+                      : t.notConfigured}
+                  </Badge>
+                </FieldLabel>
+                <Input
+                  id="setting-admin-token"
+                  type="password"
+                  value={draft.adminToken}
+                  placeholder={t.tokenPlaceholder}
+                  autoComplete="new-password"
+                  disabled={!settings.writable}
+                  onChange={(event) => {
+                    update("adminToken", event.target.value)
+                  }}
+                />
+                <FieldDescription>{t.adminTokenDescription}</FieldDescription>
               </Field>
 
               <Field

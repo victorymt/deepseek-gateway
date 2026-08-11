@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import {
   ActivityIcon,
   CircleDotIcon,
   LayoutDashboardIcon,
   KeyRoundIcon,
   LanguagesIcon,
+  LogOutIcon,
   MoonIcon,
   ServerCogIcon,
   ServerCrashIcon,
@@ -64,10 +65,11 @@ const translations = {
     languageToggle: "切换到中文",
     privateConsole: "PRIVATE CONSOLE",
     loginTitle: "Sign in to console",
-    loginDescription: "Use your gateway token to continue.",
-    tokenLabel: "Gateway token",
+    loginDescription: "Use your admin token to continue.",
+    tokenLabel: "Admin token",
     tokenPlaceholder: "Enter token",
     login: "Sign in",
+    logout: "Sign out",
     invalidToken: "Incorrect token",
     cannotConnect: "Cannot connect to gateway",
     operations: "OPERATIONS / GATEWAY",
@@ -197,10 +199,11 @@ const translations = {
     languageToggle: "Switch to English",
     privateConsole: "私有控制台",
     loginTitle: "登录控制台",
-    loginDescription: "使用 Gateway 令牌继续。",
-    tokenLabel: "Gateway 令牌",
+    loginDescription: "使用管理令牌继续。",
+    tokenLabel: "管理令牌",
     tokenPlaceholder: "输入令牌",
     login: "登录",
+    logout: "退出登录",
     invalidToken: "令牌不正确",
     cannotConnect: "无法连接 Gateway",
     operations: "运维 / 网关",
@@ -615,6 +618,16 @@ function Dashboard({
           <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
             <LanguageToggle />
             <ThemeToggle />
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              aria-label={t.logout}
+              title={t.logout}
+              onClick={() => window.location.assign("/logout")}
+            >
+              <LogOutIcon />
+            </Button>
             <ConnectionBadge state={connection} locale={locale} />
           </div>
         </div>
@@ -801,12 +814,20 @@ export function App() {
   const [connection, setConnection] = useState<ConnectionState>("connecting")
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const activeRequest = useRef<AbortController | null>(null)
+  const requestSequence = useRef(0)
 
   const refresh = useCallback(async () => {
+    const sequence = ++requestSequence.current
+    activeRequest.current?.abort()
+    const controller = new AbortController()
+    activeRequest.current = controller
     try {
       const response = await fetch("/health", {
         headers: { accept: "application/json" },
+        signal: controller.signal,
       })
+      if (sequence !== requestSequence.current) return
       if (response.status === 401) {
         setConnection("auth")
         setLoading(false)
@@ -815,12 +836,17 @@ export function App() {
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
+      if (!(response.headers.get("content-type") || "").includes("application/json")) {
+        throw new Error("Gateway health returned a non-JSON response")
+      }
       const nextHealth = (await response.json()) as Health
+      if (sequence !== requestSequence.current) return
       setHealth(nextHealth)
       setConnection("live")
       setError("")
       setLoading(false)
     } catch (cause) {
+      if (controller.signal.aborted || sequence !== requestSequence.current) return
       setConnection("offline")
       setLoading(false)
       setError(cause instanceof Error ? cause.message : "Unknown error")
@@ -828,11 +854,17 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    const initialRefresh = window.setTimeout(refresh, 0)
-    const timer = window.setInterval(refresh, 2000)
+    let stopped = false
+    let timer = 0
+    const poll = async () => {
+      await refresh()
+      if (!stopped) timer = window.setTimeout(poll, 2000)
+    }
+    void poll()
     return () => {
-      window.clearTimeout(initialRefresh)
-      window.clearInterval(timer)
+      stopped = true
+      window.clearTimeout(timer)
+      activeRequest.current?.abort()
     }
   }, [refresh])
 

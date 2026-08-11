@@ -236,8 +236,7 @@ function readResponse(res) {
       settled = true;
       const text = Buffer.concat(chunks).toString('utf8');
       if ((res.statusCode || 500) < 200 || (res.statusCode || 500) >= 300) {
-        const preview = text.replace(/\s+/g, ' ').slice(0, 200);
-        reject(new Error(`balance request failed with HTTP ${res.statusCode}: ${preview}`));
+        reject(new Error(`balance request failed with HTTP ${res.statusCode}`));
         return;
       }
       try {
@@ -252,13 +251,27 @@ function readResponse(res) {
 async function sendBalanceRequest(request, { timeoutMs, agent }) {
   const mod = request.url.protocol === 'https:' ? https : http;
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let deadlineTimer;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadlineTimer);
+      callback(value);
+    };
     const req = mod.request(request.url, {
       method: request.method,
       headers: request.headers,
       agent,
-    }, res => readResponse(res).then(resolve, reject));
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('balance request timeout')));
-    req.on('error', reject);
+    }, res => readResponse(res).then(
+      value => finish(resolve, value),
+      error => finish(reject, error),
+    ));
+    deadlineTimer = setTimeout(
+      () => req.destroy(new Error(`balance request timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    req.on('error', error => finish(reject, error));
     if (request.body !== null) req.write(request.body);
     req.end();
   });

@@ -122,7 +122,7 @@ async function startGateway(keys, extra = [], env = {}, config = {}, options = {
 }
 
 function multiProviderConfig(overrides = {}) {
-  return {
+  const config = {
     schemaVersion: 2,
     defaultProvider: 'alpha',
     defaultModel: 'alpha--shared',
@@ -147,6 +147,8 @@ function multiProviderConfig(overrides = {}) {
     ],
     ...overrides,
   };
+  if (config.token && !config.adminToken) config.adminToken = 'test-admin-token-123456';
+  return config;
 }
 
 test('text-only model rejects image input while image-enabled models accept it', async () => {
@@ -289,6 +291,24 @@ test('401 marks key invalid permanently', async () => {
     const h = await gw.health();
     assert.equal(h.keys.find(k => k.name === 'alice').invalid, true);
     assert.equal(h.keys.find(k => k.name === 'alice').state, 'invalid');
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('403 is returned without poisoning or failing over to another key', async () => {
+  const gw = await startGateway('alice=sk-a-403,bob=sk-b-ok');
+  try {
+    const { status, text } = await gw.chat();
+    assert.equal(status, 403);
+    assert.match(text, /mock 403/);
+    const h = await gw.health();
+    const alice = h.keys.find(k => k.name === 'alice');
+    const bob = h.keys.find(k => k.name === 'bob');
+    assert.equal(alice.invalid, false);
+    assert.equal(alice.failureCount, 0);
+    assert.equal(alice.errors, 1);
+    assert.equal(bob.total, 0, 'a request-level 403 must not be retried with another credential');
   } finally {
     await gw.stop();
   }
@@ -595,7 +615,11 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
     req.on('data', chunk => chunks.push(chunk));
     req.on('end', () => {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      requests.push({ url: req.url, body });
+      requests.push({
+        url: req.url,
+        body,
+        ...(req.headers.cookie ? { cookie: req.headers.cookie } : {}),
+      });
       if (req.url === '/v1/chat/completions?trace=direct') {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
@@ -665,7 +689,7 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
       model: 'alpha--shared',
       instructions: 'Use tools carefully.',
       input: [{ role: 'user', content: [{ type: 'input_text', text: 'inspect' }] }],
-    }, {}, '?trace=adapted');
+    }, { cookie: 'dsgw=must-not-reach-upstream' }, '?trace=adapted');
     assert.equal(nonStream.status, 200, nonStream.text);
     assert.equal(nonStream.headers.get('x-gateway-provider'), 'alpha');
     assert.equal(nonStream.headers.get('content-encoding'), null);
@@ -680,6 +704,7 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
     assert.equal(requests[0].url, '/v1/chat/completions?trace=adapted');
     assert.equal(requests[0].body.model, 'same-upstream-model');
     assert.deepEqual(requests[0].body.messages.map(message => message.role), ['system', 'user']);
+    assert.equal(requests[0].cookie, undefined);
 
     const stream = await gw.responses({ model: 'alpha--shared', input: 'stream', stream: true }, {}, '?trace=adapted');
     assert.equal(stream.status, 200, stream.text);
@@ -700,14 +725,15 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
     assert.equal(directBody.choices[0].message.content, 'direct');
     assert.equal(requests.at(-1).url, '/v1/chat/completions?trace=direct');
 
-    const unsupported = await gw.responses({
+    const webSearchFallback = await gw.responses({
       model: 'alpha--shared',
       input: 'search',
       tools: [{ type: 'web_search' }],
     }, {}, '?trace=adapted');
-    assert.equal(unsupported.status, 400);
-    assert.match(unsupported.text, /web_search/);
-    assert.equal(requests.length, 3);
+    assert.equal(webSearchFallback.status, 200, webSearchFallback.text);
+    assert.equal(requests.at(-1).url, '/v1/chat/completions?trace=adapted');
+    assert.equal(requests.at(-1).body.tools, undefined);
+    assert.equal(requests.length, 4);
   } finally {
     await gw.stop();
     await new Promise(resolve => upstream.close(resolve));
@@ -742,6 +768,9 @@ test('unknown prefixed aliases fail closed while legacy model names use the defa
     const unknownCodex = await gw.chat({ model: 'Missing.shared' });
     assert.equal(unknownCodex.status, 400);
     assert.match(unknownCodex.text, /unknown or disabled model alias/);
+    const unknownNumericCodex = await gw.chat({ model: '1missing.shared' });
+    assert.equal(unknownNumericCodex.status, 400);
+    assert.match(unknownNumericCodex.text, /unknown or disabled model alias/);
     const legacy = await gw.chat({ model: 'same-upstream-model' });
     assert.equal(legacy.status, 200);
     assert.equal(legacy.headers.get('x-gateway-provider'), 'alpha');
@@ -885,9 +914,10 @@ test('settings API redacts tokens and applies runtime settings live', async () =
     { name: 'healthy', key: 'sk-alpha-ok', weight: 1 },
   ];
   const gw = await startGateway('', [], {}, config, { keysArg: false });
-  const auth = { authorization: 'Bearer stored-gateway-secret' };
+  const adminAuth = { authorization: `Bearer ${config.adminToken}` };
+  const inferenceAuth = { authorization: 'Bearer stored-gateway-secret' };
   try {
-    const initial = await gw.settings({ headers: auth });
+    const initial = await gw.settings({ headers: adminAuth });
     const initialText = await initial.text();
     assert.equal(initial.status, 200);
     assert.ok(!initialText.includes('stored-gateway-secret'));
@@ -898,7 +928,7 @@ test('settings API redacts tokens and applies runtime settings live', async () =
 
     const updated = await gw.settings({
       method: 'PATCH',
-      headers: { ...auth, 'content-type': 'application/json', origin: gw.base },
+      headers: { ...adminAuth, 'content-type': 'application/json', origin: gw.base },
       body: JSON.stringify({ cooldownMs: 4000, maxRetries: 1, timeoutMs: 2500 }),
     });
     const updatedText = await updated.text();
@@ -908,10 +938,10 @@ test('settings API redacts tokens and applies runtime settings live', async () =
     assert.equal(settings.effective.maxRetries, 1);
     assert.equal(settings.effective.timeoutMs, 2500);
 
-    const routed = await gw.chat({ model: 'alpha--shared' }, auth);
+    const routed = await gw.chat({ model: 'alpha--shared' }, inferenceAuth);
     assert.equal(routed.status, 200);
     assert.equal(JSON.parse(routed.text).gateway_key_name, 'healthy');
-    const health = await fetch(`${gw.base}/health`, { headers: auth }).then(response => response.json());
+    const health = await fetch(`${gw.base}/health`, { headers: inferenceAuth }).then(response => response.json());
     const limited = health.providers.find(provider => provider.id === 'alpha').keys.find(key => key.name === 'limited');
     assert.equal(limited.state, 'cooldown');
     assert.ok(limited.cooldownSec <= 4);
@@ -921,18 +951,30 @@ test('settings API redacts tokens and applies runtime settings live', async () =
 });
 
 test('settings API persists restart-only values and rejects cross-origin writes', async () => {
-  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  const adminToken = 'settings-admin-token';
+  const gw = await startGateway('', [], {}, multiProviderConfig({
+    token: 'settings-gateway-token',
+    adminToken,
+  }), { keysArg: false });
   try {
     const rejected = await gw.settings({
       method: 'PATCH',
-      headers: { 'content-type': 'application/json', origin: 'https://evil.example' },
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://evil.example',
+        authorization: `Bearer ${adminToken}`,
+      },
       body: JSON.stringify({ host: '0.0.0.0' }),
     });
     assert.equal(rejected.status, 403);
 
     const response = await gw.settings({
       method: 'PATCH',
-      headers: { 'content-type': 'application/json', origin: gw.base },
+      headers: {
+        'content-type': 'application/json',
+        origin: gw.base,
+        authorization: `Bearer ${adminToken}`,
+      },
       body: JSON.stringify({ host: '0.0.0.0', port: 9444, maxBodyBytes: 4096 }),
     });
     const responseText = await response.text();
@@ -993,12 +1035,17 @@ test('settings API can set and clear the gateway token without exposing it', asy
     const setToken = await gw.settings({
       method: 'PATCH',
       headers: { 'content-type': 'application/json', origin: gw.base },
-      body: JSON.stringify({ token: 'rotated-gateway-secret' }),
+      body: JSON.stringify({
+        token: 'rotated-gateway-secret',
+        adminToken: 'rotated-admin-secret-1234',
+      }),
     });
     const setText = await setToken.text();
     assert.equal(setToken.status, 200);
     assert.ok(!setText.includes('rotated-gateway-secret'));
+    assert.ok(!setText.includes('rotated-admin-secret-1234'));
     assert.equal(JSON.parse(setText).effective.tokenConfigured, true);
+    assert.equal(JSON.parse(setText).effective.adminTokenConfigured, true);
     const setCookie = setToken.headers.get('set-cookie');
     assert.match(setCookie || '', /dsgw=v1\./);
     const browserCookie = setCookie.split(';', 1)[0];
@@ -1017,9 +1064,10 @@ test('settings API can set and clear the gateway token without exposing it', asy
     const clearedText = await cleared.text();
     assert.equal(cleared.status, 200, clearedText);
     assert.equal(JSON.parse(clearedText).effective.tokenConfigured, false);
-    assert.match(cleared.headers.get('set-cookie') || '', /Max-Age=0/);
+    assert.doesNotMatch(cleared.headers.get('set-cookie') || '', /Max-Age=0/);
     assert.equal(JSON.parse(fs.readFileSync(gw.configPath, 'utf8')).token, '');
-    assert.equal((await gw.settings()).status, 200);
+    assert.equal((await gw.settings()).status, 401);
+    assert.equal((await gw.settings({ headers: { cookie: browserCookie } })).status, 200);
   } finally {
     await gw.stop();
   }
@@ -1051,7 +1099,9 @@ test('model discovery proxies OpenAI-compatible endpoints and normalizes upstrea
     }));
   });
   await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
-  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}/anthropic`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
   const secret = 'sk-model-discovery-secret';
   try {
     const response = await fetch(`${gw.base}/api/models`, {
@@ -1082,9 +1132,20 @@ test('model discovery proxies OpenAI-compatible endpoints and normalizes upstrea
     const providerKeyResponse = await fetch(`${gw.base}/api/models`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin: gw.base },
-      body: JSON.stringify({ providerId: 'alpha', baseUrl: `http://127.0.0.1:${upstreamPort}/anthropic` }),
+      body: JSON.stringify({ providerId: 'alpha' }),
     });
     assert.equal(providerKeyResponse.status, 200, await providerKeyResponse.text());
+
+    const crossOriginResponse = await fetch(`${gw.base}/api/models`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        providerId: 'alpha',
+        baseUrl: `http://localhost:${upstreamPort}/anthropic`,
+      }),
+    });
+    assert.equal(crossOriginResponse.status, 400);
+    assert.match(await crossOriginResponse.text(), /explicit API key/);
     assert.deepEqual(requests, [
       { path: '/anthropic/v1/models', authorization: `Bearer ${secret}` },
       { path: '/v1/models', authorization: `Bearer ${secret}` },
@@ -1379,6 +1440,8 @@ test('changing provider baseUrl drains an active stream before retiring its runt
 
 test('generated Codex artifacts omit env auth when the gateway has no token', async () => {
   const config = multiProviderConfig();
+  config.providers[0].models[0].supportsHostedWebSearch = true;
+  config.providers[1].upstreamFormat = 'chat-completions';
   config.providers[1].models[0] = {
     id: 'gpt-4.1',
     name: 'GPT 4.1',
@@ -1419,14 +1482,19 @@ test('generated Codex artifacts omit env auth when the gateway has no token', as
       ['text'],
       ['text', 'image'],
     ]);
+    assert.equal(catalog.models[0].web_search_tool_type, 'text');
+    assert.equal(catalog.models[1].web_search_tool_type, undefined);
   } finally {
     await gw.stop();
   }
 });
 
 test('generated Codex artifacts use the effective runtime gateway token state', async () => {
-  const gw = await startGateway('', [], { DS_GATEWAY_TOKEN: 'runtime-gateway-secret' }, multiProviderConfig(), { keysArg: false });
-  const auth = { authorization: 'Bearer runtime-gateway-secret' };
+  const gw = await startGateway('', [], {
+    DS_GATEWAY_TOKEN: 'runtime-gateway-secret',
+    DS_GATEWAY_ADMIN_TOKEN: 'runtime-admin-secret-1234',
+  }, multiProviderConfig(), { keysArg: false });
+  const auth = { authorization: 'Bearer runtime-admin-secret-1234' };
   try {
     const settingsResponse = await gw.settings({ headers: auth });
     assert.equal(settingsResponse.status, 200);
@@ -1725,7 +1793,12 @@ test('CLI args take precedence over env vars', async () => {
 });
 
 test('token auth: cookie login for dashboard, bearer for proxy', async () => {
-  const gw = await startGateway('alice=sk-a-ok', ['--token', 'secret-token']);
+  const adminToken = 'separate-admin-token-1234';
+  const gw = await startGateway(
+    'alice=sk-a-ok',
+    ['--token', 'secret-token'],
+    { DS_GATEWAY_ADMIN_TOKEN: adminToken },
+  );
   try {
     const shell = await fetch(`${gw.base}/`);
     assert.equal(shell.status, 200);
@@ -1747,12 +1820,28 @@ test('token auth: cookie login for dashboard, bearer for proxy', async () => {
     const login = await fetch(`${gw.base}/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token: 'secret-token' }),
+      body: JSON.stringify({ token: adminToken }),
       redirect: 'manual',
     });
     assert.equal(login.status, 302);
     const cookie = login.headers.get('set-cookie').split(';')[0];
     assert.ok(cookie.startsWith('dsgw='));
+
+    const proxiedLogin = await fetch(`${gw.base}/login`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-proto': 'https',
+      },
+      body: JSON.stringify({ token: adminToken }),
+      redirect: 'manual',
+    });
+    assert.match(proxiedLogin.headers.get('set-cookie'), /; Secure;/);
+
+    const malformedPath = await fetch(`${gw.base}/api/providers/%ZZ`, {
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    assert.equal(malformedPath.status, 400);
 
     const healthCookie = await fetch(`${gw.base}/health`, { headers: { cookie } });
     assert.equal(healthCookie.status, 200);
@@ -1760,6 +1849,11 @@ test('token auth: cookie login for dashboard, bearer for proxy', async () => {
     assert.equal(providersCookie.status, 200);
     const shellCookie = await fetch(`${gw.base}/`, { headers: { cookie } });
     assert.equal(shellCookie.status, 200);
+
+    const providersWithInferenceToken = await fetch(`${gw.base}/api/providers`, {
+      headers: { authorization: 'Bearer secret-token' },
+    });
+    assert.equal(providersWithInferenceToken.status, 401);
 
     const proxyWithCookie = await fetch(`${gw.base}/v1/chat/completions`, {
       method: 'POST',
@@ -1824,18 +1918,45 @@ test('upstream abort mid-stream counts as error and gateway survives', async () 
   }
 });
 
+test('downstream abort before upstream headers cancels the active request', async () => {
+  const gw = await startGateway('alice=sk-a-slow,bob=sk-b-ok');
+  try {
+    const controller = new AbortController();
+    const pending = fetch(`${gw.base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash' }),
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 40);
+    await assert.rejects(pending, error => error.name === 'AbortError');
+    await waitFor(async () => (await gw.health()).keys[0].inFlight === 0);
+    const h = await gw.health();
+    assert.equal(h.keys[0].errors, 1);
+    assert.equal(h.keys[0].failureCount, 0);
+    assert.equal(h.keys[1].total, 0, 'client abort must stop the retry loop');
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('merge-config preserves codex profiles', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-profiles-'));
   const codexDir = path.join(tmp, 'codex');
   fs.mkdirSync(codexDir);
   fs.writeFileSync(path.join(codexDir, 'config.toml'), [
     'model = "gpt-5"',
+    '# [model_providers.multi-provider-gateway] is documentation only',
     '',
     '[profiles.fast]',
     'model = "gpt-5-fast"',
     '',
     '[profiles.deepseek]',
     'base_url = "https://deepseek.example"',
+    '',
+    '[model_providers."multi-provider-gateway"] # stale generated section',
+    'name = "Stale Gateway"',
+    'base_url = "http://127.0.0.1:1/v1"',
     '',
   ].join('\n'));
   const setup = path.join(ROOT, 'setup-codex.sh');
@@ -1857,7 +1978,9 @@ test('merge-config preserves codex profiles', async () => {
   assert.match(merged, /\[profiles\.deepseek\]/);
   assert.match(merged, /base_url = "https:\/\/deepseek\.example"/, 'profile deepseek must be preserved');
   assert.match(merged, /^model = "Deepseek.v4-flash"/m, 'top-level model must be replaced');
-  assert.equal((merged.match(/\[model_providers\.multi-provider-gateway\]/g) || []).length, 1);
+  assert.match(merged, /^# \[model_providers\.multi-provider-gateway\] is documentation only$/m);
+  assert.doesNotMatch(merged, /Stale Gateway/);
+  assert.equal((merged.match(/^\[model_providers\.multi-provider-gateway\]$/gm) || []).length, 1);
   assert.doesNotMatch(merged, /env_key/);
   assert.doesNotMatch(merged, /experimental_bearer_token/);
   const validate = spawnSync('python3', ['-c', `

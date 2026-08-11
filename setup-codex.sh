@@ -10,8 +10,12 @@ ENV_KEY="DEEPSEEK_GATEWAY_TOKEN"
 BACKUP_DIR="$CODEX_DIR/backup-gateway"
 CONFIG="$CODEX_DIR/config.toml"
 MODELS="$CODEX_DIR/gateway-models.json"
-GATEWAY_CONFIG="${GATEWAY_CONFIG:-$SCRIPT_DIR/keys.json}"
-[ -f "$GATEWAY_CONFIG" ] || GATEWAY_CONFIG="$SCRIPT_DIR/keys.example.json"
+if [ "${GATEWAY_CONFIG+x}" = "x" ]; then
+  [ -f "$GATEWAY_CONFIG" ] || { echo "ERROR: gateway config not found: $GATEWAY_CONFIG" >&2; exit 1; }
+else
+  GATEWAY_CONFIG="$SCRIPT_DIR/keys.json"
+  [ -f "$GATEWAY_CONFIG" ] || GATEWAY_CONFIG="$SCRIPT_DIR/keys.example.json"
+fi
 
 usage() {
   cat <<EOF
@@ -56,6 +60,24 @@ done
 
 if [ -n "$UNDO" ]; then
     if [ ! -d "$BACKUP_DIR" ]; then echo "no backups found in $BACKUP_DIR"; exit 1; fi
+    SNAPSHOT="$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort | tail -1 || true)"
+    if [ -n "$SNAPSHOT" ]; then
+      if [ -f "$SNAPSHOT/config.toml" ]; then
+        cp "$SNAPSHOT/config.toml" "$CONFIG"
+        echo "restored $CONFIG from $SNAPSHOT/config.toml"
+      elif [ -f "$SNAPSHOT/config.toml.missing" ]; then
+        rm -f "$CONFIG"
+        echo "restored missing config.toml state"
+      fi
+      if [ -f "$SNAPSHOT/gateway-models.json" ]; then
+        cp "$SNAPSHOT/gateway-models.json" "$MODELS"
+        echo "restored $MODELS from $SNAPSHOT/gateway-models.json"
+      elif [ -f "$SNAPSHOT/gateway-models.json.missing" ]; then
+        rm -f "$MODELS"
+        echo "restored missing gateway-models.json state"
+      fi
+      exit 0
+    fi
     CONFIG_BACKUP="$(ls -1 "$BACKUP_DIR"/config.toml.* 2>/dev/null | tail -1 || true)"
     MODELS_BACKUP="$(ls -1 "$BACKUP_DIR"/gateway-models.json.* 2>/dev/null | tail -1 || true)"
     if [ -z "$CONFIG_BACKUP" ] && [ -z "$MODELS_BACKUP" ]; then echo "no backups found"; exit 1; fi
@@ -110,15 +132,21 @@ now() {
 }
 
 run mkdir -p "$CODEX_DIR" "$BACKUP_DIR"
-TS="$(date +%Y%m%d-%H%M%S)"
+TS="$(date +%Y%m%d-%H%M%S-%N)-$$"
+SNAPSHOT_DIR="$BACKUP_DIR/$TS"
+run mkdir -p "$SNAPSHOT_DIR"
 
 if [ -f "$CONFIG" ]; then
-  run cp "$CONFIG" "$BACKUP_DIR/config.toml.$TS"
-  now "backed up config.toml -> $BACKUP_DIR/config.toml.$TS"
+  run cp "$CONFIG" "$SNAPSHOT_DIR/config.toml"
+  now "backed up config.toml -> $SNAPSHOT_DIR/config.toml"
+else
+  run touch "$SNAPSHOT_DIR/config.toml.missing"
 fi
 if [ -f "$MODELS" ]; then
-  run cp "$MODELS" "$BACKUP_DIR/gateway-models.json.$TS"
-  now "backed up gateway-models.json -> $BACKUP_DIR/gateway-models.json.$TS"
+  run cp "$MODELS" "$SNAPSHOT_DIR/gateway-models.json"
+  now "backed up gateway-models.json -> $SNAPSHOT_DIR/gateway-models.json"
+else
+  run touch "$SNAPSHOT_DIR/gateway-models.json.missing"
 fi
 
 if [ -z "$MODEL" ]; then
@@ -158,7 +186,8 @@ PY
 then
   echo "validated $CONFIG (TOML ok)"
 else
-  echo "WARNING: could not validate config.toml (python3 tomllib needs 3.11+); check the file manually" >&2
+  echo "ERROR: generated config.toml failed TOML validation (python3 3.11+ with tomllib is required)" >&2
+  exit 1
 fi
 
 echo

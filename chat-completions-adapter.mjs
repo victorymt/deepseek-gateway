@@ -8,6 +8,11 @@ import { Transform } from 'node:stream';
 const CUSTOM_TOOL_INPUT_FIELD = 'input';
 const TOOL_SEARCH_PROXY_NAME = 'tool_search';
 const CHAT_TOOL_NAME_MAX_LENGTH = 64;
+const DROPPED_HOSTED_TOOL_TYPES = new Set([
+  'web_search',
+  'web_search_preview',
+  'web_search_preview_2025_03_11',
+]);
 const PASSTHROUGH_FIELDS = [
   'frequency_penalty',
   'logit_bias',
@@ -66,6 +71,7 @@ function createToolContext(tools) {
     }
     if (!isObject(tool)) throw adapterError('tools must contain objects');
     const type = String(tool.type || 'function');
+    if (DROPPED_HOSTED_TOOL_TYPES.has(type)) return;
     if (type === 'namespace') {
       const children = tool.tools ?? tool.children;
       if (!Array.isArray(children)) throw adapterError(`namespace tool ${tool.name || ''} must contain tools`);
@@ -377,6 +383,9 @@ function responseFormatFromText(text) {
 function chatToolChoice(choice, context) {
   if (typeof choice === 'string' || choice === null) return choice;
   if (!isObject(choice)) throw adapterError('tool_choice must be a string or object');
+  if (DROPPED_HOSTED_TOOL_TYPES.has(String(choice.type || ''))) {
+    throw adapterError(`tool_choice requires ${choice.type}, which is not supported by Chat Completions upstreams`);
+  }
   if (choice.type === 'allowed_tools') throw adapterError('allowed_tools tool_choice is not supported by Chat Completions upstreams');
   const name = choice.type === 'tool_search' ? TOOL_SEARCH_PROXY_NAME : String(choice.name || choice.function?.name || '');
   const namespace = String(choice.namespace || '');
@@ -416,9 +425,12 @@ export function responsesRequestToChatCompletions(payload) {
   const responseFormat = responseFormatFromText(payload.text);
   if (payload.response_format !== undefined) result.response_format = payload.response_format;
   if (responseFormat) result.response_format = responseFormat;
+  const toolChoice = payload.tool_choice !== undefined
+    ? chatToolChoice(payload.tool_choice, context)
+    : undefined;
   if (context.chatTools.length) {
     result.tools = context.chatTools;
-    if (payload.tool_choice !== undefined) result.tool_choice = chatToolChoice(payload.tool_choice, context);
+    if (toolChoice !== undefined) result.tool_choice = toolChoice;
   } else {
     delete result.parallel_tool_calls;
   }
@@ -495,12 +507,13 @@ function customInput(argumentsText) {
   }
 }
 
-function responseToolItem(call, index, context, status = 'completed', reasoning = '') {
+function responseToolItem(call, index, context, status = 'completed', reasoning = '', canonicalize = true) {
   const callId = String(call?.id || `call_${index}`);
   const chatName = String(call?.function?.name || call?.name || '');
   if (!chatName) return null;
   const spec = context?.byChatName?.get(chatName);
-  const argumentsText = canonicalArguments(call?.function?.arguments ?? call?.arguments);
+  const rawArguments = call?.function?.arguments ?? call?.arguments ?? '';
+  const argumentsText = canonicalize ? canonicalArguments(rawArguments) : String(rawArguments);
   let item;
   if (spec?.kind === 'custom') {
     item = {
@@ -578,14 +591,14 @@ export function chatCompletionToResponses(payload, context = createToolContext([
     output.push({
       id: `${id}_msg`,
       type: 'message',
-      status: 'completed',
+      status,
       role: 'assistant',
       content: [{ type: 'output_text', text, annotations: [] }],
     });
   }
   const toolCalls = Array.isArray(choice.message.tool_calls) ? choice.message.tool_calls : [];
   for (let index = 0; index < toolCalls.length; index++) {
-    const item = responseToolItem(toolCalls[index], index, context, 'completed', reasoning);
+    const item = responseToolItem(toolCalls[index], index, context, status, reasoning);
     if (item) output.push(item);
   }
   return baseResponse({
@@ -760,14 +773,14 @@ class ChatToResponsesState {
     return events;
   }
 
-  finalizeText() {
+  finalizeText(status = 'completed') {
     if (!this.text.added || this.text.done) return [];
     this.text.done = true;
     const part = { type: 'output_text', text: this.text.text, annotations: [] };
     const item = {
       id: this.text.itemId,
       type: 'message',
-      status: 'completed',
+      status,
       role: 'assistant',
       content: [part],
     };
@@ -846,7 +859,7 @@ class ChatToResponsesState {
       if (!state.callId) state.callId = `call_${index}`;
       state.added = true;
       state.outputIndex = this.allocateOutput();
-      const item = responseToolItem({ id: state.callId, function: { name: state.name, arguments: '' } }, index, this.context, 'in_progress', state.reasoning);
+      const item = responseToolItem({ id: state.callId, function: { name: state.name, arguments: '' } }, index, this.context, 'in_progress', state.reasoning, false);
       if (item) events.push(this.event('response.output_item.added', { output_index: state.outputIndex, item }));
     }
     const spec = this.context.byChatName.get(state.name);
@@ -860,7 +873,7 @@ class ChatToResponsesState {
     return events;
   }
 
-  finalizeTools() {
+  finalizeTools(status = 'completed') {
     const events = [];
     for (const [index, state] of [...this.tools.entries()].sort((a, b) => a[0] - b[0])) {
       if (state.done || !state.name) continue;
@@ -868,11 +881,11 @@ class ChatToResponsesState {
       if (!state.added) {
         state.added = true;
         state.outputIndex = this.allocateOutput();
-        const added = responseToolItem({ id: state.callId, function: { name: state.name, arguments: '' } }, index, this.context, 'in_progress', state.reasoning);
+        const added = responseToolItem({ id: state.callId, function: { name: state.name, arguments: '' } }, index, this.context, 'in_progress', state.reasoning, false);
         if (added) events.push(this.event('response.output_item.added', { output_index: state.outputIndex, item: added }));
       }
       const call = { id: state.callId, function: { name: state.name, arguments: state.arguments } };
-      const item = responseToolItem(call, index, this.context, 'completed', state.reasoning);
+      const item = responseToolItem(call, index, this.context, status, state.reasoning);
       if (!item) continue;
       const spec = this.context.byChatName.get(state.name);
       if (spec?.kind === 'custom') {
@@ -938,19 +951,19 @@ class ChatToResponsesState {
 
   finalize() {
     if (this.completed) return [];
+    const status = responseStatus(this.finishReason);
     const events = [
       ...this.ensureStarted(),
       ...this.flushInlineThink(),
       ...this.finalizeReasoning(),
-      ...this.finalizeText(),
-      ...this.finalizeTools(),
+      ...this.finalizeText(status),
+      ...this.finalizeTools(status),
     ];
-    const status = responseStatus(this.finishReason);
     const response = this.response(status);
     this.finalResponse = response;
-    events.push(this.event('response.completed', { response }));
+    events.push(this.event(status === 'incomplete' ? 'response.incomplete' : 'response.completed', { response }));
     this.completed = true;
-    this.terminal = 'completed';
+    this.terminal = status;
     return events;
   }
 
@@ -1025,7 +1038,7 @@ export class ChatCompletionsSseTransform extends Transform {
     const { event, data } = parseSseBlock(block);
     if (!data) return;
     if (data.trim() === '[DONE]') {
-      this.pushEvents(this.state.finalize());
+      this.pushEvents(this.state.endOfStream());
       this.notifyTerminal();
       return;
     }
@@ -1096,7 +1109,7 @@ export function chatCompletionsSseToResponses(text, context = createToolContext(
     const { event, data } = parseSseBlock(block);
     if (!data) return;
     if (data.trim() === '[DONE]') {
-      state.finalize();
+      state.endOfStream();
       return;
     }
     let chunk;

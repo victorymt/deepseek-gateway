@@ -27,6 +27,7 @@ export const DEFAULT_MODELS = [
 const PROVIDER_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const MODEL_ID_RE = /^[a-z0-9](?:[a-z0-9._\/:+-]{0,61}[a-z0-9])?$/;
 const MAX_BALANCE_SCRIPT_BYTES = 64 * 1024;
+export const MAX_PROVIDER_KEYS = 1000;
 
 function isLoopbackHost(value) {
   const host = String(value || '').toLowerCase();
@@ -100,6 +101,18 @@ export function normalizeInputModalities(value, field = 'inputModalities') {
   return modalities;
 }
 
+export function normalizeHostedWebSearch(value, field = 'supportsHostedWebSearch') {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value === true;
+}
+
+export function canExposeHostedWebSearch(provider, model) {
+  return provider?.upstreamFormat === 'responses'
+    && model?.supportsHostedWebSearch === true;
+}
+
 export function normalizeNumber(value, field, { min = 0, max = Infinity, integer = false } = {}) {
   const number = Number(value);
   if (!Number.isFinite(number) || number < min || number > max || (integer && !Number.isInteger(number))) {
@@ -164,6 +177,9 @@ export function normalizeProvider(input, existing = null) {
   );
   if (!Array.isArray(rawModels) || !rawModels.length) throw new Error(`provider ${id} must define at least one model`);
   if (!Array.isArray(rawKeys) || !rawKeys.length) throw new Error(`provider ${id} must define at least one key`);
+  if (rawKeys.length > MAX_PROVIDER_KEYS) {
+    throw new Error(`provider ${id} must not define more than ${MAX_PROVIDER_KEYS} keys`);
+  }
 
   const models = rawModels.map(model => {
     if (!model || typeof model !== 'object' || Array.isArray(model)) throw new Error(`provider ${id} has an invalid model`);
@@ -174,17 +190,33 @@ export function normalizeProvider(input, existing = null) {
       model.inputModalities,
       `provider ${id} model ${modelId} inputModalities`,
     );
+    const supportsHostedWebSearch = normalizeHostedWebSearch(
+      model.supportsHostedWebSearch,
+      `provider ${id} model ${modelId} supportsHostedWebSearch`,
+    );
     if (!modelName || modelName.length > 100) throw new Error(`provider ${id} model ${modelId} name is invalid`);
     if (!upstreamModel || upstreamModel.length > 200) throw new Error(`provider ${id} model ${modelId} upstreamModel is required`);
-    return { id: modelId, name: modelName, upstreamModel, inputModalities };
+    if (supportsHostedWebSearch && upstreamFormat !== 'responses') {
+      throw new Error(
+        `provider ${id} model ${modelId} supportsHostedWebSearch requires responses upstreamFormat`,
+      );
+    }
+    return {
+      id: modelId,
+      name: modelName,
+      upstreamModel,
+      inputModalities,
+      supportsHostedWebSearch,
+    };
   });
 
   const existingKeys = new Map((existing?.keys || []).map(key => [key.name, key]));
   const keys = rawKeys.map((key, index) => {
     if (!key || typeof key !== 'object' || Array.isArray(key)) throw new Error(`provider ${id} has an invalid key`);
     const keyName = String(key.name || `key-${index + 1}`).trim();
+    const originalName = String(key.originalName || keyName).trim();
     let secret = typeof key.key === 'string' ? key.key.trim() : '';
-    if (!secret && existingKeys.has(keyName)) secret = existingKeys.get(keyName).key;
+    if (!secret && existingKeys.has(originalName)) secret = existingKeys.get(originalName).key;
     const weight = Number(key.weight ?? 1);
     const enabled = key.enabled === undefined
       ? (existingKeys.get(keyName)?.enabled ?? true)
@@ -260,6 +292,9 @@ export function validateProviderConfig(config, { allowSetup = false } = {}) {
 
 export function migrateConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config must be an object');
+  if (Number.isFinite(raw.schemaVersion) && raw.schemaVersion > 2) {
+    throw new Error(`unsupported config schemaVersion: ${raw.schemaVersion}`);
+  }
   if (Array.isArray(raw.providers)) {
     return {
       ...raw,
@@ -320,12 +355,19 @@ export function normalizeConfig(raw, { allowSetup = false } = {}) {
     timeoutMs: normalizeNumber(migrated.timeoutMs ?? 0, 'timeoutMs'),
     maxBodyBytes: normalizeNumber(migrated.maxBodyBytes ?? 64 * 1024 * 1024, 'maxBodyBytes', { min: 1, integer: true }),
     token: String(migrated.token || ''),
+    adminToken: String(migrated.adminToken || ''),
     defaultProvider,
     defaultModel,
     providers,
   };
-  if (setupPending && !isLoopbackHost(config.host) && config.token.length < 16) {
-    throw new Error('setupPending on a non-loopback host requires a gateway token of at least 16 characters');
+  if (!isLoopbackHost(config.host) && config.token.length < 16) {
+    throw new Error('a non-loopback host requires a gateway token of at least 16 characters');
+  }
+  if (config.token && config.adminToken.length < 16) {
+    throw new Error('gateway authentication requires a separate adminToken of at least 16 characters');
+  }
+  if (config.token && config.adminToken === config.token) {
+    throw new Error('adminToken must be different from the gateway token');
   }
   validateProviderConfig(config, { allowSetup });
   return config;
@@ -354,11 +396,20 @@ export function serializableConfig(config) {
     timeoutMs: config.timeoutMs,
     maxBodyBytes: config.maxBodyBytes,
     token: config.token,
+    adminToken: config.adminToken,
     defaultProvider: config.defaultProvider,
     defaultModel: config.defaultModel,
     providers: config.providers.map(provider => ({
       ...provider,
-      models: provider.models.map(model => ({ ...model })),
+      models: provider.models.map(({
+        supportsHostedWebSearch,
+        ...model
+      }) => ({
+        ...model,
+        ...(supportsHostedWebSearch
+          ? { supportsHostedWebSearch: true }
+          : {}),
+      })),
       keys: provider.keys.map(key => ({
         name: key.name,
         key: key.key,

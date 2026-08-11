@@ -33,6 +33,9 @@ function parseJsonEntries(value) {
     throw importError('invalid JSON key list');
   }
   if (!Array.isArray(parsed)) throw importError('JSON key list must be an array');
+  if (parsed.length > MAX_KEY_IMPORT_ENTRIES) {
+    throw importError(`key import is limited to ${MAX_KEY_IMPORT_ENTRIES} entries`);
+  }
   return parsed.map((item, index) => {
     if (typeof item === 'string') {
       return parseToken(item, index + 1) || { name: null, secret: '', entry: index + 1 };
@@ -63,8 +66,11 @@ export function parseKeyImportText(text) {
   if (!trimmed) throw importError('key import text cannot be empty');
   if (trimmed.startsWith('[')) return parseJsonEntries(trimmed);
 
-  return trimmed
-    .split(/[\s,;]+/)
+  const tokens = trimmed.split(/[\s,;]+/);
+  if (tokens.length > MAX_KEY_IMPORT_ENTRIES) {
+    throw importError(`key import is limited to ${MAX_KEY_IMPORT_ENTRIES} entries`);
+  }
+  return tokens
     .map((token, index) => parseToken(token, index + 1))
     .filter(Boolean);
 }

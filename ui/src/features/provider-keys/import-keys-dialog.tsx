@@ -221,6 +221,7 @@ export function ImportKeysDialog({
               <FieldDescription>{copy.keyEnabled}</FieldDescription>
             </FieldContent>
             <Switch
+              aria-label={copy.importEnabled}
               checked={enabled}
               onCheckedChange={setEnabled}
               disabled={loading}
@@ -232,6 +233,7 @@ export function ImportKeysDialog({
               <FieldDescription>{copy.alwaysTryDescription}</FieldDescription>
             </FieldContent>
             <Switch
+              aria-label={copy.importAlwaysTry}
               checked={alwaysTry}
               onCheckedChange={setAlwaysTry}
               disabled={loading}

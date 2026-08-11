@@ -25,6 +25,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import type { CodexArtifacts } from "@/gateway-types"
+import { apiRequest } from "@/lib/api-request"
 
 const copy = {
   en: {
@@ -33,6 +34,7 @@ const copy = {
     refresh: "Refresh artifacts",
     failed: "Generation failed",
     copied: "Copied",
+    copyFailed: "Could not copy to the clipboard",
     copy: "Copy",
     download: "Download",
     config: "config.toml",
@@ -53,6 +55,7 @@ const copy = {
     refresh: "刷新配置",
     failed: "生成失败",
     copied: "已复制",
+    copyFailed: "无法复制到剪贴板",
     copy: "复制",
     download: "下载",
     config: "config.toml",
@@ -68,19 +71,7 @@ const copy = {
 } as const
 
 async function fetchArtifacts() {
-  const response = await fetch("/api/codex/config", {
-    credentials: "same-origin",
-    headers: { accept: "application/json" },
-  })
-  const payload = (await response
-    .json()
-    .catch(() => ({}))) as CodexArtifacts & {
-    error?: { message?: string }
-  }
-  if (!response.ok) {
-    throw new Error(payload.error?.message || `HTTP ${response.status}`)
-  }
-  return payload
+  return apiRequest<CodexArtifacts>("/api/codex/config")
 }
 
 function downloadText(filename: string, content: string, type: string) {
@@ -117,9 +108,15 @@ export function CodexSetup({ locale }: { locale: Locale }) {
   }, [refresh])
 
   async function copyText(value: string) {
-    await navigator.clipboard.writeText(value)
-    setNotice(t.copied)
-    window.setTimeout(() => setNotice(""), 1600)
+    try {
+      await navigator.clipboard.writeText(value)
+      setError("")
+      setNotice(t.copied)
+      window.setTimeout(() => setNotice(""), 1600)
+    } catch {
+      setNotice("")
+      setError(t.copyFailed)
+    }
   }
 
   const environmentLine =

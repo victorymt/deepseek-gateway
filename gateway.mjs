@@ -63,10 +63,10 @@ function sessionCookie(token) {
   return `v1.${expiry}.${sig}`;
 }
 
-function setSessionCookie(res, token) {
+function setSessionCookie(res, token, secure = false) {
   res.setHeader(
     'set-cookie',
-    `${COOKIE_NAME}=${sessionCookie(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+    `${COOKIE_NAME}=${sessionCookie(token)}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
   );
 }
 
@@ -182,6 +182,7 @@ function loadConfig(opts) {
     timeoutMs: 0,
     maxBodyBytes: 64 * 1024 * 1024,
     token: '',
+    adminToken: '',
     keys: [],
   };
   const configPath = opts.config || process.env.DS_GATEWAY_CONFIG || configCandidates().find(p => fs.existsSync(p)) || configCandidates()[0];
@@ -235,6 +236,7 @@ function loadConfig(opts) {
   if (opts.port !== undefined) applyScalarOverride('port', opts.port, '--port');
   if (process.env.DS_GATEWAY_TOKEN) applyScalarOverride('token', process.env.DS_GATEWAY_TOKEN, 'DS_GATEWAY_TOKEN');
   if (opts.token) applyScalarOverride('token', opts.token, '--token');
+  if (process.env.DS_GATEWAY_ADMIN_TOKEN) applyScalarOverride('adminToken', process.env.DS_GATEWAY_ADMIN_TOKEN, 'DS_GATEWAY_ADMIN_TOKEN');
   if (process.env.DS_COOLDOWN_MS) applyScalarOverride('cooldownMs', Number(process.env.DS_COOLDOWN_MS), 'DS_COOLDOWN_MS');
   if (opts.cooldownMs !== undefined) applyScalarOverride('cooldownMs', opts.cooldownMs, '--cooldown-ms');
   if (process.env.DS_BREAKER) applyScalarOverride('blacklistThreshold', Number(process.env.DS_BREAKER), 'DS_BREAKER');
@@ -287,7 +289,6 @@ class KeyPool {
     this.cooldownMs = cfg.cooldownMs;
     this.blacklistThreshold = cfg.blacklistThreshold;
     this.total = { requests: 0, success: 0, errors: 0, ratelimited: 0, tokens: 0 };
-    this._usageBuf = '';
   }
 
   createKeyState(key) {
@@ -423,7 +424,7 @@ class KeyPool {
       this.total.ratelimited++;
       key.throttleUntil = Date.now() + (r.retryAfterSec ? r.retryAfterSec * 1000 : this.cooldownMs);
       key.lastError = '429 rate limited';
-    } else if (s === 401 || s === 402 || s === 403) {
+    } else if (s === 401 || s === 402) {
       key.failureCount++;
       if (key.alwaysTry) {
         key.unhealthy = true;
@@ -434,15 +435,6 @@ class KeyPool {
     } else if (s >= 500) {
       this.recordFailure(key, `http ${s}`);
     }
-  }
-
-  trackTokens(chunk) {
-    const s = chunk.toString('utf8');
-    this._usageBuf = (this._usageBuf + s).slice(-16384);
-    const re = /"total_tokens"\s*:\s*(\d+)/g;
-    re.lastIndex = Math.max(0, this._usageBuf.length - s.length);
-    let m;
-    while ((m = re.exec(this._usageBuf)) !== null) this.total.tokens += Number(m[1]);
   }
 
   recordTokens(totalTokens) {
@@ -549,18 +541,33 @@ function startBalanceRefresh(runtime, log) {
   }
   const refreshMs = query.refreshMs ?? settings.balanceRefreshMs;
   if (refreshMs <= 0) return () => {};
+  const generation = Symbol('balance-refresh');
+  runtime.balanceRefreshGeneration = generation;
   let refreshing = false;
+  let stopped = false;
   const refresh = async () => {
-    if (refreshing) return;
+    if (refreshing || stopped) return;
     refreshing = true;
     try {
-      await Promise.all(pool.keys.filter(key => key.enabled).map(async key => {
-        try {
-          await refreshKeyBalance(runtime, key);
-        } catch (err) {
-          log(`balance refresh failed provider=${runtime.provider.id} key=${key.name}: ${err.message}`);
+      const keys = pool.keys.filter(key => key.enabled);
+      let nextIndex = 0;
+      const worker = async () => {
+        while (!stopped && nextIndex < keys.length) {
+          const key = keys[nextIndex++];
+          try {
+            const balance = await fetchKeyBalance(runtime, key);
+            if (stopped || runtime.balanceRefreshGeneration !== generation || !pool.keys.includes(key)) continue;
+            key.balance = balance;
+            key.balanceUpdatedAt = Date.now();
+            key.balanceError = '';
+          } catch (err) {
+            if (stopped || runtime.balanceRefreshGeneration !== generation || !pool.keys.includes(key)) continue;
+            key.balanceError = err.message;
+            log(`balance refresh failed provider=${runtime.provider.id} key=${key.name}: ${err.message}`);
+          }
         }
-      }));
+      };
+      await Promise.all(Array.from({ length: Math.min(4, keys.length) }, worker));
     } finally {
       refreshing = false;
     }
@@ -569,7 +576,11 @@ function startBalanceRefresh(runtime, log) {
   refresh();
   const timer = setInterval(refresh, refreshMs);
   timer.unref();
-  return () => clearInterval(timer);
+  return () => {
+    stopped = true;
+    if (runtime.balanceRefreshGeneration === generation) runtime.balanceRefreshGeneration = null;
+    clearInterval(timer);
+  };
 }
 
 function sameKeyConfig(a, b) {
@@ -655,6 +666,16 @@ class ProviderRegistry {
   releaseRuntime(runtime) {
     runtime.activeRequests = Math.max(0, runtime.activeRequests - 1);
     if (runtime.retired && runtime.activeRequests === 0) this.destroyRuntime(runtime);
+  }
+
+  async waitForIdle(timeoutMs = 2000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const runtimes = new Set([...this.entries.values(), ...this.retiredEntries]);
+      if ([...runtimes].every(runtime => runtime.activeRequests === 0)) return true;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return false;
   }
 
   rebuildAliases() {
@@ -977,7 +998,7 @@ function resolveRequestRoute(registry, body, requestUrl) {
   const aliasRoute = requestedModel ? registry.resolveAlias(requestedModel) : null;
   if (!aliasRoute && (
     requestedModel.includes('--')
-    || /^[A-Z][a-z0-9-]*\.[a-z0-9][a-z0-9._\/:+-]*$/.test(requestedModel)
+    || /^[A-Z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9._\/:+-]*$/.test(requestedModel)
   )) {
     throw Object.assign(new Error(`unknown or disabled model alias: ${requestedModel}`), { statusCode: 400 });
   }
@@ -1038,14 +1059,14 @@ function resolveRequestRoute(registry, body, requestUrl) {
   };
 }
 
-async function forwardOnce(runtime, key, clientReq, route) {
+async function forwardOnce(runtime, key, clientReq, route, signal) {
   const { settings } = runtime;
   const { body } = route;
-  if (settings.mock) return mockResponse(key, body, route.responseAdapter?.type);
+  if (settings.mock) return mockResponse(key, body, route.responseAdapter?.type, signal);
   const u = upstreamRequestUrl(runtime.provider.baseUrl, route.upstreamRequestPath || clientReq.url);
   const headers = {};
   for (const [h, v] of Object.entries(clientReq.headers)) {
-    if (HOP_HEADERS.has(h) || h === 'host' || h === 'authorization' || h === 'content-length') continue;
+    if (HOP_HEADERS.has(h) || h === 'host' || h === 'authorization' || h === 'cookie' || h === 'content-length') continue;
     headers[h] = Array.isArray(v) ? v.join(', ') : v;
   }
   headers.authorization = `Bearer ${key.key}`;
@@ -1054,7 +1075,12 @@ async function forwardOnce(runtime, key, clientReq, route) {
   if (body.length) headers['content-length'] = body.length;
   return new Promise((resolve, reject) => {
     const mod = u.protocol === 'https:' ? https : http;
-    const req = mod.request(u, { method: clientReq.method, headers, agent: runtime.agent }, res => resolve(res));
+    const req = mod.request(u, {
+      method: clientReq.method,
+      headers,
+      agent: runtime.agent,
+      signal,
+    }, res => resolve(res));
     if (settings.timeoutMs) req.setTimeout(settings.timeoutMs, () => req.destroy(new Error(`upstream timeout after ${settings.timeoutMs}ms`)));
     req.on('error', reject);
     req.end(body);
@@ -1066,6 +1092,11 @@ async function relay(route, clientReq, clientRes, log) {
   const { pool, settings, provider } = runtime;
   const started = Date.now();
   runtime.retain();
+  const abortController = new AbortController();
+  const abortUpstream = () => {
+    if (!clientRes.writableEnded) abortController.abort();
+  };
+  clientRes.once('close', abortUpstream);
   let released = false;
   const releaseRuntime = () => {
     if (released) return;
@@ -1085,7 +1116,7 @@ async function relay(route, clientReq, clientRes, log) {
       attempted.push(k.name);
       k.inFlight++;
       try {
-        const r = await forwardOnce(runtime, k, clientReq, route);
+        const r = await forwardOnce(runtime, k, clientReq, route, abortController.signal);
         const status = r.statusCode;
         if (status < 400) {
           res = r;
@@ -1094,7 +1125,7 @@ async function relay(route, clientReq, clientRes, log) {
         }
         const ra = retryAfterSec(r);
         pool.recordResult(k, { status, retryAfterSec: ra });
-        const retryable = status === 429 || status === 401 || status === 402 || status === 403 || status >= 500;
+        const retryable = status === 429 || status === 401 || status === 402 || status >= 500;
         if (retryable && attempt < maxRetries) {
           r.resume();
           r.on('error', () => {});
@@ -1104,13 +1135,18 @@ async function relay(route, clientReq, clientRes, log) {
         key = k;
         break;
       } catch (err) {
-        pool.recordResult(k, { networkError: true });
+        const clientAbort = abortController.signal.aborted;
+        pool.recordResult(k, clientAbort ? { clientAbort: true } : { networkError: true });
         lastErr = err;
-        if (attempt >= maxRetries) break;
+        if (clientAbort || attempt >= maxRetries) break;
       }
     }
     const ms = Date.now() - started;
     if (!res) {
+      if (abortController.signal.aborted || clientRes.destroyed) {
+        releaseRuntime();
+        return;
+      }
       log(`502 ${clientReq.method} ${clientReq.url} provider=${provider.id} all-keys-failed ${ms}ms`);
       clientRes.writeHead(502, { 'content-type': 'application/json' });
       clientRes.end(JSON.stringify({ error: { message: lastErr ? lastErr.message : 'all upstream keys failed' } }));
@@ -1122,6 +1158,8 @@ async function relay(route, clientReq, clientRes, log) {
   } catch (error) {
     releaseRuntime();
     throw error;
+  } finally {
+    clientRes.off('close', abortUpstream);
   }
 }
 
@@ -1285,6 +1323,21 @@ async function relayAdaptedResponse(clientRes, upRes, key, pool, route, finish) 
   }
 }
 
+function createUsageTracker(pool) {
+  let usageBuffer = '';
+  return new Transform({
+    transform(chunk, enc, cb) {
+      usageBuffer = (usageBuffer + chunk.toString('utf8')).slice(-65536);
+      cb(null, chunk);
+    },
+    flush(cb) {
+      const matches = [...usageBuffer.matchAll(/"total_tokens"\s*:\s*(\d+)/g)];
+      if (matches.length) pool.recordTokens(matches.at(-1)[1]);
+      cb();
+    },
+  });
+}
+
 async function relayResponse(clientRes, upRes, key, pool, preRecorded, route, releaseRuntime) {
   let settled = false;
   const finish = result => {
@@ -1302,12 +1355,7 @@ async function relayResponse(clientRes, upRes, key, pool, preRecorded, route, re
   }
   const headers = responseHeaders(upRes, key, route);
   clientRes.writeHead(upRes.statusCode, headers);
-  const tracker = new Transform({
-    transform(chunk, enc, cb) {
-      if (pool) pool.trackTokens(chunk);
-      cb(null, chunk);
-    },
-  });
+  const tracker = createUsageTracker(pool);
   upRes.on('end', () => finish({ status: 200 }));
   upRes.on('error', () => {
     finish({ networkError: true });
@@ -1326,19 +1374,30 @@ async function relayResponse(clientRes, upRes, key, pool, preRecorded, route, re
   });
 }
 
-function mockResponse(key, body, responseAdapter = '') {
-  return new Promise(resolve => {
+function mockResponse(key, body, responseAdapter = '', signal) {
+  return new Promise((resolve, reject) => {
     let behavior = 'ok';
     const parts = String(key.key).split('-');
     const suffix = parts[parts.length - 1];
-    if (['429', '500', '401', '402', 'slow', 'drip', 'abort'].includes(suffix)) behavior = suffix;
+    if (['429', '500', '401', '402', '403', 'slow', 'drip', 'abort'].includes(suffix)) behavior = suffix;
     let bodyObj = {};
     try { bodyObj = JSON.parse(body.toString('utf8') || '{}'); } catch {}
     const model = bodyObj.model || 'deepseek-v4-flash';
     const stream = !!bodyObj.stream;
     const delay = behavior === 'slow' ? 400 : 30;
-    setTimeout(() => {
-      const statusMap = { 429: 429, 500: 500, 401: 401, 402: 402 };
+    let timer;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason || new Error('client aborted'));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      const statusMap = { 429: 429, 500: 500, 401: 401, 402: 402, 403: 403 };
       const status = statusMap[behavior] || 200;
       const headers = {};
       if (stream && status === 200) {
@@ -1511,6 +1570,7 @@ const SETTING_FIELDS = [
   'timeoutMs',
   'maxBodyBytes',
   'token',
+  'adminToken',
 ];
 const HOT_SETTING_FIELDS = SETTING_FIELDS.filter(field => !['port', 'host'].includes(field));
 
@@ -1525,6 +1585,7 @@ function publicScalarSettings(config) {
     timeoutMs: config.timeoutMs,
     maxBodyBytes: config.maxBodyBytes,
     tokenConfigured: Boolean(config.token),
+    adminTokenConfigured: Boolean(config.adminToken),
   };
 }
 
@@ -1546,7 +1607,7 @@ function nextSettingsConfig(cfg, payload) {
       { statusCode: 409 },
     );
   }
-  const allowed = new Set([...SETTING_FIELDS, 'clearToken']);
+  const allowed = new Set([...SETTING_FIELDS, 'clearToken', 'clearAdminToken']);
   const unknown = Object.keys(payload).filter(field => !allowed.has(field));
   if (unknown.length) throw new Error(`unknown settings: ${unknown.join(', ')}`);
   if (Object.hasOwn(payload, 'clearToken') && typeof payload.clearToken !== 'boolean') {
@@ -1554,6 +1615,9 @@ function nextSettingsConfig(cfg, payload) {
   }
   if (payload.clearToken && Object.hasOwn(payload, 'token')) {
     throw new Error('token and clearToken cannot be used together');
+  }
+  if (payload.clearAdminToken && Object.hasOwn(payload, 'adminToken')) {
+    throw new Error('adminToken and clearAdminToken cannot be used together');
   }
 
   const changes = {};
@@ -1564,15 +1628,16 @@ function nextSettingsConfig(cfg, payload) {
         throw new Error('host must be a non-empty string of at most 255 characters');
       }
       changes.host = payload.host.trim();
-    } else if (field === 'token') {
-      if (typeof payload.token !== 'string') throw new Error('token must be a string');
-      changes.token = payload.token;
+    } else if (field === 'token' || field === 'adminToken') {
+      if (typeof payload[field] !== 'string') throw new Error(`${field} must be a string`);
+      changes[field] = payload[field];
     } else {
       if (typeof payload[field] !== 'number') throw new Error(`${field} must be a number`);
       changes[field] = payload[field];
     }
   }
   if (payload.clearToken) changes.token = '';
+  if (payload.clearAdminToken) changes.adminToken = '';
   return normalizeConfig(
     { ...serializableConfig(cfg._persistedConfig), ...changes },
     { allowSetup: true },
@@ -1580,13 +1645,22 @@ function nextSettingsConfig(cfg, payload) {
 }
 
 function commitSettingsConfig(cfg, registry, next) {
-  persistConfig(cfg.configPath, next);
-  cfg._persistedConfig = normalizeConfig(serializableConfig(next), { allowSetup: true });
   const hotChanges = {};
+  const rollbackChanges = {};
   for (const field of HOT_SETTING_FIELDS) {
-    if (!cfg._scalarOverrides[field]) hotChanges[field] = next[field];
+    if (!cfg._scalarOverrides[field]) {
+      hotChanges[field] = next[field];
+      rollbackChanges[field] = cfg[field];
+    }
   }
   registry.updateSettings(hotChanges);
+  try {
+    persistConfig(cfg.configPath, next);
+  } catch (error) {
+    registry.updateSettings(rollbackChanges);
+    throw error;
+  }
+  cfg._persistedConfig = normalizeConfig(serializableConfig(next), { allowSetup: true });
 }
 
 function nextProviderConfig(cfg, providers, changes = {}) {
@@ -1619,11 +1693,28 @@ function sameOrigin(req) {
   if (!origin) return true;
   try {
     const parsed = new URL(origin);
-    const protocol = req.socket.encrypted ? 'https:' : 'http:';
+    const protocol = requestProtocol(req);
     return parsed.protocol === protocol && parsed.host === req.headers.host;
   } catch {
     return false;
   }
+}
+
+function requestProtocol(req) {
+  if (req.socket.encrypted) return 'https:';
+  const remoteAddress = String(req.socket.remoteAddress || '');
+  const fromLoopback = remoteAddress === '::1'
+    || remoteAddress === '127.0.0.1'
+    || remoteAddress.startsWith('::ffff:127.');
+  if (fromLoopback) {
+    const forwarded = String(req.headers['x-forwarded-proto'] || '')
+      .split(',', 1)[0]
+      .trim()
+      .toLowerCase();
+    if (forwarded === 'https') return 'https:';
+    if (forwarded === 'http') return 'http:';
+  }
+  return 'http:';
 }
 
 async function readJsonBody(req, maxBytes = 1024 * 1024) {
@@ -1638,9 +1729,15 @@ async function readJsonBody(req, maxBytes = 1024 * 1024) {
 }
 
 function commitProviderConfig(cfg, registry, next) {
-  persistConfig(cfg.configPath, next);
+  const previous = normalizeConfig(serializableConfig(cfg), { allowSetup: true });
+  try {
+    registry.apply(next);
+    persistConfig(cfg.configPath, next);
+  } catch (error) {
+    registry.apply(previous);
+    throw error;
+  }
   cfg._persistedConfig = normalizeConfig(serializableConfig(next), { allowSetup: true });
-  registry.apply(next);
 }
 
 function managementValidation(operation, statusCode = 400) {
@@ -1726,6 +1823,12 @@ function resolveModelFetchInput(cfg, registry, payload) {
   const keyName = String(payload.keyName || '').trim();
   let secret = typeof payload.key === 'string' ? payload.key.trim() : '';
   if (!secret && runtime) {
+    const configuredOrigin = new URL(runtime.provider.baseUrl).origin;
+    const requestedOrigins = [new URL(baseUrl).origin];
+    if (payload.modelsUrl) requestedOrigins.push(new URL(normalizeModelFetchUrl(payload.modelsUrl)).origin);
+    if (requestedOrigins.some(origin => origin !== configuredOrigin)) {
+      throw new Error('an explicit API key is required when fetching models from a different origin');
+    }
     const key = keyName
       ? runtime.pool.keys.find(item => item.name === keyName)
       : runtime.pool.keys.find(item => !item.invalid) || runtime.pool.keys[0];
@@ -1748,6 +1851,9 @@ function resolveBalanceTestInput(cfg, registry, payload) {
   const keyName = String(payload.keyName || runtime?.pool.keys[0]?.name || 'test').trim();
   let secret = typeof payload.key === 'string' ? payload.key.trim() : '';
   if (!secret && runtime) {
+    if (new URL(baseUrl).origin !== new URL(runtime.provider.baseUrl).origin) {
+      throw new Error('an explicit API key is required when testing balance on a different origin');
+    }
     const runtimeKey = runtime.pool.keys.find(item => item.name === keyName);
     if (!runtimeKey) throw Object.assign(new Error(`key ${keyName} not found`), { statusCode: 404 });
     secret = runtimeKey.key;
@@ -2100,9 +2206,9 @@ const LOGIN_HTML = `<!DOCTYPE html>
     <div class="brand-line"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>DEEPSEEK GATEWAY</span></div>
     <div class="eyebrow">Private console</div>
     <h1>登录控制台</h1>
-    <p class="sub">使用 gateway token 继续。</p>
-    <label class="field-label" for="gateway-token">Gateway token</label>
-    <input id="gateway-token" type="password" name="token" placeholder="输入 token" autofocus autocomplete="current-password" aria-describedby="err">
+    <p class="sub">使用独立的 admin token 继续。</p>
+    <label class="field-label" for="gateway-token">Admin token</label>
+    <input id="gateway-token" type="password" name="token" placeholder="输入 admin token" autofocus autocomplete="current-password" aria-describedby="err">
     <button type="submit">登录</button>
     <div class="err" id="err" aria-live="polite"></div>
   </form>
@@ -2149,12 +2255,12 @@ async function handleLogin(cfg, req, res) {
   } else {
     token = new URLSearchParams(body.toString('utf8')).get('token') || '';
   }
-  if (!cfg.token || !secureEqual(token, cfg.token)) {
+  if (!cfg.adminToken || !secureEqual(token, cfg.adminToken)) {
     res.writeHead(401, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'invalid token' } }));
     return;
   }
-  setSessionCookie(res, cfg.token);
+  setSessionCookie(res, cfg.adminToken, requestProtocol(req) === 'https:');
   res.writeHead(302, { location: '/' });
   res.end();
 }
@@ -2165,7 +2271,12 @@ async function handleRequest(cfg, registry, req, res, log, startedAt) {
   const parsedUrl = new URL(requestUrl, 'http://gateway.local');
   const url = parsedUrl.pathname;
   const bearerOk = cfg.token ? secureEqual(req.headers.authorization || '', `Bearer ${cfg.token}`) : true;
-  const sessionOk = cfg.token ? cookieValid(parseCookies(req)[COOKIE_NAME], cfg.token) : false;
+  const adminBearerOk = cfg.adminToken
+    ? secureEqual(req.headers.authorization || '', `Bearer ${cfg.adminToken}`)
+    : !cfg.token;
+  const sessionOk = cfg.adminToken
+    ? cookieValid(parseCookies(req)[COOKIE_NAME], cfg.adminToken)
+    : false;
   if (url === '/login') {
     if (req.method === 'POST') return handleLogin(cfg, req, res);
     sendUiDocument(res, LOGIN_HTML);
@@ -2182,8 +2293,13 @@ async function handleRequest(cfg, registry, req, res, log, startedAt) {
     res.end();
     return;
   }
-  const isBrowserPath = url === '/' || url === '/health' || url.startsWith('/api/');
-  if (cfg.token && !bearerOk && !(isBrowserPath && sessionOk)) {
+  const isManagementPath = url === '/' || url.startsWith('/api/');
+  const authorized = isManagementPath
+    ? adminBearerOk || sessionOk
+    : url === '/health'
+      ? bearerOk || adminBearerOk || sessionOk
+      : bearerOk;
+  if (!authorized) {
     if (url === '/' && req.method === 'GET') {
       sendUiDocument(res, dashboardHtml());
       return;
@@ -2214,10 +2330,14 @@ function makeLog(quiet) {
   return quiet ? () => {} : msg => console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
 }
 
-function shutdown(server, registry) {
+let shutdownStarted = false;
+async function shutdown(server, registry) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  server.close();
+  await registry.waitForIdle(2000);
   registry.close();
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 2000).unref();
+  process.exit(0);
 }
 
 function main() {

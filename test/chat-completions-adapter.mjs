@@ -90,14 +90,53 @@ test('Responses input images convert to Chat image URLs with data URL and detail
   ]);
 });
 
-test('Responses request conversion rejects stateful and hosted features explicitly', () => {
+test('Responses request conversion drops optional hosted web search for Chat Completions upstreams', () => {
+  const { payload, context } = responsesRequestToChatCompletions({
+    model: 'x',
+    input: 'x',
+    tools: [
+      { type: 'web_search' },
+      { type: 'web_search_preview_2025_03_11', search_context_size: 'high' },
+      { type: 'function', name: 'lookup', parameters: { type: 'object' } },
+    ],
+  });
+
+  assert.deepEqual(payload.tools, [{
+    type: 'function',
+    function: {
+      name: 'lookup',
+      description: '',
+      parameters: { type: 'object' },
+    },
+  }]);
+  assert.equal(context.byChatName.has('lookup'), true);
+
+  const webOnly = responsesRequestToChatCompletions({
+    model: 'x',
+    input: 'x',
+    tools: [{ type: 'web_search_preview' }],
+  });
+  assert.equal(webOnly.payload.tools, undefined);
+
+  assert.throws(
+    () => responsesRequestToChatCompletions({
+      model: 'x',
+      input: 'x',
+      tools: [{ type: 'web_search' }],
+      tool_choice: { type: 'web_search' },
+    }),
+    /tool_choice requires web_search/,
+  );
+});
+
+test('Responses request conversion rejects unsupported stateful and hosted features explicitly', () => {
   assert.throws(
     () => responsesRequestToChatCompletions({ model: 'x', previous_response_id: 'resp_old', input: 'x' }),
     /previous_response_id/,
   );
   assert.throws(
-    () => responsesRequestToChatCompletions({ model: 'x', input: 'x', tools: [{ type: 'web_search' }] }),
-    /web_search/,
+    () => responsesRequestToChatCompletions({ model: 'x', input: 'x', tools: [{ type: 'file_search' }] }),
+    /file_search/,
   );
   assert.throws(
     () => responsesRequestToChatCompletions({
@@ -151,6 +190,33 @@ test('non-stream Chat response converts text, reasoning, custom tools, and usage
   assert.equal(result.usage.total_tokens, 17);
 });
 
+test('truncated non-stream Chat responses keep output items incomplete', () => {
+  const { context } = responsesRequestToChatCompletions({
+    model: 'x',
+    input: 'run',
+    tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }],
+  });
+  const result = chatCompletionToResponses({
+    id: 'chatcmpl-truncated',
+    model: 'x',
+    choices: [{
+      finish_reason: 'length',
+      message: {
+        role: 'assistant',
+        content: 'partial',
+        tool_calls: [{
+          id: 'call_partial',
+          function: { name: 'lookup', arguments: '{"id":' },
+        }],
+      },
+    }],
+  }, context);
+
+  assert.equal(result.status, 'incomplete');
+  assert.deepEqual(result.output.map(item => item.status), ['incomplete', 'incomplete']);
+  assert.equal(result.output[1].arguments, '{"id":');
+});
+
 test('fragmented Chat SSE converts to a complete Responses event stream', async () => {
   const { context } = responsesRequestToChatCompletions({
     model: 'x',
@@ -179,6 +245,10 @@ test('fragmented Chat SSE converts to a complete Responses event stream', async 
   assert.ok(types.includes('response.reasoning_summary_text.delta'));
   assert.ok(types.includes('response.function_call_arguments.delta'));
   assert.ok(types.includes('response.function_call_arguments.done'));
+  const addedTool = events.find(event => (
+    event.type === 'response.output_item.added' && event.item.type === 'function_call'
+  ));
+  assert.equal(addedTool.item.arguments, '');
   assert.equal(types.filter(type => type === 'response.completed').length, 1);
   assert.equal(events.at(-1).response.usage.total_tokens, 12);
   assert.equal(events.at(-1).response.output.at(-1).arguments, '{"q":"docs"}');
@@ -190,8 +260,16 @@ test('clean EOF synthesizes terminal events and empty truncation fails', async (
     'data: {"id":"chatcmpl-eof","model":"x","choices":[{"delta":{"content":"partial"}}]}\n\n',
   ]);
   const substantiveEvents = parseEvents(substantive);
-  assert.equal(substantiveEvents.at(-1).type, 'response.completed');
+  assert.equal(substantiveEvents.at(-1).type, 'response.incomplete');
   assert.equal(substantiveEvents.at(-1).response.status, 'incomplete');
+
+  const doneWithoutFinish = await transformChunks([
+    'data: {"id":"chatcmpl-done","model":"x","choices":[{"delta":{"content":"partial"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ]);
+  const doneEvents = parseEvents(doneWithoutFinish);
+  assert.equal(doneEvents.at(-1).type, 'response.incomplete');
+  assert.equal(doneEvents.at(-1).response.output[0].status, 'incomplete');
 
   const empty = await transformChunks([
     'data: {"id":"chatcmpl-empty","model":"x","choices":[]}\n\n',

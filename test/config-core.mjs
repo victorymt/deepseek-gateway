@@ -7,6 +7,7 @@ import {
   normalizeConfig,
   normalizeInputModalities,
   normalizeModelIdentifier,
+  normalizeProvider,
   normalizeUpstreamFormat,
   serializableConfig,
 } from '../config-core.mjs';
@@ -43,6 +44,13 @@ test('legacy config normalizes and serializes as canonical v2', () => {
   assert.equal(stored.breakerThreshold, undefined);
 });
 
+test('future config schema versions fail closed', () => {
+  assert.throws(
+    () => normalizeConfig({ schemaVersion: 3, providers: [] }),
+    /unsupported config schemaVersion: 3/,
+  );
+});
+
 test('provider key alwaysTry defaults to false and persists when enabled', () => {
   const normalized = normalizeConfig({
     schemaVersion: 2,
@@ -63,6 +71,31 @@ test('provider key alwaysTry defaults to false and persists when enabled', () =>
   assert.equal(normalized.providers[0].keys[1].alwaysTry, false);
   assert.equal(storedKeys[0].alwaysTry, true);
   assert.equal(storedKeys[1].alwaysTry, undefined);
+});
+
+test('masked provider keys can be renamed without resending the secret', () => {
+  const existing = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      models: [{ id: 'chat', upstreamModel: 'chat' }],
+      keys: [{ name: 'primary', key: 'sk-primary' }],
+    }],
+  }).providers[0];
+  const renamed = normalizeProvider({
+    ...existing,
+    keys: [{
+      name: 'renamed',
+      originalName: existing.keys[0].name,
+      key: '',
+      weight: 1,
+    }],
+  }, existing);
+  assert.equal(renamed.keys[0].name, 'renamed');
+  assert.equal(renamed.keys[0].key, existing.keys[0].key);
 });
 
 test('provider upstream format defaults to Responses and accepts Chat Completions', () => {
@@ -113,6 +146,82 @@ test('model input modalities default to text and normalize image capability', ()
     serializableConfig(normalized).providers[0].models[0].inputModalities,
     ['text', 'image'],
   );
+});
+
+test('hosted web search is explicit, persisted, and limited to Responses providers', () => {
+  const baseProvider = {
+    id: 'alpha',
+    baseUrl: 'https://alpha.example/v1',
+    models: [{ id: 'chat', upstreamModel: 'chat' }],
+    keys: [{ name: 'one', key: 'sk-one' }],
+  };
+  const defaults = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [baseProvider],
+  });
+  assert.equal(
+    defaults.providers[0].models[0].supportsHostedWebSearch,
+    false,
+  );
+  assert.equal(
+    serializableConfig(defaults)
+      .providers[0]
+      .models[0]
+      .supportsHostedWebSearch,
+    undefined,
+  );
+
+  const enabled = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      ...baseProvider,
+      models: [{
+        id: 'chat',
+        upstreamModel: 'chat',
+        supportsHostedWebSearch: true,
+      }],
+    }],
+  });
+  assert.equal(
+    serializableConfig(enabled)
+      .providers[0]
+      .models[0]
+      .supportsHostedWebSearch,
+    true,
+  );
+
+  assert.throws(() => normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      ...baseProvider,
+      upstreamFormat: 'chat-completions',
+      models: [{
+        id: 'chat',
+        upstreamModel: 'chat',
+        supportsHostedWebSearch: true,
+      }],
+    }],
+  }), /requires responses upstreamFormat/);
+
+  assert.throws(() => normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      ...baseProvider,
+      models: [{
+        id: 'chat',
+        upstreamModel: 'chat',
+        supportsHostedWebSearch: 'true',
+      }],
+    }],
+  }), /must be a boolean/);
 });
 
 test('model identifiers preserve common upstream punctuation without weakening provider ids', () => {
@@ -250,4 +359,31 @@ test('setup config requires authentication on non-loopback hosts', () => {
       providers: [],
     }, { allowSetup: true }), /requires a gateway token/);
   }
+});
+
+test('completed config requires authentication on non-loopback hosts', () => {
+  const config = {
+    host: '0.0.0.0',
+    token: '',
+    upstream: 'https://api.deepseek.com',
+    keys: [{ name: 'primary', key: 'sk-primary' }],
+  };
+  assert.throws(() => normalizeConfig(config), /non-loopback host requires/);
+
+  config.token = 'long-enough-token';
+  config.adminToken = 'different-admin-token';
+  assert.equal(normalizeConfig(config).host, '0.0.0.0');
+});
+
+test('gateway and management authentication require distinct tokens', () => {
+  const config = {
+    token: 'gateway-token-1234',
+    upstream: 'https://api.deepseek.com',
+    keys: [{ name: 'primary', key: 'sk-primary' }],
+  };
+  assert.throws(() => normalizeConfig(config), /separate adminToken/);
+  config.adminToken = config.token;
+  assert.throws(() => normalizeConfig(config), /must be different/);
+  config.adminToken = 'admin-token-567890';
+  assert.equal(normalizeConfig(config).adminToken, config.adminToken);
 });

@@ -84,6 +84,7 @@ export type ProviderModel = {
   name: string
   upstreamModel: string
   inputModalities: Array<"text" | "image">
+  supportsHostedWebSearch: boolean
   alias: string
 }
 
@@ -136,11 +137,12 @@ export type GatewaySettingValues = {
   timeoutMs: number
   maxBodyBytes: number
   tokenConfigured: boolean
+  adminTokenConfigured: boolean
 }
 
 export type GatewaySettingField = Exclude<
   keyof GatewaySettingValues,
-  "tokenConfigured"
+  "tokenConfigured" | "adminTokenConfigured"
 >
 
 export type GatewaySettings = {

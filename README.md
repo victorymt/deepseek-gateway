@@ -204,7 +204,8 @@ cp keys.example.json keys.json
           "id": "v4-flash",
           "name": "V4 Flash",
           "upstreamModel": "deepseek-v4-flash",
-          "inputModalities": ["text"]
+          "inputModalities": ["text"],
+          "supportsHostedWebSearch": false
         }
       ],
       "keys": [
@@ -284,6 +285,8 @@ DEEPSEEK_KEYS="main=sk-xxx,backup=sk-yyy" node gateway.mjs
 
 模型的输入能力通过 `providers[].models[].inputModalities` 按模型配置，支持 `text` 和 `image`，且必须包含 `text`。默认值为 `["text"]`；DeepSeek 默认模型保持文本-only。只有显式配置为 `["text", "image"]` 的模型才会接受图片输入，网关会对文本-only 模型返回 400。
 
+Responses Provider 的模型可以通过 `supportsHostedWebSearch: true` 显式向 Codex 暴露 Responses `web_search` 托管工具。该能力默认关闭；`chat-completions` Provider 不允许启用。切换 Provider 协议为 Chat Completions 时，Web UI 会自动清除模型上的 Hosted Web Search 能力。修改后需要重新运行 `./gatewayctl codex` 并重启 Codex，使新的模型目录生效。
+
 Provider ID 保持小写字母、数字和单连字符格式。模型 ID 另行支持模型服务常见的 `.`, `_`, `/`, `:` 和 `+` 字符，但保留 `--` 作为 Provider 与模型的内部 canonical alias 分隔符。Codex catalog 使用首字母大写的 `${providerId}.${modelId}` 作为模型 ID 和展示名称，例如内部别名 `openrouter--gpt-4.1` 在 Codex 中显示为 `Openrouter.gpt-4.1`。网关对旧的双连字符 alias 保持兼容。
 
 脚本会备份并合并：
@@ -308,6 +311,8 @@ export DEEPSEEK_GATEWAY_TOKEN="你的网关密码"
 ```
 
 Gateway 服务端读取的是 `keys.json` 中的 `token`、`DS_GATEWAY_TOKEN` 或启动参数 `--token`；`DEEPSEEK_GATEWAY_TOKEN` 只供 Codex 读取，不会启用 Gateway 服务端认证。Web UI 的“Codex 配置”页会根据当前进程的实际认证状态生成正确配置。
+
+`token` 仅用于推理代理。启用它时还必须配置一个不同的、至少 16 个字符的 `adminToken`（或 `DS_GATEWAY_ADMIN_TOKEN`），用于控制台登录和 `/api/*` 管理接口。旧配置如果只有 `token`，升级后会拒绝启动；先生成独立管理令牌并写入 `adminToken`，不要把管理令牌交给 Codex 或其他推理客户端。
 
 离线运行 `gatewayctl codex` 时，`--auth auto`（默认）根据配置文件中的 `token` 判断。若 Gateway 仅通过 `DS_GATEWAY_TOKEN` 或 `--token` 启动，需要显式指定认证模式：
 
@@ -359,6 +364,8 @@ Provider 的 `upstreamFormat` 支持两个值：
 
 转换支持文本、输入图片、function/custom/namespace 工具、工具结果、reasoning、结构化输出、流式 usage 和缺失 `[DONE]` 时的终止事件补全。`previous_response_id`、`item_reference`、后台响应、托管 `web_search`/`file_search`/computer 工具以及 `input_file` 无法无损映射，网关会返回明确的 `400`，不会静默丢弃字段。
 
+生成 Codex 模型目录时，Chat Completions 模型不会包含 `web_search_tool_type`。Responses 模型也默认不包含该字段，只有配置 `supportsHostedWebSearch: true` 时才会按模型模板显式恢复。
+
 Codex 配置仍固定使用 `wire_api = "responses"`。上游协议只在 Provider 中选择，不需要改动 Codex 配置。
 
 ## 调度策略
@@ -374,7 +381,8 @@ Codex 配置仍固定使用 `wire_api = "responses"`。上游协议只在 Provid
 | 正常响应 | 记录成功并清除冷却状态，不清零累计失败数 |
 | `429` | 优先使用 `Retry-After`，否则按 `cooldownMs` 冷却，并切换 Key 重试 |
 | `5xx` / 网络错误 | 增加累计失败数；达到 `blacklistThreshold` 后标记为 `invalid`；`alwaysTry` Key 只记录异常，仍保留在调度池 |
-| `401` / `402` / `403` | 立即标记为 `invalid`，永久移出当前进程的调度池；`alwaysTry` Key 只记录异常，后续请求仍会尝试 |
+| `401` / `402` | 立即标记为 `invalid`，永久移出当前进程的调度池；`alwaysTry` Key 只记录异常，后续请求仍会尝试 |
+| `403` | 作为当前请求的权限错误直接返回；不切换 Key，也不污染 Key 健康状态 |
 | 全部 Key 冷却或失效 | 返回 `502 no keys available`，不再强行调度不可用 Key |
 
 正常情况下，调度器先排除停用、冷却和失效 Key，再选择 `inFlight / weight` 最小的 Key，平分时使用轮询游标。`inFlight` 会保持到响应体完整结束，因此长时间 SSE 请求也参与并发均衡。每个 Provider 至少需要保留一个 `enabled: true` 的 Key。
@@ -396,7 +404,7 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 
 环境变量和命令行参数只影响本次运行，不会通过管理 API 回写到 `keys.json`。当 `--keys`、`DEEPSEEK_KEYS`、`--upstream` 或 `DS_UPSTREAM` 覆盖 Provider 配置时，Provider 管理写操作会返回 `409`；移除覆盖并重启后即可恢复写入。这可以避免运行时传入的 Key 被意外持久化。
 
-“Gateway 设置”会显示持久化值、当前生效值和覆盖来源，认证状态以当前生效值为准。`cooldownMs`、`blacklistThreshold`、`balanceRefreshMs`、`maxRetries`、`timeoutMs`、`maxBodyBytes` 和 `token` 在没有运行时覆盖时热生效；`host` 和 `port` 保存后需要重启。被命令行或环境变量接管的字段在面板中为只读，覆盖值不会写入配置文件。通过面板设置新 Token 后，当前浏览器会自动获得新会话 Cookie；清除 Token 时会同步清除 Cookie。
+“Gateway 设置”会显示持久化值、当前生效值和覆盖来源，认证状态以当前生效值为准。`cooldownMs`、`blacklistThreshold`、`balanceRefreshMs`、`maxRetries`、`timeoutMs`、`maxBodyBytes`、`token` 和 `adminToken` 在没有运行时覆盖时热生效；`host` 和 `port` 保存后需要重启。被命令行或环境变量接管的字段在面板中为只读，覆盖值不会写入配置文件。管理令牌变更后当前浏览器会自动获得新会话 Cookie。
 
 | JSON 字段 | 命令行 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -407,6 +415,7 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 | `providers[].upstreamFormat` | - | - | `responses` | 上游协议，可选 `responses` 或 `chat-completions` |
 | `providers[].models[].id` | - | - | - | Codex 路由模型 ID，支持 `.`, `_`, `/`, `:`、`+` 和单连字符；不能包含保留分隔符 `--` |
 | `providers[].models[].inputModalities` | - | - | `["text"]` | 模型输入能力，可选 `text`、`image`；必须包含 `text`。图片仅对显式启用 `image` 的模型放行 |
+| `providers[].models[].supportsHostedWebSearch` | - | - | `false` | 是否向 Codex 暴露 Responses Hosted Web Search；仅允许用于 `responses` Provider |
 | `providers[].keys[].alwaysTry` | - | - | `false` | 鉴权或上游失败后仍允许新的请求继续调度该 Key；仍尊重 429 冷却和手动停用 |
 | `defaultProvider` | - | - | 第一个启用项 | 未带别名前缀时使用的 Provider |
 | `defaultModel` | - | - | 默认 Provider 首个模型 | Codex 启动模型别名 |
@@ -418,7 +427,8 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 | `maxRetries` | `--max-retries` | `DS_MAX_RETRIES` | `2` | 每次请求最多切换次数 |
 | `timeoutMs` | - | - | `0` | 上游超时；0 表示不限 |
 | `maxBodyBytes` | `--max-body-bytes` | `DS_MAX_BODY_BYTES` | `67108864` | 请求体大小上限；超限返回 413 |
-| `token` | `--token` | `DS_GATEWAY_TOKEN` | 空 | 网关访问密码 |
+| `token` | `--token` | `DS_GATEWAY_TOKEN` | 空 | 推理代理 Bearer token；启用后要求独立管理令牌 |
+| `adminToken` | - | `DS_GATEWAY_ADMIN_TOKEN` | 空 | 控制台和管理 API 令牌；必须与 `token` 不同且至少 16 个字符 |
 
 旧配置中的 `breakerThreshold`、命令行参数 `--breaker` 和环境变量 `DS_BREAKER` 仍可使用，并按相同优先级映射到累计失败黑名单阈值。
 
@@ -446,13 +456,13 @@ node gateway.mjs --config /path/to/keys.json
 - `POST /api/balance/test`：测试尚未保存的 `balanceQuery` 草稿；不会修改 Provider 配置。
 - `POST /api/providers/:id/test`：测试 Provider 连接。
 - `GET /api/codex/config`：生成统一 Codex Provider 和模型目录。
-- `GET /login`：输入网关 `token`，签发 24 小时 HttpOnly、SameSite Cookie。
+- `GET /login`：输入 `adminToken`，签发 24 小时 HttpOnly、SameSite Cookie；可信本机 HTTPS 反向代理下同时设置 `Secure`。
 - `GET /logout`：清除面板会话。
 
-启用 `token` 后：
+启用认证后：
 
 - 代理 API 必须使用 `Authorization: Bearer <token>`。
-- 浏览器通过 `/login` 登录后可以访问面板、`/health` 和管理 API；写操作同时校验同源。
+- 浏览器使用独立 `adminToken` 通过 `/login` 登录后可以访问面板、`/health` 和管理 API；写操作同时校验同源。
 - 面板 Cookie 不能调用代理 API。
 - 页面和健康接口不会返回 API Key 内容。
 
@@ -464,13 +474,14 @@ node gateway.mjs --config /path/to/keys.json
 
 ```bash
 npm ci
-node --test test/balance-script.mjs test/config-core.mjs test/gatewayctl.mjs test/key-import.mjs test/smoke.mjs
+node --test test/balance-script.mjs test/chat-completions-adapter.mjs test/codex-config.mjs test/config-core.mjs test/gatewayctl.mjs test/key-import.mjs test/smoke.mjs
 python3 -m unittest test/configure_test.py
+npm test --prefix ui
 npm run lint --prefix ui
 npm run build --prefix ui
 ```
 
-测试使用内置 mock 上游，不消耗真实 API Key。Key 后缀可触发不同 mock 行为：
+测试使用内置 mock 上游，不消耗真实 API Key。UI 单元测试覆盖 Provider 草稿转换、脱敏提交载荷、模型去重、Hosted Web Search 协议切换和额度格式化。Key 后缀可触发不同 mock 行为：
 
 | 后缀 | 行为 |
 | --- | --- |

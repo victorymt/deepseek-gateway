@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
+import http from 'node:http';
 
 import {
   effectiveBalanceQuery,
@@ -86,6 +87,36 @@ test('balance script interrupts infinite extraction and rejects malformed output
   }, {}), /timed out|interrupted/);
   assert.throws(() => normalizeQuotaResult({ remaining: '7', unit: 'USD' }), /remaining/);
   assert.throws(() => normalizeQuotaResult([]), /empty array/);
+});
+
+test('balance HTTP timeout is a total deadline even while bytes keep arriving', async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    const timer = setInterval(() => res.write(' '), 10);
+    res.on('close', () => clearInterval(timer));
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const port = server.address().port;
+  try {
+    await assert.rejects(() => executeBalanceQuery({
+      query: {
+        enabled: true,
+        language: 'javascript',
+        timeoutMs: 80,
+        code: `({
+          request: { url: "{{baseUrl}}/quota", method: "GET" },
+          extractor: function(response) { return response; }
+        })`,
+      },
+      provider: { id: 'local', baseUrl: `http://127.0.0.1:${port}` },
+      key,
+    }), /timed out after 80ms/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
 });
 
 test('DeepSeek keeps an implicit built-in query and explicit disable wins', () => {

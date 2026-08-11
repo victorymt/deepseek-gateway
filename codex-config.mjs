@@ -5,7 +5,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { codexModelAlias, normalizeConfig } from './config-core.mjs';
+import {
+  canExposeHostedWebSearch,
+  codexModelAlias,
+  normalizeConfig,
+} from './config-core.mjs';
 
 export { codexModelAlias, providerModelAlias } from './config-core.mjs';
 
@@ -15,6 +19,21 @@ const AUTH_MODES = new Set(['auto', 'required', 'none']);
 
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_PATH = path.join(PROJECT_DIR, 'codex-models.json');
+const NEUTRAL_MODEL_TEMPLATE = {
+  prefer_websockets: false,
+  support_verbosity: false,
+  input_modalities: ['text'],
+  supports_image_detail_original: false,
+  truncation_policy: { mode: 'tokens', limit: 8192 },
+  supports_parallel_tool_calls: false,
+  context_window: 32768,
+  max_context_window: 32768,
+  effective_context_window_percent: 90,
+  supported_reasoning_levels: [],
+  experimental_supported_tools: [],
+  supports_reasoning_summaries: false,
+  supports_search_tool: false,
+};
 
 function tomlString(value) {
   return JSON.stringify(String(value));
@@ -67,7 +86,6 @@ export function buildModelCatalog(config) {
   config = normalizeCatalogConfig(config);
   const templates = loadTemplates();
   const bySlug = new Map(templates.map(model => [model.slug, model]));
-  const fallback = templates[0];
   const models = [];
   const aliases = new Set();
   let priority = 1;
@@ -78,9 +96,14 @@ export function buildModelCatalog(config) {
       const alias = codexModelAlias(provider.id, model.id);
       if (aliases.has(alias)) throw new Error(`duplicate model alias: ${alias}`);
       aliases.add(alias);
-      const template = bySlug.get(model.upstreamModel) || fallback;
+      const template = bySlug.get(model.upstreamModel) || NEUTRAL_MODEL_TEMPLATE;
+      const catalogModel = structuredClone(template);
+      delete catalogModel.web_search_tool_type;
+      if (canExposeHostedWebSearch(provider, model)) {
+        catalogModel.web_search_tool_type = template.web_search_tool_type || 'text';
+      }
       models.push({
-        ...structuredClone(template),
+        ...catalogModel,
         slug: alias,
         display_name: alias,
         description: `${model.upstreamModel} through ${provider.name}`,

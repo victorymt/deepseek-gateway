@@ -423,6 +423,7 @@ def new_setup_config() -> dict:
         "timeoutMs": DEFAULTS["timeoutMs"],
         "maxBodyBytes": DEFAULTS["maxBodyBytes"],
         "token": "",
+        "adminToken": "",
         "defaultProvider": "",
         "defaultModel": "",
         "providers": [],
@@ -487,6 +488,12 @@ def configure(
             config["token"] = secrets.token_urlsafe(32)
             generated = True
             print("外部地址上的 Gateway 引导必须启用访问密码，已自动生成。")
+    admin_generated = False
+    if config["token"] and not str(current.get("adminToken") or ""):
+        config["adminToken"] = secrets.token_urlsafe(32)
+        admin_generated = True
+    else:
+        config["adminToken"] = str(current.get("adminToken") or "")
     config = (
         normalize_setup_config(config)
         if config.get("setupPending") is True
@@ -508,6 +515,9 @@ def configure(
     if generated:
         print(f"自动生成的网关密码：{config['token']}")
         print("请妥善保存；也可以稍后重新运行本脚本修改。")
+    if admin_generated:
+        print(f"自动生成的管理密码：{config['adminToken']}")
+        print("管理密码仅用于控制台与 /api；不要提供给推理客户端。")
     print(f"面板地址：{local_gateway_url(config['host'], config['port'])}/")
     return config
 

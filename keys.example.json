@@ -9,6 +9,7 @@
   "timeoutMs": 0,
   "maxBodyBytes": 67108864,
   "token": "",
+  "adminToken": "",
   "defaultProvider": "deepseek",
   "defaultModel": "deepseek--v4-flash",
   "providers": [
@@ -26,8 +27,8 @@
         "refreshMs": 300000
       },
       "models": [
-        { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash", "inputModalities": ["text"] },
-        { "id": "v4-pro", "name": "V4 Pro", "upstreamModel": "deepseek-v4-pro", "inputModalities": ["text"] }
+        { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash", "inputModalities": ["text"], "supportsHostedWebSearch": false },
+        { "id": "v4-pro", "name": "V4 Pro", "upstreamModel": "deepseek-v4-pro", "inputModalities": ["text"], "supportsHostedWebSearch": false }
       ],
       "keys": [
         { "name": "primary", "key": "sk-REPLACE-WITH-YOUR-KEY-1", "weight": 1, "enabled": true, "alwaysTry": true },

@@ -70,6 +70,12 @@ function localHost(host) {
   return ['0.0.0.0', '::', '[::]'].includes(host) ? '127.0.0.1' : host;
 }
 
+function gatewayUrl(config) {
+  const host = localHost(config.host);
+  const urlHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  return `http://${urlHost}:${config.port}`;
+}
+
 function probeGateway(config) {
   if (config.port === 0) return Promise.resolve({ status: 'unknown', message: '动态端口无法探测' });
   return new Promise(resolve => {
@@ -80,10 +86,26 @@ function probeGateway(config) {
       method: 'GET',
       headers: config.token ? { authorization: `Bearer ${config.token}` } : {},
     }, response => {
-      response.resume();
+      const chunks = [];
+      let size = 0;
+      response.on('data', chunk => {
+        size += chunk.length;
+        if (size <= 65536) chunks.push(chunk);
+      });
       response.on('end', () => {
-        if (response.statusCode === 200) resolve({ status: 'ok', message: `网关运行中 (${config.host}:${config.port})` });
-        else resolve({ status: 'warning', message: `端口返回 HTTP ${response.statusCode}` });
+        if (response.statusCode !== 200) {
+          resolve({ status: 'warning', message: `端口返回 HTTP ${response.statusCode}` });
+          return;
+        }
+        try {
+          const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          if (size > 65536 || !payload || payload.status !== 'ok' || !Array.isArray(payload.providers)) {
+            throw new Error('unexpected health payload');
+          }
+          resolve({ status: 'ok', message: `网关运行中 (${config.host}:${config.port})` });
+        } catch {
+          resolve({ status: 'warning', message: '端口返回了非 Gateway health 响应' });
+        }
       });
     });
     request.setTimeout(700, () => request.destroy(new Error('timeout')));
@@ -116,10 +138,15 @@ export function commandInvocation(command, args, env = process.env) {
     }
     case 'codex': {
       const configPath = configOption(args, env);
+      const config = readConfig(configPath);
       return {
         executable: path.join(ROOT, 'setup-codex.sh'),
         args: removeConfigOption(args),
-        env: { ...env, GATEWAY_CONFIG: configPath },
+        env: {
+          ...env,
+          GATEWAY_CONFIG: configPath,
+          GATEWAY_URL: env.GATEWAY_URL || gatewayUrl(config),
+        },
       };
     }
     default:

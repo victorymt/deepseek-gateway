@@ -8,7 +8,7 @@
 - Chat Completions Provider 禁止启用该能力。
 - Codex catalog 默认删除 `web_search_tool_type`，仅为显式启用能力的 Responses 模型恢复。
 - Web UI 切换到 Chat Completions 时自动清除该能力。
-- 适配器继续对直接发送到 Chat Completions Provider 的 `web_search` 返回明确的 `400`。
+- 适配器按 cc-switch ProxyChat 的方式过滤发送到 Chat Completions Provider 的 `web_search`，并清理失去工具后的选择字段。
 
 ## 问题现象
 
@@ -41,7 +41,7 @@
 
 `web_search` 是 Responses API 的托管工具。Chat Completions 通常只支持函数工具，不能把 Responses 的托管搜索工具直接转换成 Chat Completions 工具。
 
-当前网关拒绝该请求是有意的安全行为：它返回明确的 `400`，而不是静默丢弃搜索工具后继续请求。
+Chat Completions 没有可通用映射的 hosted web search。本地 ProxyChat 中转按 cc-switch 的兼容策略过滤该声明，让模型继续处理请求；这不会在网关内执行网页搜索。需要真实 hosted web search 时必须选择显式支持该能力的 Responses 模型。
 
 ## 请求链路
 
@@ -51,15 +51,16 @@ Codex /v1/responses
   -> Provider.upstreamFormat === "chat-completions"
   -> responsesRequestToChatCompletions()
   -> createToolContext()
-  -> 拒绝未知托管工具
-  -> 400 Responses tool type web_search is not supported...
+  -> 过滤 hosted web_search
+  -> 无其他工具时删除 tool_choice / parallel_tool_calls
+  -> 转发 Chat Completions 上游
 ```
 
 关键代码位置：
 
 - [gateway.mjs](../gateway.mjs#L1014)：对 `chat-completions` Provider 启用 Responses 到 Chat Completions 的转换。
 - [chat-completions-adapter.mjs](../chat-completions-adapter.mjs#L59)：解析 Responses 工具。
-- [chat-completions-adapter.mjs](../chat-completions-adapter.mjs#L127)：对 `web_search` 等无法转换的工具抛出 `400`。
+- [chat-completions-adapter.mjs](../chat-completions-adapter.mjs#L64)：构造可转换工具上下文并过滤 hosted web search。
 - [codex-config.mjs](../codex-config.mjs#L82)：从 catalog 模板复制模型能力字段。
 - [codex-models.json](../codex-models.json#L9)：模板包含 `web_search_tool_type: "text"`。
 
@@ -74,7 +75,7 @@ Codex /v1/responses
 - `namespace`
 - `tool_search`
 
-对于其他类型会执行：
+对于 `web_search`、`web_search_preview` 和 `web_search_preview_2025_03_11` 会直接跳过；其他未知类型仍执行：
 
 ```js
 throw adapterError(
@@ -82,9 +83,9 @@ throw adapterError(
 );
 ```
 
-因此 `web_search` 会在请求转发前被网关拒绝，不会到达上游。
+因此 `web_search` 声明不会到达 Chat Completions 上游，也不会再导致 400；其他 function/custom 工具仍正常转换。
 
-### 2. Codex catalog 仍可能宣传 `web_search`
+### 2. 只修改 Codex catalog 不能阻止 `web_search`
 
 catalog 模型基于 `codex-models.json` 模板复制。模板中存在：
 
@@ -92,7 +93,7 @@ catalog 模型基于 `codex-models.json` 模板复制。模板中存在：
 "web_search_tool_type": "text"
 ```
 
-如果没有按 Provider/model 能力过滤，Codex 在启用 Web Search 时可能认为该模型支持托管网页搜索，并为 Responses 请求构造 `web_search`。`web_search_tool_type` 的完整内部语义并未在公开配置文档中展开，因此这里以当前 Codex 实现和实际请求行为为依据。
+按 Provider/model 能力过滤该字段仍有必要，避免目录主动宣传不兼容能力；但这不是请求时的可靠开关。当前 Codex 即使读到不含 `web_search_tool_type` 的目录项，也可能从自身默认配置恢复 Web Search，并为 Responses 请求构造 `web_search`。因此修复必须落在本地 ProxyChat 转换器，不能只依赖 catalog。
 
 ### 3. `supports_search_tool` 不是 `web_search`
 
@@ -106,7 +107,7 @@ catalog 模型基于 `codex-models.json` 模板复制。模板中存在：
 
 ## 推荐修复方案
 
-采用“显式模型能力声明 + catalog 过滤”的方案。
+采用“请求时 ProxyChat 过滤 + 显式模型能力声明 + catalog 过滤”的方案。请求时过滤是保证 Chat Completions 上游兼容的必要措施，catalog 过滤只负责准确描述能力。
 
 ### 1. 为模型增加 Hosted Web Search 能力字段
 
@@ -154,11 +155,11 @@ if (provider.upstreamFormat === 'responses' && model.supportsHostedWebSearch) {
 }
 ```
 
-这样 Chat Completions 模型不会向 Codex 宣传不可用的 Hosted Web Search，Codex 也不会因为该能力自动发送 `web_search`。
+这样 Chat Completions 模型不会向 Codex 主动宣传不可用的 Hosted Web Search。不过 Codex 仍可能根据运行时默认配置发送 `web_search`，所以还必须执行下一节的本地过滤。
 
-### 3. 保留适配器的拒绝逻辑
+### 3. 使用 ProxyChat 本地过滤
 
-不要在 `responsesRequestToChatCompletions()` 中静默删除 `web_search`。直接 API 客户端仍可能手工发送该工具；此时返回 `400` 能避免调用方误以为搜索已执行。
+`responsesRequestToChatCompletions()` 按 cc-switch 的工具上下文构建逻辑忽略 hosted web search。若过滤后没有其他工具，同时删除 `tool_choice` 和 `parallel_tool_calls`，避免严格 Chat Completions 上游拒绝无工具的选择字段。
 
 如果某个 Chat Completions 厂商提供专用搜索参数，应单独实现 Provider-specific 转换，不能把 Responses 的 `web_search` 通用伪装成普通函数工具。
 
@@ -179,7 +180,7 @@ if (provider.upstreamFormat === 'responses' && model.supportsHostedWebSearch) {
 1. 缺少 `supportsHostedWebSearch` 时归一化为 `false`。
 2. Chat Completions 模型的 catalog 不包含 `web_search_tool_type`。
 3. Responses 模型显式启用 `supportsHostedWebSearch` 时保留 `web_search_tool_type`。
-4. 直接向 Chat Completions Provider 发送 `web_search` 仍返回 `400`。
+4. 直接向 Chat Completions Provider 发送 `web_search` 时正常转发，且上游请求不含 hosted tool。
 5. 普通 `function`、`custom`、图片输入和工具调用不受影响。
 6. 重新生成 Codex 配置后，生成的 `gateway-models.json` 与 `config.toml` 保持一致。
 

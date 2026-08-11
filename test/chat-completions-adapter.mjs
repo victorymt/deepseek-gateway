@@ -90,15 +90,11 @@ test('Responses input images convert to Chat image URLs with data URL and detail
   ]);
 });
 
-test('Responses request conversion drops optional hosted web search for Chat Completions upstreams', () => {
+test('Responses request conversion filters hosted web search for Chat Completions upstreams', () => {
   const { payload, context } = responsesRequestToChatCompletions({
     model: 'x',
     input: 'x',
-    tools: [
-      { type: 'web_search' },
-      { type: 'web_search_preview_2025_03_11', search_context_size: 'high' },
-      { type: 'function', name: 'lookup', parameters: { type: 'object' } },
-    ],
+    tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }],
   });
 
   assert.deepEqual(payload.tools, [{
@@ -111,22 +107,31 @@ test('Responses request conversion drops optional hosted web search for Chat Com
   }]);
   assert.equal(context.byChatName.has('lookup'), true);
 
-  const webOnly = responsesRequestToChatCompletions({
-    model: 'x',
-    input: 'x',
-    tools: [{ type: 'web_search_preview' }],
-  });
-  assert.equal(webOnly.payload.tools, undefined);
-
-  assert.throws(
-    () => responsesRequestToChatCompletions({
+  for (const type of ['web_search', 'web_search_preview', 'web_search_preview_2025_03_11']) {
+    const filtered = responsesRequestToChatCompletions({
       model: 'x',
       input: 'x',
-      tools: [{ type: 'web_search' }],
-      tool_choice: { type: 'web_search' },
-    }),
-    /tool_choice requires web_search/,
-  );
+      tools: [{ type }],
+      tool_choice: { type },
+      parallel_tool_calls: true,
+    });
+    assert.equal(filtered.payload.tools, undefined);
+    assert.equal(filtered.payload.tool_choice, undefined);
+    assert.equal(filtered.payload.parallel_tool_calls, undefined);
+    assert.equal(filtered.context.chatTools.length, 0);
+  }
+
+  const mixed = responsesRequestToChatCompletions({
+    model: 'x',
+    input: 'x',
+    tools: [
+      { type: 'web_search' },
+      { type: 'function', name: 'lookup', parameters: { type: 'object' } },
+    ],
+    tool_choice: { type: 'web_search' },
+  });
+  assert.deepEqual(mixed.payload.tools.map(tool => tool.function.name), ['lookup']);
+  assert.equal(mixed.payload.tool_choice, undefined);
 });
 
 test('Responses request conversion rejects unsupported stateful and hosted features explicitly', () => {
@@ -217,6 +222,33 @@ test('truncated non-stream Chat responses keep output items incomplete', () => {
   assert.equal(result.output[1].arguments, '{"id":');
 });
 
+test('non-stream Chat responses without finish_reason do not report completion', () => {
+  const partial = chatCompletionToResponses({
+    id: 'chatcmpl-missing-finish',
+    model: 'x',
+    choices: [{ message: { role: 'assistant', content: 'partial' } }],
+  });
+  assert.equal(partial.status, 'incomplete');
+  assert.equal(partial.incomplete_details.reason, 'max_output_tokens');
+  assert.equal(partial.output[0].status, 'incomplete');
+
+  const streamed = parseEvents(chatCompletionToResponsesSse({
+    id: 'chatcmpl-missing-finish-sse',
+    model: 'x',
+    choices: [{ finish_reason: null, message: { role: 'assistant', content: 'partial' } }],
+  }).body);
+  assert.equal(streamed.at(-1).type, 'response.incomplete');
+  assert.equal(streamed.at(-1).response.output[0].status, 'incomplete');
+
+  const empty = chatCompletionToResponses({
+    id: 'chatcmpl-empty-missing-finish',
+    model: 'x',
+    choices: [{ finish_reason: null, message: { role: 'assistant', content: '' } }],
+  });
+  assert.equal(empty.status, 'failed');
+  assert.equal(empty.error.type, 'response_truncated');
+});
+
 test('fragmented Chat SSE converts to a complete Responses event stream', async () => {
   const { context } = responsesRequestToChatCompletions({
     model: 'x',
@@ -277,6 +309,23 @@ test('clean EOF synthesizes terminal events and empty truncation fails', async (
   const emptyEvents = parseEvents(empty);
   assert.equal(emptyEvents.at(-1).type, 'response.failed');
   assert.equal(emptyEvents.at(-1).response.error.type, 'stream_truncated');
+});
+
+test('stream errors preserve started output as an incomplete snapshot', async () => {
+  const output = await transformChunks([
+    'data: {"id":"chatcmpl-error","model":"x","choices":[{"delta":{"content":"partial"}}]}\n\n',
+    'event: error\ndata: {"error":{"message":"upstream failed","type":"upstream_error"}}\n\n',
+  ]);
+  const events = parseEvents(output);
+  const completedItem = events.find(event => event.type === 'response.output_item.done');
+  const failed = events.at(-1);
+
+  assert.equal(completedItem.item.status, 'incomplete');
+  assert.equal(completedItem.item.content[0].text, 'partial');
+  assert.equal(failed.type, 'response.failed');
+  assert.equal(failed.response.output[0].status, 'incomplete');
+  assert.equal(failed.response.output[0].content[0].text, 'partial');
+  assert.equal(failed.response.error.type, 'upstream_error');
 });
 
 test('non-stream Chat responses can be emitted as Responses SSE', () => {

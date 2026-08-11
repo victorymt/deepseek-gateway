@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
   codexModelAlias,
@@ -9,6 +12,7 @@ import {
   normalizeModelIdentifier,
   normalizeProvider,
   normalizeUpstreamFormat,
+  persistConfig,
   serializableConfig,
 } from '../config-core.mjs';
 
@@ -96,6 +100,17 @@ test('masked provider keys can be renamed without resending the secret', () => {
   }, existing);
   assert.equal(renamed.keys[0].name, 'renamed');
   assert.equal(renamed.keys[0].key, existing.keys[0].key);
+
+  assert.throws(() => normalizeProvider({
+    ...existing,
+    baseUrl: 'https://other.example/v1',
+    keys: [{
+      name: 'primary',
+      originalName: 'primary',
+      key: '',
+      weight: 1,
+    }],
+  }, existing), /secret is required/);
 });
 
 test('provider upstream format defaults to Responses and accepts Chat Completions', () => {
@@ -386,4 +401,44 @@ test('gateway and management authentication require distinct tokens', () => {
   assert.throws(() => normalizeConfig(config), /must be different/);
   config.adminToken = 'admin-token-567890';
   assert.equal(normalizeConfig(config).adminToken, config.adminToken);
+});
+
+test('management authentication rejects short non-empty admin tokens without gateway auth', () => {
+  const config = {
+    token: '',
+    adminToken: 'short',
+    upstream: 'https://api.deepseek.com',
+    keys: [{ name: 'primary', key: 'sk-primary' }],
+  };
+  assert.throws(() => normalizeConfig(config), /adminToken must be at least 16 characters/);
+
+  config.adminToken = 'admin-token-1234';
+  assert.equal(normalizeConfig(config).adminToken, config.adminToken);
+});
+
+test('persistConfig does not fail after rename on a redundant target chmod', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-config-'));
+  const target = path.join(directory, 'keys.json');
+  const config = normalizeConfig({
+    schemaVersion: 2,
+    setupPending: true,
+    defaultProvider: '',
+    defaultModel: '',
+    providers: [],
+  }, { allowSetup: true });
+  const chmodSync = fs.chmodSync;
+  fs.chmodSync = (file, mode) => {
+    if (path.resolve(file) === path.resolve(target)) {
+      throw new Error('target chmod must not run after rename');
+    }
+    return chmodSync(file, mode);
+  };
+  try {
+    persistConfig(target, config);
+    assert.equal(fs.statSync(target).mode & 0o777, 0o600);
+    assert.equal(JSON.parse(fs.readFileSync(target, 'utf8')).setupPending, true);
+  } finally {
+    fs.chmodSync = chmodSync;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

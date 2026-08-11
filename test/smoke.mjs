@@ -7,6 +7,7 @@ import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const GATEWAY = path.join(ROOT, 'gateway.mjs');
@@ -68,7 +69,11 @@ test('reports an occupied listen port without an unhandled error stack', async (
 async function waitFor(fn, timeout = 8000) {
   const start = Date.now();
   for (;;) {
-    if (await fn().then(() => true, () => false)) return;
+    try {
+      if (await fn()) return;
+    } catch {
+      // Retry until the predicate succeeds or the deadline expires.
+    }
     if (Date.now() - start > timeout) throw new Error('waitFor timeout');
     await new Promise(r => setTimeout(r, 100));
   }
@@ -87,7 +92,7 @@ async function startGateway(keys, extra = [], env = {}, config = {}, options = {
   let stderr = '';
   child.stderr.on('data', d => { stderr += d; });
   const base = `http://127.0.0.1:${port}`;
-  await waitFor(() => fetch(`${base}/health`).then(r => r.ok));
+  await waitFor(() => fetch(`${base}/health`).then(() => true));
   return {
     base,
     configPath,
@@ -725,15 +730,18 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
     assert.equal(directBody.choices[0].message.content, 'direct');
     assert.equal(requests.at(-1).url, '/v1/chat/completions?trace=direct');
 
-    const webSearchFallback = await gw.responses({
+    const webSearchFiltered = await gw.responses({
       model: 'alpha--shared',
       input: 'search',
       tools: [{ type: 'web_search' }],
+      tool_choice: { type: 'web_search' },
+      parallel_tool_calls: true,
     }, {}, '?trace=adapted');
-    assert.equal(webSearchFallback.status, 200, webSearchFallback.text);
+    assert.equal(webSearchFiltered.status, 200, webSearchFiltered.text);
     assert.equal(requests.at(-1).url, '/v1/chat/completions?trace=adapted');
     assert.equal(requests.at(-1).body.tools, undefined);
-    assert.equal(requests.length, 4);
+    assert.equal(requests.at(-1).body.tool_choice, undefined);
+    assert.equal(requests.at(-1).body.parallel_tool_calls, undefined);
   } finally {
     await gw.stop();
     await new Promise(resolve => upstream.close(resolve));
@@ -1073,11 +1081,45 @@ test('settings API can set and clear the gateway token without exposing it', asy
   }
 });
 
+test('unauthenticated local management rejects non-loopback Host headers', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  try {
+    const target = new URL(gw.base);
+    const result = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: target.hostname,
+        port: target.port,
+        path: '/api/providers',
+        method: 'GET',
+        headers: { host: `attacker.example:${target.port}` },
+      }, res => {
+        const chunks = [];
+        res.on('data', chunk => chunks.push(chunk));
+        res.on('end', () => resolve({
+          status: res.statusCode,
+          body: Buffer.concat(chunks).toString('utf8'),
+        }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(result.status, 403);
+    assert.match(result.body, /untrusted management host/);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('model discovery proxies OpenAI-compatible endpoints and normalizes upstream model ids', async () => {
   const upstreamPort = await freePort();
   const requests = [];
   const upstream = http.createServer((req, res) => {
     requests.push({ path: req.url, authorization: req.headers.authorization });
+    if (req.url === '/leak/models') {
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end(`reflected ${req.headers.authorization}`);
+      return;
+    }
     if (req.url === '/anthropic/v1/models') {
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('not found');
@@ -1152,6 +1194,19 @@ test('model discovery proxies OpenAI-compatible endpoints and normalizes upstrea
       { path: '/anthropic/v1/models', authorization: 'Bearer sk-alpha-ok' },
       { path: '/v1/models', authorization: 'Bearer sk-alpha-ok' },
     ]);
+
+    const reflected = await fetch(`${gw.base}/api/models`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        providerId: 'alpha',
+        modelsUrl: `http://127.0.0.1:${upstreamPort}/leak/models`,
+      }),
+    });
+    const reflectedText = await reflected.text();
+    assert.equal(reflected.status, 500);
+    assert.doesNotMatch(reflectedText, /sk-alpha-ok|Bearer/);
+    assert.match(reflectedText, /model endpoint returned HTTP 500/);
   } finally {
     await gw.stop();
     await new Promise(resolve => upstream.close(resolve));
@@ -1369,6 +1424,72 @@ test('provider update rejects duplicate key secrets without changing the live po
   }
 });
 
+test('provider editor revisions reject stale masked key snapshots', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  try {
+    const initial = await gw.providers();
+    assert.ok(Number.isSafeInteger(initial.revision));
+    assert.ok(initial.revision > 0);
+    const updated = await fetch(`${gw.base}/api/providers/alpha`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        name: 'Alpha updated elsewhere',
+        expectedRevision: initial.revision,
+      }),
+    });
+    const updatedPayload = await updated.json();
+    assert.equal(updated.status, 200);
+    assert.equal(updatedPayload.revision, initial.revision + 1);
+
+    const stale = await fetch(`${gw.base}/api/providers/alpha`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        name: 'Stale editor',
+        expectedRevision: initial.revision,
+        keys: [{
+          name: 'alpha-key',
+          originalName: 'alpha-key',
+          key: '',
+          weight: 1,
+          enabled: true,
+        }],
+      }),
+    });
+    assert.equal(stale.status, 409);
+    assert.match(await stale.text(), /changed; refresh before saving/);
+    const current = await gw.providers();
+    assert.equal(current.providers[0].name, 'Alpha updated elsewhere');
+    assert.deepEqual(current.providers[0].keys.map(key => key.name), ['alpha-key']);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('provider origin changes cannot carry existing secrets implicitly', async () => {
+  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  try {
+    const initial = await gw.providers();
+    const response = await fetch(`${gw.base}/api/providers/alpha`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        baseUrl: 'https://attacker.example/v1',
+        expectedRevision: initial.revision,
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.match(await response.text(), /keys must be supplied when changing provider origin/);
+
+    const current = await gw.providers();
+    assert.equal(new URL(current.providers[0].baseUrl).origin, 'https://alpha.example');
+    assert.equal(current.revision, initial.revision);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('changing provider baseUrl drains an active stream before retiring its runtime', async () => {
   const oldPort = await freePort();
   const newPort = await freePort();
@@ -1406,10 +1527,15 @@ test('changing provider baseUrl drains an active stream before retiring its runt
     const first = await reader.read();
     assert.match(decoder.decode(first.value), /old-start/);
 
+    const beforeUpdate = await gw.providers();
     const updated = await fetch(`${gw.base}/api/providers/alpha`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json', origin: gw.base },
-      body: JSON.stringify({ baseUrl: `http://127.0.0.1:${newPort}` }),
+      body: JSON.stringify({
+        baseUrl: `http://127.0.0.1:${newPort}`,
+        expectedRevision: beforeUpdate.revision,
+        keys: [{ name: 'alpha-key', key: 'sk-alpha-ok', weight: 1 }],
+      }),
     });
     assert.equal(updated.status, 200, await updated.text());
 
@@ -1606,19 +1732,29 @@ test('custom balance scripts support automatic, draft, manual, and live-updated 
   const upstreamPort = await freePort();
   const requests = [];
   let remaining = 12;
+  let holdQuota = false;
+  let releaseHeldQuota = null;
   const upstream = http.createServer((req, res) => {
     requests.push({
       path: req.url,
       authorization: req.headers.authorization,
       draft: req.headers['x-draft'] || '',
     });
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({
+    const responsePayload = {
       plan: req.url === '/quota-v2' ? 'Team' : 'Pro',
       remaining: req.url === '/quota-v2' ? 25 : remaining,
       used: 5,
       total: 30,
-    }));
+    };
+    const respond = () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(responsePayload));
+    };
+    if (holdQuota && req.url === '/quota') {
+      releaseHeldQuota = respond;
+      return;
+    }
+    respond();
   });
   await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
 
@@ -1729,6 +1865,14 @@ test('custom balance scripts support automatic, draft, manual, and live-updated 
     assert.match(await blocked.text(), /provider origin/);
     assert.equal(requests.length, blockedBefore);
 
+    holdQuota = true;
+    const staleManual = fetch(`${gw.base}/api/providers/alpha/keys/alpha-key/balance`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: '{}',
+    });
+    await waitFor(async () => Boolean(releaseHeldQuota));
+
     const updatedCode = script('/quota-v2');
     const updated = await fetch(`${gw.base}/api/providers/alpha`, {
       method: 'PATCH',
@@ -1752,6 +1896,13 @@ test('custom balance scripts support automatic, draft, manual, and live-updated 
     alpha = health.providers.find(provider => provider.id === 'alpha');
     assert.equal(alpha.keys[0].balance.items[0].planName, 'Team');
     assert.ok(requests.some(request => request.path === '/quota-v2'));
+    releaseHeldQuota();
+    const staleManualResponse = await staleManual;
+    assert.equal(staleManualResponse.status, 200, await staleManualResponse.text());
+    await new Promise(resolve => setTimeout(resolve, 20));
+    alpha = (await gw.health()).providers.find(provider => provider.id === 'alpha');
+    assert.equal(alpha.keys[0].balance.items[0].planName, 'Team');
+    assert.equal(alpha.keys[0].balance.items[0].remaining, 25);
     const persisted = JSON.parse(fs.readFileSync(gw.configPath, 'utf8'));
     assert.equal(persisted.providers[0].balanceQuery.code, updatedCode);
     assert.equal(persisted.providers[0].balanceQuery.refreshMs, 10000);
@@ -1918,6 +2069,333 @@ test('upstream abort mid-stream counts as error and gateway survives', async () 
   }
 });
 
+test('direct SSE without a protocol terminal event is treated as truncated', async () => {
+  const upstreamPort = await freePort();
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: {"type":"response.output_text.delta","delta":"partial"}\n\n');
+    res.end();
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    await assert.rejects(async () => {
+      const response = await fetch(`${gw.base}/v1/responses`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'alpha--shared', input: 'hello', stream: true }),
+      });
+      await response.text();
+    }, /terminated|fetch failed|socket/i);
+    await waitFor(async () => (await gw.health()).providers[0].keys[0].inFlight === 0);
+    const key = (await gw.health()).providers[0].keys[0];
+    assert.equal(key.failureCount, 1);
+    assert.equal(key.lastError, 'network error');
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('direct SSE requests force identity encoding before validating terminal events', async () => {
+  const upstreamPort = await freePort();
+  let acceptEncoding = '';
+  const body = [
+    'event: response.completed',
+    'data: {"type":"response.completed","response":{"status":"completed"}}',
+    '',
+    '',
+  ].join('\n');
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    acceptEncoding = String(req.headers['accept-encoding'] || '');
+    if (acceptEncoding === 'identity') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(body);
+      return;
+    }
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'content-encoding': 'gzip',
+    });
+    res.end(zlib.gzipSync(body));
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    const response = await fetch(`${gw.base}/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'alpha--shared', input: 'hello', stream: true }),
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /response\.completed/);
+    assert.equal(acceptEncoding, 'identity');
+    const key = (await gw.health()).providers[0].keys[0];
+    assert.equal(key.success, 1);
+    assert.equal(key.errors, 0);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('direct Responses SSE accepts terminal events larger than one MiB', async () => {
+  const upstreamPort = await freePort();
+  const largeOutput = 'x'.repeat(1100000);
+  const terminal = JSON.stringify({
+    type: 'response.completed',
+    response: { status: 'completed', output: largeOutput },
+  });
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(`event: response.completed\ndata: ${terminal}\n\n`);
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    const response = await fetch(`${gw.base}/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'alpha--shared', input: 'hello', stream: true }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.ok(text.length > 1100000);
+    const key = (await gw.health()).providers[0].keys[0];
+    assert.equal(key.success, 1);
+    assert.equal(key.errors, 0);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('direct Responses SSE accepts CR-only event framing', async () => {
+  const upstreamPort = await freePort();
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end([
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"status":"completed"}}',
+      '',
+      '',
+    ].join('\r'));
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    const response = await fetch(`${gw.base}/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'alpha--shared', input: 'hello', stream: true }),
+    });
+    assert.match(await response.text(), /response\.completed/);
+    const key = (await gw.health()).providers[0].keys[0];
+    assert.equal(key.success, 1);
+    assert.equal(key.errors, 0);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('large non-SSE JSON responses still record usage totals', async () => {
+  const upstreamPort = await freePort();
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'large-response',
+      output: 'x'.repeat(1100000),
+      usage: { total_tokens: 37 },
+    }));
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    const response = await gw.chat({ model: 'alpha--shared' });
+    assert.equal(response.status, 200);
+    assert.ok(response.text.length > 1100000);
+    const health = await gw.health();
+    assert.equal(health.total.tokens, 37);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('direct Responses SSE rejects malformed terminal event payloads', async () => {
+  const upstreamPort = await freePort();
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end('event: response.completed\ndata: {broken}\n\n');
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    await assert.rejects(async () => {
+      const response = await fetch(`${gw.base}/v1/responses`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'alpha--shared', input: 'hello', stream: true }),
+      });
+      await response.text();
+    }, /terminated|fetch failed|socket/i);
+    const key = (await gw.health()).providers[0].keys[0];
+    assert.equal(key.success, 0);
+    assert.equal(key.errors, 1);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('direct SSE terminal markers inside model output do not bypass truncation checks', async () => {
+  const upstreamPort = await freePort();
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (req.url.includes('chat/completions')) {
+      res.end('data: {"choices":[{"delta":{"content":"data: [DONE]"}}]}\n\n');
+      return;
+    }
+    res.end('data: {"type":"response.output_text.delta","delta":"event: response.completed"}\n\n');
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    for (const pathname of ['/v1/responses', '/v1/chat/completions']) {
+      await assert.rejects(async () => {
+        const response = await fetch(`${gw.base}${pathname}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'alpha--shared', input: 'hello', stream: true }),
+        });
+        await response.text();
+      }, /terminated|fetch failed|socket/i);
+    }
+    await waitFor(async () => (await gw.health()).providers[0].keys[0].inFlight === 0);
+    const key = (await gw.health()).providers[0].keys[0];
+    assert.equal(key.errors, 2);
+    assert.equal(key.failureCount, 2);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('direct Responses SSE failure terminals count as upstream errors', async () => {
+  const upstreamPort = await freePort();
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end([
+      'event: response.failed',
+      'data: {"type":"response.failed","response":{"status":"failed"}}',
+      '',
+      '',
+    ].join('\n'));
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    const response = await fetch(`${gw.base}/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'alpha--shared', input: 'hello', stream: true }),
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /response\.failed/);
+    const key = (await gw.health()).providers[0].keys[0];
+    assert.equal(key.success, 0);
+    assert.equal(key.errors, 1);
+    assert.equal(key.failureCount, 1);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('client cancellation while buffering an adapted response does not penalize the key', async () => {
+  const upstreamPort = await freePort();
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.flushHeaders();
+    const timer = setTimeout(() => {
+      res.end(JSON.stringify({
+        id: 'chatcmpl-late',
+        model: 'same-upstream-model',
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'late' } }],
+      }));
+    }, 500);
+    res.on('close', () => clearTimeout(timer));
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}`;
+  config.providers[0].upstreamFormat = 'chat-completions';
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    const target = new URL(gw.base);
+    await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: target.hostname,
+        port: target.port,
+        path: '/v1/responses',
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      });
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      req.on('response', res => {
+        res.resume();
+        res.on('close', done);
+      });
+      req.on('error', error => {
+        if (error.code === 'ECONNRESET') done();
+        else reject(error);
+      });
+      req.on('close', done);
+      req.end(JSON.stringify({ model: 'alpha--shared', input: 'hello' }));
+      setTimeout(() => req.destroy(), 80);
+    });
+    await waitFor(async () => (await gw.health()).providers[0].keys[0].inFlight === 0);
+    const key = (await gw.health()).providers[0].keys[0];
+    assert.equal(key.failureCount, 0);
+    assert.equal(key.invalid, false);
+    assert.equal(key.lastError, 'client aborted');
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
 test('downstream abort before upstream headers cancels the active request', async () => {
   const gw = await startGateway('alice=sk-a-slow,bob=sk-b-ok');
   try {
@@ -2073,6 +2551,33 @@ test('setup script is idempotent and dry-run is pure', async () => {
     catalog.models.every(model => model.supports_search_tool === false),
     'catalog models must not enable supports_search_tool (hides MCP tools in Codex CLI)',
   );
+  assert.ok(
+    catalog.models.every(model => model.shell_type === 'shell_command'),
+    'every catalog model must declare the Codex shell tool type',
+  );
+  assert.ok(
+    catalog.models.every(model => (
+      model.base_instructions || model.model_messages?.instructions_template
+    )),
+    'every catalog model must include a Codex instruction source',
+  );
+  assert.ok(
+    catalog.models.every(model => typeof model.supports_reasoning_summaries === 'boolean'),
+    'every catalog model must declare reasoning summary support',
+  );
+  assert.ok(
+    catalog.models.every(model => model.apply_patch_tool_type === undefined),
+    'native Responses models must not advertise the proxy-only freeform patch tool',
+  );
+  assert.equal(fs.statSync(path.join(codexDir, 'gateway-models.json')).mode & 0o777, 0o600);
+
+  const beforeUndoDryConfig = fs.readFileSync(configPath, 'utf8');
+  const beforeUndoDryCatalog = fs.readFileSync(path.join(codexDir, 'gateway-models.json'), 'utf8');
+  const undoDry = runSetup(['--undo', '--dry-run']);
+  assert.notEqual(undoDry.status, 0);
+  assert.match(undoDry.stderr, /cannot be used together/);
+  assert.equal(fs.readFileSync(configPath, 'utf8'), beforeUndoDryConfig);
+  assert.equal(fs.readFileSync(path.join(codexDir, 'gateway-models.json'), 'utf8'), beforeUndoDryCatalog);
 
   const validate = spawnSync('python3', ['-c', `
 import sys, tomllib

@@ -113,8 +113,7 @@ const copy = {
     token: "新的 Gateway 令牌",
     adminToken: "新的管理令牌",
     tokenPlaceholder: "留空则保留当前令牌",
-    adminTokenDescription:
-      "仅用于控制台登录和管理 API，必须与推理令牌不同。",
+    adminTokenDescription: "仅用于控制台登录和管理 API，必须与推理令牌不同。",
     clearToken: "清除 Gateway 令牌",
     clearTokenDescription: "删除配置文件中保存的 Gateway 令牌。",
     clearTokenConfirmTitle: "关闭 Gateway 认证？",
@@ -483,7 +482,8 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
                 data-disabled={
                   !settings.writable ||
                   !settings.persisted.tokenConfigured ||
-                  settings.overrides.token
+                  settings.overrides.token ||
+                  dirty
                     ? true
                     : undefined
                 }
@@ -499,6 +499,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
                     !settings.writable ||
                     !settings.persisted.tokenConfigured ||
                     Boolean(settings.overrides.token) ||
+                    dirty ||
                     saving
                   }
                   onClick={() => setClearDialogOpen(true)}

@@ -92,6 +92,29 @@ export function createProviderRoutes(services) {
 
     if (req.method === 'PATCH') {
       const payload = await readJsonBody(req);
+      const preservesExistingSecrets = Array.isArray(payload.keys)
+        && payload.keys.some(key => (
+          key && typeof key === 'object' && !String(key.key || '').trim()
+        ));
+      if (Object.hasOwn(payload, 'expectedRevision')) {
+        if (!Number.isInteger(payload.expectedRevision)) {
+          throw Object.assign(
+            new Error('expectedRevision must be an integer'),
+            { statusCode: 400 },
+          );
+        }
+        if (payload.expectedRevision !== (cfg._managementRevision || 1)) {
+          throw Object.assign(
+            new Error('provider configuration changed; refresh before saving'),
+            { statusCode: 409 },
+          );
+        }
+      } else if (preservesExistingSecrets) {
+        throw Object.assign(
+          new Error('expectedRevision is required when preserving provider secrets'),
+          { statusCode: 409 },
+        );
+      }
       const current = cfg.providers.find(
         provider => provider.id === providerId,
       );
@@ -107,12 +130,22 @@ export function createProviderRoutes(services) {
           { statusCode: 400 },
         );
       }
+      const providerPayload = { ...payload };
+      delete providerPayload.expectedRevision;
       const provider = managementValidation(
         () => normalizeProvider(
-          { ...current, ...payload, id: providerId },
+          { ...current, ...providerPayload, id: providerId },
           current,
         ),
       );
+      const originChanged = new URL(current.baseUrl).origin
+        !== new URL(provider.baseUrl).origin;
+      if (originChanged && !Array.isArray(payload.keys)) {
+        throw Object.assign(
+          new Error('provider keys must be supplied when changing provider origin'),
+          { statusCode: 400 },
+        );
+      }
       const providers = cfg.providers.map(
         item => item.id === providerId ? provider : item,
       );

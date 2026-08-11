@@ -58,6 +58,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -n "$UNDO" ] && [ -n "$DRY" ]; then
+  echo "ERROR: --undo and --dry-run cannot be used together" >&2
+  exit 1
+fi
+
 if [ -n "$UNDO" ]; then
     if [ ! -d "$BACKUP_DIR" ]; then echo "no backups found in $BACKUP_DIR"; exit 1; fi
     SNAPSHOT="$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort | tail -1 || true)"
@@ -160,7 +165,6 @@ if [ -n "$DRY" ]; then
   echo "[dry-run] node $SCRIPT_DIR/codex-config.mjs --config $GATEWAY_CONFIG --auth $AUTH_MODE --models-path $MODELS --write-catalog $MODELS"
 else
   node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --models-path "$MODELS" --write-catalog "$MODELS"
-  chmod 600 "$MODELS"
   now "wrote $MODELS (Codex Provider.model aliases)"
 fi
 

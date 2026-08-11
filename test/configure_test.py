@@ -130,6 +130,20 @@ class ConfigureWizardTests(unittest.TestCase):
         self.assertEqual(migrated["providers"][0]["baseUrl"], "https://legacy.example/v1")
         self.assertEqual(migrated["providers"][0]["keys"][0]["name"], "legacy")
 
+    def test_existing_keys_preserve_always_try(self):
+        existing = [{
+            "name": "primary",
+            "key": "sk-primary",
+            "weight": 1,
+            "enabled": True,
+            "alwaysTry": True,
+        }]
+
+        with patch.object(configure_module, "confirm", return_value=False):
+            keys = configure_module.configure_keys(existing)
+
+        self.assertTrue(keys[0]["alwaysTry"])
+
     def test_v2_preserves_providers_without_prompting_for_keys(self):
         original = {
             "schemaVersion": 2,

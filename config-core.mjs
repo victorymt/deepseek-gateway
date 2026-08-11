@@ -211,12 +211,18 @@ export function normalizeProvider(input, existing = null) {
   });
 
   const existingKeys = new Map((existing?.keys || []).map(key => [key.name, key]));
+  const canReuseExistingSecrets = Boolean(
+    existing?.baseUrl
+    && new URL(existing.baseUrl).origin === new URL(baseUrl).origin,
+  );
   const keys = rawKeys.map((key, index) => {
     if (!key || typeof key !== 'object' || Array.isArray(key)) throw new Error(`provider ${id} has an invalid key`);
     const keyName = String(key.name || `key-${index + 1}`).trim();
     const originalName = String(key.originalName || keyName).trim();
     let secret = typeof key.key === 'string' ? key.key.trim() : '';
-    if (!secret && existingKeys.has(originalName)) secret = existingKeys.get(originalName).key;
+    if (!secret && canReuseExistingSecrets && existingKeys.has(originalName)) {
+      secret = existingKeys.get(originalName).key;
+    }
     const weight = Number(key.weight ?? 1);
     const enabled = key.enabled === undefined
       ? (existingKeys.get(keyName)?.enabled ?? true)
@@ -363,7 +369,10 @@ export function normalizeConfig(raw, { allowSetup = false } = {}) {
   if (!isLoopbackHost(config.host) && config.token.length < 16) {
     throw new Error('a non-loopback host requires a gateway token of at least 16 characters');
   }
-  if (config.token && config.adminToken.length < 16) {
+  if (config.adminToken && config.adminToken.length < 16) {
+    throw new Error('adminToken must be at least 16 characters');
+  }
+  if (config.token && !config.adminToken) {
     throw new Error('gateway authentication requires a separate adminToken of at least 16 characters');
   }
   if (config.token && config.adminToken === config.token) {
@@ -435,7 +444,6 @@ export function persistConfig(configPath, config) {
     fs.writeFileSync(temp, `${JSON.stringify(serializableConfig(config), null, 2)}\n`, { mode: 0o600 });
     fs.chmodSync(temp, 0o600);
     fs.renameSync(temp, target);
-    fs.chmodSync(target, 0o600);
   } catch (error) {
     try { fs.unlinkSync(temp); } catch {}
     throw error;

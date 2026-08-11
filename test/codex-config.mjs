@@ -1,9 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 
-import { buildModelCatalog } from '../codex-config.mjs';
+import { buildCodexArtifacts, buildModelCatalog } from '../codex-config.mjs';
 
-function config(upstreamFormat, supportsHostedWebSearch = false) {
+function config(
+  upstreamFormat,
+  supportsHostedWebSearch = false,
+  upstreamModel = 'unknown-model',
+) {
   return {
     schemaVersion: 2,
     defaultProvider: 'alpha',
@@ -17,7 +21,7 @@ function config(upstreamFormat, supportsHostedWebSearch = false) {
       models: [{
         id: 'chat',
         name: 'Chat',
-        upstreamModel: 'unknown-model',
+        upstreamModel,
         inputModalities: ['text'],
         supportsHostedWebSearch,
       }],
@@ -33,6 +37,11 @@ test('Chat Completions catalog entries do not advertise hosted web search', () =
 
   assert.equal(model.web_search_tool_type, undefined);
   assert.equal(model.supports_search_tool, false);
+  assert.equal(model.shell_type, 'shell_command');
+  assert.equal(model.apply_patch_tool_type, 'freeform');
+  assert.ok(model.base_instructions);
+  assert.ok(model.model_messages?.instructions_template);
+  assert.equal(model.supports_reasoning_summaries, false);
 });
 
 test('Responses catalog entries default hosted web search to disabled', () => {
@@ -43,6 +52,10 @@ test('Responses catalog entries default hosted web search to disabled', () => {
   assert.equal(model.context_window, 32768);
   assert.equal(model.supports_parallel_tool_calls, false);
   assert.equal(model.model_messages, undefined);
+  assert.equal(model.shell_type, 'shell_command');
+  assert.equal(model.apply_patch_tool_type, undefined);
+  assert.ok(model.base_instructions);
+  assert.equal(model.supports_reasoning_summaries, false);
 });
 
 test('Responses catalog entries opt into the template hosted web search type', () => {
@@ -52,4 +65,36 @@ test('Responses catalog entries opt into the template hosted web search type', (
 
   assert.equal(model.web_search_tool_type, 'text');
   assert.equal(model.supports_search_tool, false);
+});
+
+test('known templates keep proxy tools but strip them for native Responses', () => {
+  const proxyChat = buildModelCatalog(
+    config('chat-completions', false, 'deepseek-v4-flash'),
+  ).models[0];
+  const nativeResponses = buildModelCatalog(
+    config('responses', false, 'deepseek-v4-flash'),
+  ).models[0];
+
+  assert.equal(proxyChat.apply_patch_tool_type, 'freeform');
+  assert.ok(proxyChat.model_messages?.instructions_template);
+  assert.equal(nativeResponses.apply_patch_tool_type, undefined);
+  assert.equal(nativeResponses.model_messages, undefined);
+  assert.ok(nativeResponses.base_instructions);
+  assert.doesNotMatch(nativeResponses.base_instructions, /apply_patch/);
+  assert.equal(nativeResponses.shell_type, 'shell_command');
+});
+
+test('both upstream formats keep Codex on the local Responses route', () => {
+  const proxyChat = buildCodexArtifacts(config('chat-completions'), {
+    modelsPath: '/tmp/gateway-models.json',
+  });
+  const nativeResponses = buildCodexArtifacts(config('responses'), {
+    modelsPath: '/tmp/gateway-models.json',
+  });
+
+  for (const artifacts of [proxyChat, nativeResponses]) {
+    assert.match(artifacts.configToml, /wire_api = "responses"/);
+  }
+  assert.equal(proxyChat.catalog.models[0].apply_patch_tool_type, 'freeform');
+  assert.equal(nativeResponses.catalog.models[0].apply_patch_tool_type, undefined);
 });

@@ -68,6 +68,11 @@ export const providerCopy = {
     balanceTested: (value: string) => `Balance query succeeded · ${value}`,
     cancel: "Cancel",
     discardChanges: "Discard unsaved provider changes?",
+    concurrentChange:
+      "Provider configuration changed after this editor was opened. Close and reopen the editor before saving.",
+    reenterKeysForOrigin:
+      "Re-enter every existing API key before changing the provider origin.",
+    reenterKey: "This key must be re-entered for the new provider origin.",
     save: "Save provider",
     create: "Create provider",
     deleteTitle: "Delete provider?",
@@ -120,8 +125,7 @@ export const providerCopy = {
     hostedWebSearch: "托管网页搜索",
     hostedWebSearchDescription:
       "允许 Codex 发送 Responses web_search 托管工具。",
-    hostedWebSearchUnavailable:
-      "托管网页搜索要求上游使用 Responses 协议。",
+    hostedWebSearchUnavailable: "托管网页搜索要求上游使用 Responses 协议。",
     keyName: "密钥名称",
     apiKey: "API 密钥",
     keepKey: "留空可保留当前密钥。",
@@ -144,6 +148,10 @@ export const providerCopy = {
     balanceTested: (value: string) => `额度查询成功 · ${value}`,
     cancel: "取消",
     discardChanges: "放弃尚未保存的 Provider 修改？",
+    concurrentChange:
+      "打开编辑器后 Provider 配置已发生变化。请关闭并重新打开编辑器后再保存。",
+    reenterKeysForOrigin: "更改 Provider 来源前，请重新输入所有现有 API 密钥。",
+    reenterKey: "新的 Provider 来源要求重新输入此密钥。",
     save: "保存 Provider",
     create: "创建 Provider",
     deleteTitle: "删除 Provider？",
@@ -154,5 +162,4 @@ export const providerCopy = {
   },
 } as const
 
-export type ProviderCopy =
-  (typeof providerCopy)[keyof typeof providerCopy]
+export type ProviderCopy = (typeof providerCopy)[keyof typeof providerCopy]

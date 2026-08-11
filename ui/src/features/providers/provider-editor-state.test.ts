@@ -7,7 +7,9 @@ import {
   balanceResultAmount,
   createEmptyProviderDraft,
   providerDraftPayload,
+  providerOriginsDiffer,
   providerToDraft,
+  providerUpdatePayload,
   setProviderUpstreamFormat,
 } from "./provider-editor-state"
 
@@ -75,27 +77,90 @@ describe("provider editor state", () => {
 
   test("builds a persistence payload without public key metadata", () => {
     const payload = providerDraftPayload(providerToDraft(provider))
+    const keys = payload.keys!
 
-    expect(payload.keys[0]).toEqual({
+    expect(keys[0]).toEqual({
       name: "primary",
       key: "",
       weight: 2,
       enabled: true,
       alwaysTry: true,
     })
-    expect(payload.keys[0]).not.toHaveProperty("maskedKey")
-    expect(payload.keys[0]).not.toHaveProperty("fingerprint")
+    expect(keys[0]).not.toHaveProperty("maskedKey")
+    expect(keys[0]).not.toHaveProperty("fingerprint")
   })
 
   test("sends the original key name only when a masked key is renamed", () => {
     const draft = providerToDraft(provider)
     draft.keys[0].name = "renamed"
 
-    expect(providerDraftPayload(draft).keys[0]).toMatchObject({
+    expect(providerDraftPayload(draft).keys![0]).toMatchObject({
       name: "renamed",
       originalName: "primary",
       key: "",
     })
+  })
+
+  test("omits an unchanged key snapshot from provider updates", () => {
+    const baseline = providerToDraft(provider)
+    const draft = providerToDraft(provider)
+    draft.name = "Updated name"
+
+    const payload = providerUpdatePayload(draft, 7, {
+      baseline,
+      originalBaseUrl: baseline.baseUrl,
+    })
+
+    expect(payload).not.toHaveProperty("keys")
+    expect(payload).toMatchObject({ name: "Updated name", expectedRevision: 7 })
+
+    draft.keys[0].weight = 3
+    expect(
+      providerUpdatePayload(draft, 7, {
+        baseline,
+        originalBaseUrl: baseline.baseUrl,
+      })
+    ).toHaveProperty("keys")
+  })
+
+  test("requires every masked secret again when the provider origin changes", () => {
+    const baseline = providerToDraft(provider)
+    const draft = providerToDraft(provider)
+    draft.baseUrl = "https://other.example/v1"
+
+    expect(providerOriginsDiffer(provider.baseUrl, draft.baseUrl)).toBe(true)
+    expect(() =>
+      providerUpdatePayload(draft, 3, {
+        baseline,
+        originalBaseUrl: baseline.baseUrl,
+        originChangedMessage: "origin changed",
+      })
+    ).toThrow("origin changed")
+
+    draft.keys[0].key = "sk-reentered"
+    expect(
+      providerUpdatePayload(draft, 3, {
+        baseline,
+        originalBaseUrl: baseline.baseUrl,
+      })
+    ).toMatchObject({
+      expectedRevision: 3,
+      keys: [{ name: "primary", key: "sk-reentered" }],
+    })
+  })
+
+  test("allows masked secrets to remain blank for path changes on one origin", () => {
+    const baseline = providerToDraft(provider)
+    const draft = providerToDraft(provider)
+    draft.baseUrl = "https://api.deepseek.com/v2"
+
+    expect(providerOriginsDiffer(provider.baseUrl, draft.baseUrl)).toBe(false)
+    expect(
+      providerUpdatePayload(draft, 2, {
+        baseline,
+        originalBaseUrl: baseline.baseUrl,
+      })
+    ).not.toHaveProperty("keys")
   })
 
   test("adds fetched models deterministically and ignores duplicates", () => {
@@ -130,16 +195,13 @@ describe("provider editor state", () => {
 
   test("clears hosted web search when switching to Chat Completions", () => {
     const draft = providerToDraft(provider)
-    const chatDraft = setProviderUpstreamFormat(
-      draft,
-      "chat-completions"
-    )
+    const chatDraft = setProviderUpstreamFormat(draft, "chat-completions")
 
     expect(chatDraft.upstreamFormat).toBe("chat-completions")
     expect(chatDraft.models[0].supportsHostedWebSearch).toBe(false)
-    expect(
-      setProviderUpstreamFormat(chatDraft, "chat-completions")
-    ).toBe(chatDraft)
+    expect(setProviderUpstreamFormat(chatDraft, "chat-completions")).toBe(
+      chatDraft
+    )
   })
 
   test("formats remaining balance and derives it from total minus used", () => {
@@ -153,8 +215,8 @@ describe("provider editor state", () => {
       )
     ).toBe("USD 750")
 
-    expect(
-      balanceResultAmount({ isAvailable: true, items: [] }, "en")
-    ).toBe("—")
+    expect(balanceResultAmount({ isAvailable: true, items: [] }, "en")).toBe(
+      "—"
+    )
   })
 })

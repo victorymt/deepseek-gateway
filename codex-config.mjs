@@ -16,10 +16,20 @@ export { codexModelAlias, providerModelAlias } from './config-core.mjs';
 export const CODEX_PROVIDER_ID = 'multi-provider-gateway';
 export const CODEX_ENV_KEY = 'DEEPSEEK_GATEWAY_TOKEN';
 const AUTH_MODES = new Set(['auto', 'required', 'none']);
+const CATALOG_PROFILE = Object.freeze({
+  PROXY_CHAT: 'proxy-chat',
+  NATIVE_RESPONSES: 'native-responses',
+});
+const NEUTRAL_BASE_INSTRUCTIONS = [
+  'You are Codex, a coding agent.',
+  "You and the user share the same workspace and collaborate to achieve the user's goals.",
+].join(' ');
 
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_PATH = path.join(PROJECT_DIR, 'codex-models.json');
 const NEUTRAL_MODEL_TEMPLATE = {
+  shell_type: 'shell_command',
+  base_instructions: NEUTRAL_BASE_INSTRUCTIONS,
   prefer_websockets: false,
   support_verbosity: false,
   input_modalities: ['text'],
@@ -82,10 +92,81 @@ function authRequired(config, options = {}) {
   return Boolean(config.token);
 }
 
+function catalogProfile(provider) {
+  return provider.upstreamFormat === 'chat-completions'
+    ? CATALOG_PROFILE.PROXY_CHAT
+    : CATALOG_PROFILE.NATIVE_RESPONSES;
+}
+
+function hasInstructionSource(model) {
+  return Boolean(
+    String(model.base_instructions || '').trim()
+    || String(model.model_messages?.instructions_template || '').trim(),
+  );
+}
+
+function validateCatalogModel(model) {
+  if (model.shell_type !== 'shell_command') {
+    throw new Error(`Codex catalog model ${model.slug} must use shell_type shell_command`);
+  }
+  if (!hasInstructionSource(model)) {
+    throw new Error(
+      `Codex catalog model ${model.slug} requires base_instructions or model_messages.instructions_template`,
+    );
+  }
+  if (typeof model.supports_reasoning_summaries !== 'boolean') {
+    throw new Error(
+      `Codex catalog model ${model.slug} requires supports_reasoning_summaries`,
+    );
+  }
+}
+
+function applyCatalogProfile(
+  catalogModel,
+  provider,
+  model,
+  template,
+  proxyTemplate,
+  usesNeutralTemplate,
+) {
+  const profile = catalogProfile(provider);
+  catalogModel.shell_type = 'shell_command';
+  if (typeof catalogModel.supports_reasoning_summaries !== 'boolean') {
+    catalogModel.supports_reasoning_summaries = false;
+  }
+
+  delete catalogModel.web_search_tool_type;
+  if (profile === CATALOG_PROFILE.PROXY_CHAT) {
+    if (usesNeutralTemplate) {
+      catalogModel.base_instructions = proxyTemplate.base_instructions
+        || NEUTRAL_BASE_INSTRUCTIONS;
+      if (proxyTemplate.model_messages) {
+        catalogModel.model_messages = structuredClone(proxyTemplate.model_messages);
+      }
+    }
+    catalogModel.apply_patch_tool_type = proxyTemplate.apply_patch_tool_type
+      || catalogModel.apply_patch_tool_type
+      || 'freeform';
+  } else {
+    catalogModel.base_instructions = NEUTRAL_BASE_INSTRUCTIONS;
+    delete catalogModel.apply_patch_tool_type;
+    delete catalogModel.model_messages;
+    delete catalogModel.tools;
+    if (canExposeHostedWebSearch(provider, model)) {
+      catalogModel.web_search_tool_type = template.web_search_tool_type || 'text';
+    }
+  }
+  if (!hasInstructionSource(catalogModel)) {
+    catalogModel.base_instructions = NEUTRAL_BASE_INSTRUCTIONS;
+  }
+  return catalogModel;
+}
+
 export function buildModelCatalog(config) {
   config = normalizeCatalogConfig(config);
   const templates = loadTemplates();
   const bySlug = new Map(templates.map(model => [model.slug, model]));
+  const proxyTemplate = templates[0];
   const models = [];
   const aliases = new Set();
   let priority = 1;
@@ -96,13 +177,17 @@ export function buildModelCatalog(config) {
       const alias = codexModelAlias(provider.id, model.id);
       if (aliases.has(alias)) throw new Error(`duplicate model alias: ${alias}`);
       aliases.add(alias);
-      const template = bySlug.get(model.upstreamModel) || NEUTRAL_MODEL_TEMPLATE;
-      const catalogModel = structuredClone(template);
-      delete catalogModel.web_search_tool_type;
-      if (canExposeHostedWebSearch(provider, model)) {
-        catalogModel.web_search_tool_type = template.web_search_tool_type || 'text';
-      }
-      models.push({
+      const matchedTemplate = bySlug.get(model.upstreamModel);
+      const template = matchedTemplate || NEUTRAL_MODEL_TEMPLATE;
+      const catalogModel = applyCatalogProfile(
+        structuredClone(template),
+        provider,
+        model,
+        template,
+        proxyTemplate,
+        !matchedTemplate,
+      );
+      const outputModel = {
         ...catalogModel,
         slug: alias,
         display_name: alias,
@@ -117,7 +202,9 @@ export function buildModelCatalog(config) {
         // openai/codex#36382). DeepSeek upstreams do not support it, so the
         // catalog always disables the flag regardless of the template.
         supports_search_tool: false,
-      });
+      };
+      validateCatalogModel(outputModel);
+      models.push(outputModel);
     }
   }
   if (!models.length) throw new Error('at least one enabled provider model is required');
@@ -170,6 +257,16 @@ export function buildCodexArtifacts(config, options = {}) {
   };
 }
 
+function writeCatalogAtomic(outputPath, catalogJson) {
+  const tempPath = `${outputPath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    fs.writeFileSync(tempPath, catalogJson, { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tempPath, outputPath);
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
+}
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
@@ -205,8 +302,7 @@ function runCli() {
     throw new Error(`model alias is not present in the generated catalog: ${args.model}`);
   }
   if (args.catalogOutput) {
-    fs.writeFileSync(args.catalogOutput, artifacts.catalogJson, { mode: 0o600 });
-    fs.chmodSync(args.catalogOutput, 0o600);
+    writeCatalogAtomic(args.catalogOutput, artifacts.catalogJson);
   }
   if (args.printToml) process.stdout.write(artifacts.configToml);
   if (args.printModel) process.stdout.write(`${requestedModel || artifacts.defaultModel}\n`);

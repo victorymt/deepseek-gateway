@@ -1,17 +1,7 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type FormEvent,
-} from "react"
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 
 import type { Locale } from "@/components/language-provider"
-import type {
-  BalanceResult,
-  Provider,
-  ProviderConfig,
-} from "@/gateway-types"
+import type { BalanceResult, Provider, ProviderConfig } from "@/gateway-types"
 import { apiRequest } from "@/lib/api-request"
 
 import {
@@ -20,6 +10,7 @@ import {
   createEmptyProviderDraft,
   providerDraftPayload,
   providerToDraft,
+  providerUpdatePayload,
   type FetchedModel,
   type ProviderDraft,
 } from "./provider-editor-state"
@@ -29,6 +20,8 @@ type ProviderManagerMessages = {
   connected: string
   noModelsFound: string
   discardChanges: string
+  concurrentChange: string
+  reenterKeysForOrigin: string
   balanceTested: (value: string) => string
 }
 
@@ -61,8 +54,11 @@ export function useProviderManager({
   const [balanceTestError, setBalanceTestError] = useState("")
   const [balanceTestNotice, setBalanceTestNotice] = useState("")
   const [dialogError, setDialogError] = useState("")
+  const [originalBaseUrl, setOriginalBaseUrl] = useState("")
   const dialogSession = useRef(0)
   const initialDraft = useRef("")
+  const baselineDraft = useRef<ProviderDraft | null>(null)
+  const baselineRevision = useRef<number | null>(null)
   const dialogRequests = useRef(new Map<string, AbortController>())
 
   function abortDialogRequests() {
@@ -112,7 +108,10 @@ export function useProviderManager({
     dialogSession.current += 1
     const nextDraft = createEmptyProviderDraft()
     setEditingId(null)
+    setOriginalBaseUrl("")
     setDraft(nextDraft)
+    baselineDraft.current = nextDraft
+    baselineRevision.current = null
     initialDraft.current = JSON.stringify(nextDraft)
     setError("")
     setDialogError("")
@@ -125,7 +124,10 @@ export function useProviderManager({
     dialogSession.current += 1
     const nextDraft = providerToDraft(provider)
     setEditingId(provider.id)
+    setOriginalBaseUrl(provider.baseUrl)
     setDraft(nextDraft)
+    baselineDraft.current = nextDraft
+    baselineRevision.current = config?.revision ?? null
     initialDraft.current = JSON.stringify(nextDraft)
     setError("")
     setDialogError("")
@@ -139,18 +141,35 @@ export function useProviderManager({
     setSaving(true)
     setDialogError("")
     try {
+      const payload = providerDraftPayload(draft, {
+        baseline: baselineDraft.current,
+        originalBaseUrl: baselineDraft.current?.baseUrl,
+        originChangedMessage: messages.reenterKeysForOrigin,
+      })
+      if (editingId && baselineRevision.current === null) {
+        throw new Error(messages.concurrentChange)
+      }
+      const requestPayload = editingId
+        ? providerUpdatePayload(draft, baselineRevision.current as number, {
+            baseline: baselineDraft.current,
+            originalBaseUrl: baselineDraft.current?.baseUrl,
+            originChangedMessage: messages.reenterKeysForOrigin,
+          })
+        : payload
       const next = await apiRequest<ProviderConfig>(
         editingId
           ? `/api/providers/${encodeURIComponent(editingId)}`
           : "/api/providers",
         {
           method: editingId ? "PATCH" : "POST",
-          body: JSON.stringify(providerDraftPayload(draft)),
+          body: JSON.stringify(requestPayload),
           signal: controller.signal,
         }
       )
       if (!requestIsCurrent(session, controller)) return
       setConfig(next)
+      baselineDraft.current = draft
+      baselineRevision.current = next.revision
       initialDraft.current = JSON.stringify(draft)
       abortDialogRequests()
       setSaving(false)
@@ -158,24 +177,38 @@ export function useProviderManager({
       setDialogOpen(false)
       if (setupMode && !next.setupPending) await onConfigured?.()
     } catch (cause) {
+      const message = cause instanceof Error ? cause.message : messages.failed
+      if (
+        requestIsCurrent(session, controller) &&
+        message.includes("provider configuration changed")
+      ) {
+        await refresh()
+      }
       if (requestIsCurrent(session, controller)) {
-        setDialogError(cause instanceof Error ? cause.message : messages.failed)
+        setDialogError(message)
       }
     } finally {
       if (session === dialogSession.current) setSaving(false)
     }
   }
 
-  async function patchProvider(
-    id: string,
-    payload: Record<string, unknown>
-  ) {
+  async function patchProvider(id: string, payload: Record<string, unknown>) {
     setError("")
     setNotice("")
+    if (!config) {
+      setError(messages.concurrentChange)
+      return
+    }
     try {
       const next = await apiRequest<ProviderConfig>(
         `/api/providers/${encodeURIComponent(id)}`,
-        { method: "PATCH", body: JSON.stringify(payload) }
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            ...payload,
+            expectedRevision: config.revision,
+          }),
+        }
       )
       setConfig(next)
     } catch (cause) {
@@ -263,9 +296,7 @@ export function useProviderManager({
           balanceQuery: draft.balanceQuery,
           ...(editingId ? { providerId: editingId } : {}),
           keyName: selectedKey?.name,
-          ...(selectedKey?.key.trim()
-            ? { key: selectedKey.key.trim() }
-            : {}),
+          ...(selectedKey?.key.trim() ? { key: selectedKey.key.trim() } : {}),
         }),
         signal: controller.signal,
       })
@@ -320,6 +351,7 @@ export function useProviderManager({
     loading,
     modelFetchError,
     notice,
+    originalBaseUrl,
     openCreate,
     openEdit,
     patchProvider,

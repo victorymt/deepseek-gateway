@@ -362,11 +362,11 @@ Provider 的 `upstreamFormat` 支持两个值：
 - `responses`：默认值，保持原有路径、请求体和响应透传行为。
 - `chat-completions`：客户端调用 `/v1/responses` 时，网关把请求转换后转发至上游 `/v1/chat/completions`，再将 JSON 或 SSE 转回 Responses 格式。客户端直接调用 `/v1/chat/completions` 时仍原样透传。
 
-转换支持文本、输入图片、function/custom/namespace 工具、工具结果、reasoning、结构化输出、流式 usage 和缺失 `[DONE]` 时的终止事件补全。`previous_response_id`、`item_reference`、后台响应、托管 `web_search`/`file_search`/computer 工具以及 `input_file` 无法无损映射，网关会返回明确的 `400`，不会静默丢弃字段。
+转换支持文本、输入图片、function/custom/namespace 工具、工具结果、reasoning、结构化输出、流式 usage 和缺失 `[DONE]` 时的终止事件补全。与 cc-switch 的 ProxyChat 路径一致，Responses 的 `web_search` hosted tool 会在本地转换时过滤，并在没有其他可转换工具时同步删除 `tool_choice` 和 `parallel_tool_calls`，避免 Chat Completions 上游返回协议错误；这只是兼容过滤，不会在本地执行网页搜索。`previous_response_id`、`item_reference`、后台响应、`file_search`/computer 工具以及 `input_file` 无法无损映射，网关仍返回明确的 `400`。
 
-生成 Codex 模型目录时，Chat Completions 模型不会包含 `web_search_tool_type`。Responses 模型也默认不包含该字段，只有配置 `supportsHostedWebSearch: true` 时才会按模型模板显式恢复。
+生成 Codex 模型目录时会按上游格式选择工具 profile。`chat-completions` 使用 ProxyChat profile，保留 Codex 的 freeform `apply_patch`，由本地网关把 Responses 请求和可转换工具调用转换成 Chat Completions，并过滤 hosted web search；`responses` 使用 NativeResponses profile，删除 `apply_patch_tool_type`、`model_messages` 和自定义 `tools`，并通过 `shell_type = "shell_command"` 提供编辑能力，避免向原生 Responses 上游发送不兼容的 custom 工具。
 
-Codex 配置仍固定使用 `wire_api = "responses"`。上游协议只在 Provider 中选择，不需要改动 Codex 配置。
+两个 profile 默认都不包含 `web_search_tool_type`；只有 Responses 模型配置 `supportsHostedWebSearch: true` 时才会按模型模板显式恢复。该目录字段只描述能力，Codex 仍可能从运行时默认配置生成 `web_search`，因此 Chat Completions 路径始终以请求时过滤为最终保障。Codex 配置固定使用 `wire_api = "responses"` 并请求本地网关，上游协议只在 Provider 路由中选择，不需要也不应按上游格式改动 Codex Provider。
 
 ## 调度策略
 

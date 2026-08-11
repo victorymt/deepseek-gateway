@@ -185,6 +185,7 @@ def configure_keys(existing) -> list[dict]:
             "key": secret,
             "weight": int(weight) if weight.is_integer() else weight,
             "enabled": item.get("enabled", True) is not False,
+            "alwaysTry": item.get("alwaysTry", False) is True,
         })
         names.add(name)
         secrets_seen.add(secret)

@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough, Transform } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import {
   ChatCompletionsSseTransform,
   chatCompletionToResponses,
@@ -278,6 +279,10 @@ function loadConfig(opts) {
     _persistedConfig: { value: persistedConfig, writable: true },
     _providerOverrides: { value: providerOverrides, writable: true },
     _scalarOverrides: { value: scalarOverrides, writable: true },
+    _managementRevision: {
+      value: crypto.randomInt(1, 281474976710656),
+      writable: true,
+    },
   });
   return normalized;
 }
@@ -507,28 +512,53 @@ function mockBalanceResponse() {
 }
 
 async function refreshKeyBalance(runtime, key) {
-  if (key.balanceRefreshPromise) return key.balanceRefreshPromise;
+  const generation = runtime.balanceRefreshGeneration;
+  if (
+    key.balanceRefreshTask
+    && key.balanceRefreshTask.generation === generation
+  ) {
+    return key.balanceRefreshTask.promise;
+  }
+  const sequence = (key.balanceRefreshSequence || 0) + 1;
+  key.balanceRefreshSequence = sequence;
   const refreshPromise = (async () => {
     try {
-      key.balance = await fetchKeyBalance(runtime, key);
+      const balance = await fetchKeyBalance(runtime, key);
+      if (
+        runtime.balanceRefreshGeneration !== generation
+        || key.balanceRefreshSequence !== sequence
+        || !runtime.pool.keys.includes(key)
+      ) {
+        return balance;
+      }
+      key.balance = balance;
       key.balanceUpdatedAt = Date.now();
       key.balanceError = '';
-      return key.balance;
+      return balance;
     } catch (error) {
-      key.balanceError = error.message;
+      if (
+        runtime.balanceRefreshGeneration === generation
+        && key.balanceRefreshSequence === sequence
+        && runtime.pool.keys.includes(key)
+      ) {
+        key.balanceError = error.message;
+      }
       throw error;
     }
   })();
-  key.balanceRefreshPromise = refreshPromise;
+  const task = { generation, promise: refreshPromise };
+  key.balanceRefreshTask = task;
   try {
     return await refreshPromise;
   } finally {
-    if (key.balanceRefreshPromise === refreshPromise) key.balanceRefreshPromise = null;
+    if (key.balanceRefreshTask === task) key.balanceRefreshTask = null;
   }
 }
 
 function startBalanceRefresh(runtime, log) {
   const { pool, settings } = runtime;
+  const generation = Symbol('balance-refresh');
+  runtime.balanceRefreshGeneration = generation;
   if (!runtime.provider.enabled) return () => {};
   const query = effectiveBalanceQuery(runtime.provider);
   if (!query) {
@@ -541,8 +571,6 @@ function startBalanceRefresh(runtime, log) {
   }
   const refreshMs = query.refreshMs ?? settings.balanceRefreshMs;
   if (refreshMs <= 0) return () => {};
-  const generation = Symbol('balance-refresh');
-  runtime.balanceRefreshGeneration = generation;
   let refreshing = false;
   let stopped = false;
   const refresh = async () => {
@@ -555,11 +583,7 @@ function startBalanceRefresh(runtime, log) {
         while (!stopped && nextIndex < keys.length) {
           const key = keys[nextIndex++];
           try {
-            const balance = await fetchKeyBalance(runtime, key);
-            if (stopped || runtime.balanceRefreshGeneration !== generation || !pool.keys.includes(key)) continue;
-            key.balance = balance;
-            key.balanceUpdatedAt = Date.now();
-            key.balanceError = '';
+            await refreshKeyBalance(runtime, key);
           } catch (err) {
             if (stopped || runtime.balanceRefreshGeneration !== generation || !pool.keys.includes(key)) continue;
             key.balanceError = err.message;
@@ -879,7 +903,10 @@ function readModelResponse(res) {
       settled = true;
       const text = Buffer.concat(chunks).toString('utf8');
       if (res.statusCode < 200 || res.statusCode >= 300) {
-        reject(Object.assign(new Error(`HTTP ${res.statusCode}: ${text.slice(0, 512)}`), { statusCode: res.statusCode }));
+        reject(Object.assign(
+          new Error(`model endpoint returned HTTP ${res.statusCode}`),
+          { statusCode: res.statusCode },
+        ));
         return;
       }
       try {
@@ -1051,6 +1078,7 @@ function resolveRequestRoute(registry, body, requestUrl) {
   return {
     runtime,
     body: routedBody,
+    clientPath: pathname,
     requestedModel,
     gatewayModel: requestedModel || registry.settings.defaultModel,
     ...(upstreamModel ? { upstreamModel } : {}),
@@ -1071,7 +1099,7 @@ async function forwardOnce(runtime, key, clientReq, route, signal) {
   }
   headers.authorization = `Bearer ${key.key}`;
   headers.host = u.host;
-  if (route.responseAdapter) headers['accept-encoding'] = 'identity';
+  headers['accept-encoding'] = 'identity';
   if (body.length) headers['content-length'] = body.length;
   return new Promise((resolve, reject) => {
     const mod = u.protocol === 'https:' ? https : http;
@@ -1315,7 +1343,9 @@ async function relayAdaptedResponse(clientRes, upRes, key, pool, route, finish) 
     clientRes.end(output);
     finish({ status: 200 });
   } catch (error) {
-    finish({ networkError: true });
+    const clientAbort = clientRes.destroyed && !clientRes.writableEnded;
+    finish(clientAbort ? { clientAbort: true } : { networkError: true });
+    if (clientAbort) return;
     if (!clientRes.headersSent) {
       clientRes.writeHead(error.statusCode || 502, { 'content-type': 'application/json' });
     }
@@ -1323,19 +1353,186 @@ async function relayAdaptedResponse(clientRes, upRes, key, pool, route, finish) 
   }
 }
 
-function createUsageTracker(pool) {
-  let usageBuffer = '';
-  return new Transform({
+function streamProtocolForRoute(route, contentType) {
+  if (!contentType.includes('text/event-stream')) return '';
+  if (['/v1/responses', '/responses'].includes(route.clientPath)) return 'responses';
+  if (['/v1/chat/completions', '/chat/completions'].includes(route.clientPath)) return 'chat-completions';
+  return '';
+}
+
+function parseSseBlock(block) {
+  let event = '';
+  const data = [];
+  for (const rawLine of block.split('\n')) {
+    if (!rawLine || rawLine.startsWith(':')) continue;
+    const separator = rawLine.indexOf(':');
+    const field = separator < 0 ? rawLine : rawLine.slice(0, separator);
+    let value = separator < 0 ? '' : rawLine.slice(separator + 1);
+    if (value.startsWith(' ')) value = value.slice(1);
+    if (field === 'event') event = value;
+    if (field === 'data') data.push(value);
+  }
+  return { event, data: data.join('\n') };
+}
+
+function createUsageTracker(pool, protocol = '') {
+  const maxTrackedEventChars = 16 * 1024 * 1024;
+  const maxRawUsageChars = 1024 * 1024;
+  const decoder = new StringDecoder('utf8');
+  let eventChunks = [];
+  let eventChars = 0;
+  let eventBufferOverflow = false;
+  let previousWasNewline = false;
+  let pendingCarriageReturn = false;
+  let rawBuffer = '';
+  let rawBufferTruncated = false;
+  let latestTotalTokens;
+
+  const recordPayloadUsage = payload => {
+    const totalTokens = payload?.usage?.total_tokens
+      ?? payload?.response?.usage?.total_tokens;
+    if (Number.isFinite(Number(totalTokens))) latestTotalTokens = Number(totalTokens);
+  };
+
+  const processBlock = block => {
+    if (!block.trim()) return;
+    const { event, data } = parseSseBlock(block);
+    if (!event && !data) return;
+
+    let payload;
+    if (data && data.trim() !== '[DONE]') {
+      try { payload = JSON.parse(data); } catch {}
+    }
+    recordPayloadUsage(payload);
+
+    if (protocol === 'chat-completions' && data.trim() === '[DONE]') {
+      tracker.protocolTerminal = 'completed';
+      return;
+    }
+    if (protocol !== 'responses') return;
+    const payloadType = typeof payload?.type === 'string' ? payload.type : '';
+    const type = event || payloadType;
+    if (!payload || !payloadType || (event && event !== payloadType)) return;
+    const expectedResponseStatus = {
+      'response.completed': 'completed',
+      'response.incomplete': 'incomplete',
+      'response.failed': 'failed',
+    }[type];
+    if (
+      expectedResponseStatus
+      && payload.response?.status !== expectedResponseStatus
+    ) {
+      return;
+    }
+    if (['response.completed', 'response.incomplete'].includes(type)) {
+      tracker.protocolTerminal = type.slice('response.'.length);
+    } else if (type === 'response.failed' || type === 'error') {
+      tracker.protocolTerminal = 'failed';
+    }
+  };
+
+  const normalizeEventLineEndings = (decoded, flush = false) => {
+    let normalized = decoded;
+    if (pendingCarriageReturn) {
+      if (normalized.startsWith('\n')) normalized = normalized.slice(1);
+      normalized = `\n${normalized}`;
+      pendingCarriageReturn = false;
+    }
+    if (normalized.endsWith('\r')) {
+      normalized = normalized.slice(0, -1);
+      pendingCarriageReturn = true;
+    }
+    normalized = normalized.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (flush && pendingCarriageReturn) {
+      normalized += '\n';
+      pendingCarriageReturn = false;
+    }
+    return normalized;
+  };
+
+  const appendEventText = decoded => {
+    const appendFragment = fragment => {
+      if (!fragment || eventBufferOverflow) return;
+      if (eventChars + fragment.length > maxTrackedEventChars) {
+        eventBufferOverflow = true;
+        eventChunks = [];
+        eventChars = 0;
+        return;
+      }
+      eventChunks.push(fragment);
+      eventChars += fragment.length;
+    };
+    const finishEvent = () => {
+      if (!eventBufferOverflow && eventChars) {
+        processBlock(eventChunks.join(''));
+      }
+      eventChunks = [];
+      eventChars = 0;
+      eventBufferOverflow = false;
+    };
+
+    let offset = 0;
+    for (;;) {
+      const newline = decoded.indexOf('\n', offset);
+      if (newline < 0) {
+        const fragment = decoded.slice(offset);
+        if (fragment) {
+          appendFragment(fragment);
+          previousWasNewline = false;
+        }
+        return;
+      }
+      const fragment = decoded.slice(offset, newline);
+      if (fragment) {
+        appendFragment(fragment);
+        previousWasNewline = false;
+      }
+      if (previousWasNewline) {
+        finishEvent();
+        previousWasNewline = false;
+      } else {
+        appendFragment('\n');
+        previousWasNewline = true;
+      }
+      offset = newline + 1;
+    }
+  };
+
+  const tracker = new Transform({
     transform(chunk, enc, cb) {
-      usageBuffer = (usageBuffer + chunk.toString('utf8')).slice(-65536);
+      const decoded = decoder.write(chunk);
+      if (protocol) {
+        appendEventText(normalizeEventLineEndings(decoded));
+      } else {
+        rawBuffer += decoded;
+        if (rawBuffer.length > maxRawUsageChars) {
+          rawBufferTruncated = true;
+          rawBuffer = rawBuffer.slice(-maxRawUsageChars);
+        }
+      }
       cb(null, chunk);
     },
     flush(cb) {
-      const matches = [...usageBuffer.matchAll(/"total_tokens"\s*:\s*(\d+)/g)];
-      if (matches.length) pool.recordTokens(matches.at(-1)[1]);
+      const decoded = decoder.end();
+      if (protocol) {
+        appendEventText(normalizeEventLineEndings(decoded, true));
+        if (!eventBufferOverflow && eventChars) processBlock(eventChunks.join(''));
+      } else {
+        rawBuffer += decoded;
+        if (!rawBufferTruncated) {
+          try { recordPayloadUsage(JSON.parse(rawBuffer)); } catch {}
+        }
+        if (latestTotalTokens === undefined) {
+          const matches = [...rawBuffer.matchAll(/"total_tokens"\s*:\s*(\d+)/g)];
+          if (matches.length) latestTotalTokens = Number(matches.at(-1)[1]);
+        }
+      }
+      if (latestTotalTokens !== undefined) pool.recordTokens(latestTotalTokens);
       cb();
     },
   });
+  tracker.protocolTerminal = '';
+  return tracker;
 }
 
 async function relayResponse(clientRes, upRes, key, pool, preRecorded, route, releaseRuntime) {
@@ -1355,8 +1552,17 @@ async function relayResponse(clientRes, upRes, key, pool, preRecorded, route, re
   }
   const headers = responseHeaders(upRes, key, route);
   clientRes.writeHead(upRes.statusCode, headers);
-  const tracker = createUsageTracker(pool);
-  upRes.on('end', () => finish({ status: 200 }));
+  const contentType = String(upRes.headers['content-type'] || '').toLowerCase();
+  const streamProtocol = streamProtocolForRoute(route, contentType);
+  const tracker = createUsageTracker(pool, streamProtocol);
+  tracker.on('end', () => {
+    if (streamProtocol && !tracker.protocolTerminal) {
+      finish({ networkError: true });
+      if (!clientRes.writableEnded) clientRes.destroy();
+      return;
+    }
+    finish(tracker.protocolTerminal === 'failed' ? { networkError: true } : { status: 200 });
+  });
   upRes.on('error', () => {
     finish({ networkError: true });
     if (!clientRes.writableEnded) clientRes.destroy();
@@ -1426,7 +1632,13 @@ function mockResponse(key, body, responseAdapter = '', signal) {
         : [
             JSON.stringify({ type: 'response.output_item.added', gateway_key_name: key.name }),
             JSON.stringify({ type: 'response.output_text.delta', delta: 'hello' }),
-            JSON.stringify({ type: 'response.completed', usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 } }),
+            JSON.stringify({
+              type: 'response.completed',
+              response: {
+                status: 'completed',
+                usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+              },
+            }),
           ];
       const writeAll = () => {
         if (stream && status === 200) {
@@ -1450,7 +1662,7 @@ function mockResponse(key, body, responseAdapter = '', signal) {
             pt.write(`data: ${frames[i++]}\n\n`);
           } else {
             clearInterval(iv);
-            pt.end();
+            pt.end('data: [DONE]\n\n');
           }
         }, 60);
         pt.on('close', () => clearInterval(iv));
@@ -1553,6 +1765,7 @@ function publicProvider(provider) {
 function publicProviderConfig(cfg) {
   return {
     schemaVersion: 2,
+    revision: cfg._managementRevision || 1,
     setupPending: cfg.setupPending === true,
     defaultProvider: cfg.defaultProvider,
     defaultModel: cfg.defaultModel,
@@ -1700,6 +1913,21 @@ function sameOrigin(req) {
   }
 }
 
+function loopbackManagementHost(req) {
+  try {
+    const hostname = new URL(`http://${req.headers.host || ''}`).hostname
+      .replace(/^\[|\]$/g, '')
+      .toLowerCase();
+    return hostname === 'localhost'
+      || hostname === '::1'
+      || hostname === '0:0:0:0:0:0:0:1'
+      || /^127(?:\.\d{1,3}){3}$/.test(hostname)
+      || /^::ffff:127(?:\.\d{1,3}){3}$/.test(hostname);
+  } catch {
+    return false;
+  }
+}
+
 function requestProtocol(req) {
   if (req.socket.encrypted) return 'https:';
   const remoteAddress = String(req.socket.remoteAddress || '');
@@ -1738,6 +1966,7 @@ function commitProviderConfig(cfg, registry, next) {
     throw error;
   }
   cfg._persistedConfig = normalizeConfig(serializableConfig(next), { allowSetup: true });
+  cfg._managementRevision = (cfg._managementRevision || 1) + 1;
 }
 
 function managementValidation(operation, statusCode = 400) {
@@ -2294,6 +2523,11 @@ async function handleRequest(cfg, registry, req, res, log, startedAt) {
     return;
   }
   const isManagementPath = url === '/' || url.startsWith('/api/');
+  if (isManagementPath && !cfg.adminToken && !loopbackManagementHost(req)) {
+    res.writeHead(403, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'untrusted management host' } }));
+    return;
+  }
   const authorized = isManagementPath
     ? adminBearerOk || sessionOk
     : url === '/health'

@@ -43,6 +43,7 @@ export function ProviderManager({
     loading,
     modelFetchError,
     notice,
+    originalBaseUrl,
     openCreate,
     openEdit,
     patchProvider,
@@ -132,6 +133,7 @@ export function ProviderManager({
         copy={t}
         draft={draft}
         editingId={editingId}
+        originalBaseUrl={originalBaseUrl}
         saving={saving}
         error={dialogError}
         balanceTestError={balanceTestError}

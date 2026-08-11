@@ -19,6 +19,7 @@ type ProviderKeyFieldsProps = {
   copy: ProviderCopy
   draft: ProviderDraft
   editingId: string | null
+  requireExistingSecrets: boolean
   setDraft: Dispatch<SetStateAction<ProviderDraft>>
 }
 
@@ -26,6 +27,7 @@ export function ProviderKeyFields({
   copy: t,
   draft,
   editingId,
+  requireExistingSecrets,
   setDraft,
 }: ProviderKeyFieldsProps) {
   const enabledKeyCount = draft.keys.filter((item) => item.enabled).length
@@ -65,9 +67,7 @@ export function ProviderKeyFields({
             className="grid items-start gap-3 sm:grid-cols-[1fr_1.4fr_7rem_7rem_auto]"
           >
             <Field>
-              <FieldLabel htmlFor={`key-name-${index}`}>
-                {t.keyName}
-              </FieldLabel>
+              <FieldLabel htmlFor={`key-name-${index}`}>{t.keyName}</FieldLabel>
               <Input
                 id={`key-name-${index}`}
                 value={key.name}
@@ -92,7 +92,9 @@ export function ProviderKeyFields({
                 id={`key-secret-${index}`}
                 type="password"
                 value={key.key}
-                required={!editingId || !key.maskedKey}
+                required={
+                  !editingId || !key.maskedKey || requireExistingSecrets
+                }
                 placeholder={key.maskedKey || "sk-..."}
                 autoComplete="new-password"
                 onChange={(event) =>
@@ -107,7 +109,9 @@ export function ProviderKeyFields({
                 }
               />
               {key.maskedKey && (
-                <FieldDescription>{t.keepKey}</FieldDescription>
+                <FieldDescription>
+                  {requireExistingSecrets ? t.reenterKey : t.keepKey}
+                </FieldDescription>
               )}
             </Field>
             <Field>

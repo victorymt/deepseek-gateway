@@ -8,7 +8,7 @@ import { Transform } from 'node:stream';
 const CUSTOM_TOOL_INPUT_FIELD = 'input';
 const TOOL_SEARCH_PROXY_NAME = 'tool_search';
 const CHAT_TOOL_NAME_MAX_LENGTH = 64;
-const DROPPED_HOSTED_TOOL_TYPES = new Set([
+const FILTERED_HOSTED_TOOL_TYPES = new Set([
   'web_search',
   'web_search_preview',
   'web_search_preview_2025_03_11',
@@ -71,7 +71,7 @@ function createToolContext(tools) {
     }
     if (!isObject(tool)) throw adapterError('tools must contain objects');
     const type = String(tool.type || 'function');
-    if (DROPPED_HOSTED_TOOL_TYPES.has(type)) return;
+    if (FILTERED_HOSTED_TOOL_TYPES.has(type)) return;
     if (type === 'namespace') {
       const children = tool.tools ?? tool.children;
       if (!Array.isArray(children)) throw adapterError(`namespace tool ${tool.name || ''} must contain tools`);
@@ -383,9 +383,7 @@ function responseFormatFromText(text) {
 function chatToolChoice(choice, context) {
   if (typeof choice === 'string' || choice === null) return choice;
   if (!isObject(choice)) throw adapterError('tool_choice must be a string or object');
-  if (DROPPED_HOSTED_TOOL_TYPES.has(String(choice.type || ''))) {
-    throw adapterError(`tool_choice requires ${choice.type}, which is not supported by Chat Completions upstreams`);
-  }
+  if (FILTERED_HOSTED_TOOL_TYPES.has(String(choice.type || ''))) return undefined;
   if (choice.type === 'allowed_tools') throw adapterError('allowed_tools tool_choice is not supported by Chat Completions upstreams');
   const name = choice.type === 'tool_search' ? TOOL_SEARCH_PROXY_NAME : String(choice.name || choice.function?.name || '');
   const namespace = String(choice.namespace || '');
@@ -544,7 +542,9 @@ function responseToolItem(call, index, context, status = 'completed', reasoning 
 }
 
 function responseStatus(finishReason) {
-  return ['length', 'max_tokens', 'content_filter'].includes(String(finishReason || '')) ? 'incomplete' : 'completed';
+  const reason = String(finishReason || '').trim();
+  if (!reason) return 'incomplete';
+  return ['length', 'max_tokens', 'content_filter'].includes(reason) ? 'incomplete' : 'completed';
 }
 
 function baseResponse({ id, createdAt, model, status, output, usage, finishReason, error = null }) {
@@ -577,7 +577,7 @@ export function chatCompletionToResponses(payload, context = createToolContext([
   const createdAt = Number(payload.created) || Math.floor(Date.now() / 1000);
   const model = String(payload.model || '');
   const finishReason = choice.finish_reason;
-  const status = responseStatus(finishReason);
+  let status = responseStatus(finishReason);
   const { text, reasoning } = messageTextAndReasoning(choice.message);
   const output = [];
   if (reasoning) {
@@ -601,6 +601,8 @@ export function chatCompletionToResponses(payload, context = createToolContext([
     const item = responseToolItem(toolCalls[index], index, context, status, reasoning);
     if (item) output.push(item);
   }
+  if (!finishReason && !output.length) status = 'failed';
+  const normalizedFinishReason = !finishReason && status === 'incomplete' ? 'length' : finishReason;
   return baseResponse({
     id,
     createdAt,
@@ -608,7 +610,10 @@ export function chatCompletionToResponses(payload, context = createToolContext([
     status,
     output,
     usage: chatUsageToResponsesUsage(payload.usage),
-    finishReason,
+    finishReason: normalizedFinishReason,
+    error: status === 'failed'
+      ? { message: 'Upstream Chat Completions response ended before sending finish_reason', type: 'response_truncated' }
+      : null,
   });
 }
 
@@ -980,11 +985,19 @@ class ChatToResponsesState {
   fail(message, type = 'stream_error') {
     if (this.completed) return '';
     const error = { message: String(message), type };
+    const events = [
+      ...this.ensureStarted(),
+      ...this.flushInlineThink(),
+      ...this.finalizeReasoning(),
+      ...this.finalizeText('incomplete'),
+      ...this.finalizeTools('incomplete'),
+    ];
     const response = this.response('failed', this.completedOutputItems(), error);
     this.finalResponse = response;
     this.completed = true;
     this.terminal = 'failed';
-    return this.event('response.failed', { response });
+    events.push(this.event('response.failed', { response }));
+    return events.join('');
   }
 }
 
@@ -1153,10 +1166,10 @@ export function chatCompletionToResponsesSse(payload, context = createToolContex
     created: payload.created,
     model: payload.model,
     usage: payload.usage,
-    choices: [{ delta: choice.message, finish_reason: choice.finish_reason || 'stop' }],
+    choices: [{ delta: choice.message, finish_reason: choice.finish_reason }],
   };
   return {
-    body: [...state.handleChatChunk(chunk), ...state.finalize()].join(''),
+    body: [...state.handleChatChunk(chunk), ...state.endOfStream()].join(''),
     usage: state.latestUsage,
   };
 }

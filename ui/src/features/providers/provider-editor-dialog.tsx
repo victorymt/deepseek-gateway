@@ -1,8 +1,4 @@
-import type {
-  Dispatch,
-  FormEventHandler,
-  SetStateAction,
-} from "react"
+import type { Dispatch, FormEventHandler, SetStateAction } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -37,6 +33,7 @@ import { Switch } from "@/components/ui/switch"
 import { ProviderBalanceQueryFields } from "./provider-balance-query-fields"
 import type { ProviderCopy } from "./provider-copy"
 import {
+  providerOriginsDiffer,
   setProviderUpstreamFormat,
   type FetchedModel,
   type ProviderDraft,
@@ -49,6 +46,7 @@ type ProviderEditorDialogProps = {
   copy: ProviderCopy
   draft: ProviderDraft
   editingId: string | null
+  originalBaseUrl: string
   saving: boolean
   error: string
   balanceTestError: string
@@ -70,6 +68,7 @@ export function ProviderEditorDialog({
   copy: t,
   draft,
   editingId,
+  originalBaseUrl,
   saving,
   error,
   balanceTestError,
@@ -102,9 +101,7 @@ export function ProviderEditorDialog({
           <FieldGroup>
             <div className="grid gap-4 sm:grid-cols-2">
               <Field>
-                <FieldLabel htmlFor="provider-id">
-                  {t.providerId}
-                </FieldLabel>
+                <FieldLabel htmlFor="provider-id">{t.providerId}</FieldLabel>
                 <Input
                   id="provider-id"
                   value={draft.id}
@@ -174,10 +171,7 @@ export function ProviderEditorDialog({
                   )
                 }
               >
-                <SelectTrigger
-                  id="provider-upstream-format"
-                  className="w-full"
-                >
+                <SelectTrigger id="provider-upstream-format" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -234,6 +228,10 @@ export function ProviderEditorDialog({
               copy={t}
               draft={draft}
               editingId={editingId}
+              requireExistingSecrets={providerOriginsDiffer(
+                originalBaseUrl,
+                draft.baseUrl
+              )}
               setDraft={setDraft}
             />
           </FieldGroup>

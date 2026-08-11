@@ -1,8 +1,4 @@
-import type {
-  BalanceQuery,
-  BalanceResult,
-  Provider,
-} from "@/gateway-types"
+import type { BalanceQuery, BalanceResult, Provider } from "@/gateway-types"
 
 export type InputModality = "text" | "image"
 
@@ -41,6 +37,12 @@ export type ProviderDraft = {
   models: ModelDraft[]
   keys: KeyDraft[]
   balanceQuery: BalanceQuery
+}
+
+type ProviderDraftPayloadOptions = {
+  baseline?: ProviderDraft | null
+  originalBaseUrl?: string
+  originChangedMessage?: string
 }
 
 export const DEEPSEEK_BALANCE_SCRIPT = `({
@@ -165,17 +167,98 @@ export function providerToDraft(provider: Provider): ProviderDraft {
   }
 }
 
-export function providerDraftPayload(draft: ProviderDraft) {
+function persistedKeyDraft(key: KeyDraft) {
   return {
-    ...draft,
-    keys: draft.keys.map(({ name, originalName, key, weight, enabled, alwaysTry }) => ({
-      name,
-      ...(originalName && originalName !== name ? { originalName } : {}),
-      key,
-      weight,
-      enabled,
-      alwaysTry,
-    })),
+    name: key.name,
+    originalName: key.originalName,
+    key: key.key,
+    weight: key.weight,
+    enabled: key.enabled,
+    alwaysTry: key.alwaysTry,
+  }
+}
+
+export function providerOriginsDiffer(left: string, right: string) {
+  if (!left || !right) return false
+  try {
+    return new URL(left).origin !== new URL(right).origin
+  } catch {
+    return true
+  }
+}
+
+export function providerDraftKeysChanged(
+  draft: ProviderDraft,
+  baseline?: ProviderDraft | null
+) {
+  if (!baseline) return true
+  return (
+    JSON.stringify(draft.keys.map(persistedKeyDraft)) !==
+    JSON.stringify(baseline.keys.map(persistedKeyDraft))
+  )
+}
+
+export function providerDraftPayload(
+  draft: ProviderDraft,
+  options: ProviderDraftPayloadOptions = {}
+) {
+  const provider = {
+    id: draft.id,
+    name: draft.name,
+    baseUrl: draft.baseUrl,
+    upstreamFormat: draft.upstreamFormat,
+    enabled: draft.enabled,
+    models: draft.models,
+    balanceQuery: draft.balanceQuery,
+  }
+  const originChanged = providerOriginsDiffer(
+    options.originalBaseUrl || "",
+    draft.baseUrl
+  )
+  if (
+    originChanged &&
+    draft.keys.some((key) => key.maskedKey && !key.key.trim())
+  ) {
+    throw new Error(
+      options.originChangedMessage ||
+        "Re-enter every existing API key when changing the provider origin."
+    )
+  }
+
+  const includeKeys =
+    originChanged || providerDraftKeysChanged(draft, options.baseline)
+  return {
+    ...provider,
+    ...(includeKeys
+      ? {
+          keys: draft.keys.map(
+            ({ name, originalName, key, weight, enabled, alwaysTry }) => ({
+              name,
+              ...(originalName && originalName !== name
+                ? { originalName }
+                : {}),
+              key,
+              weight,
+              enabled,
+              alwaysTry,
+            })
+          ),
+        }
+      : {}),
+  }
+}
+
+export function providerUpdatePayload(
+  draft: ProviderDraft,
+  expectedRevision: number,
+  options: ProviderDraftPayloadOptions = {}
+) {
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+    throw new Error("A valid provider revision is required before saving.")
+  }
+  return {
+    ...providerDraftPayload(draft, options),
+    expectedRevision,
   }
 }
 
@@ -183,11 +266,7 @@ export function addFetchedModelToDraft(
   draft: ProviderDraft,
   model: FetchedModel
 ): ProviderDraft {
-  if (
-    draft.models.some(
-      (item) => item.upstreamModel === model.upstreamModel
-    )
-  ) {
+  if (draft.models.some((item) => item.upstreamModel === model.upstreamModel)) {
     return draft
   }
 
@@ -214,9 +293,7 @@ export function addFetchedModelToDraft(
 
   return {
     ...draft,
-    models: hasOnlyEmptyModel
-      ? [nextModel]
-      : [...draft.models, nextModel],
+    models: hasOnlyEmptyModel ? [nextModel] : [...draft.models, nextModel],
   }
 }
 

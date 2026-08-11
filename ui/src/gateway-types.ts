@@ -121,6 +121,7 @@ export type Provider = {
 
 export type ProviderConfig = {
   schemaVersion: number
+  revision: number
   setupPending: boolean
   defaultProvider: string
   defaultModel: string

@@ -5,9 +5,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeConfig, providerModelAlias } from './config-core.mjs';
+import { codexModelAlias, normalizeConfig } from './config-core.mjs';
 
-export { providerModelAlias } from './config-core.mjs';
+export { codexModelAlias, providerModelAlias } from './config-core.mjs';
 
 export const CODEX_PROVIDER_ID = 'multi-provider-gateway';
 export const CODEX_ENV_KEY = 'DEEPSEEK_GATEWAY_TOKEN';
@@ -40,6 +40,20 @@ function normalizeCatalogConfig(config) {
   return normalizeConfig(config);
 }
 
+function codexModelAliasForInput(value) {
+  const candidate = String(value || '').trim();
+  const separator = candidate.indexOf('--');
+  if (separator < 0) return candidate;
+  return codexModelAlias(
+    candidate.slice(0, separator),
+    candidate.slice(separator + 2),
+  );
+}
+
+function codexDefaultModel(config) {
+  return codexModelAliasForInput(config.defaultModel);
+}
+
 function authRequired(config, options = {}) {
   if (typeof options.authRequired === 'boolean') return options.authRequired;
   const mode = options.auth || 'auto';
@@ -61,18 +75,19 @@ export function buildModelCatalog(config) {
   for (const provider of config.providers) {
     if (!provider.enabled) continue;
     for (const model of provider.models) {
-      const alias = providerModelAlias(provider.id, model.id);
+      const alias = codexModelAlias(provider.id, model.id);
       if (aliases.has(alias)) throw new Error(`duplicate model alias: ${alias}`);
       aliases.add(alias);
       const template = bySlug.get(model.upstreamModel) || fallback;
       models.push({
         ...structuredClone(template),
         slug: alias,
-        display_name: `${provider.name} · ${model.name}`,
+        display_name: alias,
         description: `${model.upstreamModel} through ${provider.name}`,
         priority: priority++,
         visibility: 'list',
         supported_in_api: true,
+        input_modalities: [...model.inputModalities],
         // Codex CLI hides MCP tools (ToolExposure::Deferred) when
         // supports_search_tool is true and the upstream does not implement
         // tool_search (see deepseek-ai/awesome-deepseek-agent#341 and
@@ -90,7 +105,7 @@ export function buildCodexToml({ config, gatewayUrl, modelsPath, authRequired: r
   config = normalizeCatalogConfig(config);
   const baseUrl = gatewayApiUrl(gatewayUrl);
   const lines = [
-    `model = ${tomlString(config.defaultModel)}`,
+    `model = ${tomlString(codexDefaultModel(config))}`,
     `model_provider = ${tomlString(CODEX_PROVIDER_ID)}`,
     `model_catalog_json = ${tomlString(modelsPath)}`,
     '',
@@ -115,14 +130,15 @@ export function buildCodexArtifacts(config, options = {}) {
   const modelsPath = options.modelsPath || path.join(os.homedir(), '.codex', 'gateway-models.json');
   const requireAuth = authRequired(config, options);
   const catalog = buildModelCatalog(config);
-  if (!catalog.models.some(model => model.slug === config.defaultModel)) {
+  const defaultModel = codexDefaultModel(config);
+  if (!catalog.models.some(model => model.slug === defaultModel)) {
     throw new Error(`defaultModel is not present in the generated catalog: ${config.defaultModel}`);
   }
   return {
     providerId: CODEX_PROVIDER_ID,
     authRequired: requireAuth,
     envKey: requireAuth ? CODEX_ENV_KEY : null,
-    defaultModel: config.defaultModel,
+    defaultModel,
     gatewayUrl: gatewayApiUrl(gatewayUrl),
     modelsPath,
     configToml: buildCodexToml({ config, gatewayUrl, modelsPath, authRequired: requireAuth }),
@@ -161,7 +177,8 @@ function runCli() {
     modelsPath: args.modelsPath || args.catalogOutput,
     auth: args.auth,
   });
-  if (args.model && !artifacts.catalog.models.some(model => model.slug === args.model)) {
+  const requestedModel = args.model ? codexModelAliasForInput(args.model) : null;
+  if (requestedModel && !artifacts.catalog.models.some(model => model.slug === requestedModel)) {
     throw new Error(`model alias is not present in the generated catalog: ${args.model}`);
   }
   if (args.catalogOutput) {
@@ -169,7 +186,7 @@ function runCli() {
     fs.chmodSync(args.catalogOutput, 0o600);
   }
   if (args.printToml) process.stdout.write(artifacts.configToml);
-  if (args.printModel) process.stdout.write(`${artifacts.defaultModel}\n`);
+  if (args.printModel) process.stdout.write(`${requestedModel || artifacts.defaultModel}\n`);
   if (args.printAuth) process.stdout.write(`${artifacts.authRequired ? 'required' : 'none'}\n`);
 }
 

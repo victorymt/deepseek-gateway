@@ -23,8 +23,10 @@ import {
 } from './balance-script.mjs';
 import { buildCodexArtifacts } from './codex-config.mjs';
 import { prepareKeyImport } from './key-import.mjs';
+import { createManagementApi } from './management-api.mjs';
 import {
   DEFAULT_UPSTREAM,
+  codexModelAlias,
   keyFingerprint,
   normalizeBaseUrl,
   normalizeBalanceQuery,
@@ -660,7 +662,9 @@ class ProviderRegistry {
     for (const runtime of this.entries.values()) {
       if (!runtime.provider.enabled) continue;
       for (const model of runtime.provider.models) {
-        this.aliases.set(providerModelAlias(runtime.provider.id, model.id), { runtime, model });
+        const route = { runtime, model };
+        this.aliases.set(providerModelAlias(runtime.provider.id, model.id), route);
+        this.aliases.set(codexModelAlias(runtime.provider.id, model.id), route);
       }
     }
   }
@@ -815,11 +819,11 @@ function modelDraftIdentifier(raw, used = new Set()) {
   const base = String(raw || '')
     .normalize('NFKC')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
+    .replace(/[^a-z0-9._\/:+-]+/g, '-')
     .replace(/-{2,}/g, '-')
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
     .slice(0, 63)
-    .replace(/-+$/, '') || 'model';
+    .replace(/[^a-z0-9]+$/, '') || 'model';
   let id = base;
   let suffix = 2;
   while (used.has(id)) {
@@ -938,6 +942,23 @@ function rewriteResponsesRequestUrl(requestUrl) {
   return `${url.pathname}${url.search}`;
 }
 
+function contentHasImageInput(content) {
+  if (!Array.isArray(content)) return false;
+  return content.some(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    if (item.type === 'input_image' || item.type === 'image_url') return true;
+    return contentHasImageInput(item.content);
+  });
+}
+
+function requestHasImageInput(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const input = Array.isArray(payload.input) ? payload.input : [payload.input];
+  if (contentHasImageInput(input)) return true;
+  return Array.isArray(payload.messages)
+    && payload.messages.some(message => contentHasImageInput(message?.content));
+}
+
 function resolveRequestRoute(registry, body, requestUrl) {
   if (registry.settings.setupPending) {
     throw Object.assign(new Error('gateway setup required'), { statusCode: 503 });
@@ -954,12 +975,32 @@ function resolveRequestRoute(registry, body, requestUrl) {
   }
 
   const aliasRoute = requestedModel ? registry.resolveAlias(requestedModel) : null;
-  if (!aliasRoute && requestedModel.includes('--')) {
+  if (!aliasRoute && (
+    requestedModel.includes('--')
+    || /^[A-Z][a-z0-9-]*\.[a-z0-9][a-z0-9._\/:+-]*$/.test(requestedModel)
+  )) {
     throw Object.assign(new Error(`unknown or disabled model alias: ${requestedModel}`), { statusCode: 400 });
   }
   const runtime = aliasRoute?.runtime || registry.getDefault();
   if (!runtime || !runtime.provider.enabled) {
     throw Object.assign(new Error('default provider is unavailable'), { statusCode: 503 });
+  }
+  const configuredModel = aliasRoute?.model
+    || runtime.provider.models.find(model => (
+      model.upstreamModel === requestedModel || model.id === requestedModel
+    ))
+    || registry.resolveAlias(registry.settings.defaultModel)?.model
+    || runtime.provider.models[0];
+  if (
+    parsed
+    && requestHasImageInput(parsed)
+    && !configuredModel.inputModalities.includes('image')
+  ) {
+    const modelName = requestedModel || registry.settings.defaultModel || configuredModel.id;
+    throw Object.assign(
+      new Error(`model ${modelName} does not support image input`),
+      { statusCode: 400 },
+    );
   }
   let routedBody = body;
   let upstreamModel;
@@ -1742,229 +1783,35 @@ async function testBalanceQuery(cfg, input) {
   }
 }
 
-async function handleManagementApi(cfg, registry, req, res, parsedUrl) {
-  const pathname = parsedUrl.pathname;
-  const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent);
-  if (parts[0] !== 'api') return false;
-
-  if (!['GET', 'HEAD'].includes(req.method) && !sameOrigin(req)) {
-    writeJson(res, 403, { error: { message: 'cross-origin management request rejected' } });
-    return true;
-  }
-
-  if (pathname === '/api/models' && req.method === 'POST') {
-    const payload = await readJsonBody(req);
-    const input = managementValidation(() => resolveModelFetchInput(cfg, registry, payload));
-    const models = await fetchProviderModels(input.baseUrl, input.secret, input.modelsUrl);
-    writeJson(res, 200, { models });
-    return true;
-  }
-
-  if (pathname === '/api/balance/test' && req.method === 'POST') {
-    const payload = await readJsonBody(req);
-    const input = managementValidation(() => resolveBalanceTestInput(cfg, registry, payload));
-    try {
-      writeJson(res, 200, await testBalanceQuery(cfg, input));
-    } catch (error) {
-      if (!error.statusCode) error.statusCode = 502;
-      throw error;
-    }
-    return true;
-  }
-
-  if (pathname === '/api/providers' && req.method === 'GET') {
-    writeJson(res, 200, publicProviderConfig(cfg));
-    return true;
-  }
-  if (pathname === '/api/settings' && req.method === 'GET') {
-    writeJson(res, 200, publicSettings(cfg));
-    return true;
-  }
-  if (pathname === '/api/settings' && req.method === 'PATCH') {
-    const payload = await readJsonBody(req);
-    const next = managementValidation(() => nextSettingsConfig(cfg, payload));
-    commitSettingsConfig(cfg, registry, next);
-    if (Object.hasOwn(payload, 'token') || payload.clearToken === true) {
-      if (cfg.token) setSessionCookie(res, cfg.token);
-      else clearSessionCookie(res);
-    }
-    writeJson(res, 200, publicSettings(cfg));
-    return true;
-  }
-  if (pathname === '/api/providers' && req.method === 'POST') {
-    const payload = await readJsonBody(req);
-    const provider = managementValidation(() => normalizeProvider(payload));
-    if (cfg.providers.some(item => item.id === provider.id)) throw Object.assign(new Error(`provider ${provider.id} already exists`), { statusCode: 409 });
-    const makeDefault = cfg.setupPending || payload.makeDefault === true;
-    const changes = makeDefault ? {
-      setupPending: false,
-      defaultProvider: provider.id,
-      defaultModel: String(payload.defaultModel || providerModelAlias(provider.id, provider.models[0].id)),
-    } : {};
-    const next = managementValidation(() => nextProviderConfig(cfg, [...cfg.providers, provider], changes));
-    commitProviderConfig(cfg, registry, next);
-    writeJson(res, 201, publicProviderConfig(cfg));
-    return true;
-  }
-  if (pathname === '/api/codex/config' && req.method === 'GET') {
-    if (cfg.setupPending) {
-      throw Object.assign(new Error('complete gateway setup before generating Codex configuration'), { statusCode: 409 });
-    }
-    const gatewayUrl = `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host}`;
-    const artifacts = buildCodexArtifacts(serializableConfig(cfg), {
-      gatewayUrl,
-      authRequired: Boolean(cfg.token),
-    });
-    writeJson(res, 200, artifacts);
-    return true;
-  }
-
-  if (parts.length === 3 && parts[1] === 'providers') {
-    const providerId = parts[2];
-    const existing = cfg.providers.find(provider => provider.id === providerId);
-    if (!existing) throw Object.assign(new Error(`provider ${providerId} not found`), { statusCode: 404 });
-    if (req.method === 'PATCH') {
-      const payload = await readJsonBody(req);
-      if (payload.id && payload.id !== providerId) throw Object.assign(new Error('provider id cannot be changed'), { statusCode: 400 });
-      const provider = managementValidation(() => normalizeProvider({ ...existing, ...payload, id: providerId }, existing));
-      const providers = cfg.providers.map(item => item.id === providerId ? provider : item);
-      const changes = {};
-      if (payload.makeDefault === true) {
-        changes.defaultProvider = providerId;
-        changes.defaultModel = String(payload.defaultModel || providerModelAlias(providerId, provider.models[0].id));
-      } else if (cfg.defaultProvider === providerId) {
-        const aliases = new Set(provider.models.map(model => providerModelAlias(providerId, model.id)));
-        changes.defaultModel = aliases.has(payload.defaultModel || cfg.defaultModel)
-          ? (payload.defaultModel || cfg.defaultModel)
-          : providerModelAlias(providerId, provider.models[0].id);
-      }
-      const next = managementValidation(() => nextProviderConfig(cfg, providers, changes));
-      commitProviderConfig(cfg, registry, next);
-      writeJson(res, 200, publicProviderConfig(cfg));
-      return true;
-    }
-    if (req.method === 'DELETE') {
-      const providers = cfg.providers.filter(provider => provider.id !== providerId);
-      const changes = {};
-      if (cfg.defaultProvider === providerId) {
-        const replacement = providers.find(provider => provider.enabled);
-        if (replacement) {
-          changes.defaultProvider = replacement.id;
-          changes.defaultModel = providerModelAlias(replacement.id, replacement.models[0].id);
-        }
-      }
-      const next = managementValidation(() => nextProviderConfig(cfg, providers, changes), 409);
-      commitProviderConfig(cfg, registry, next);
-      writeJson(res, 200, publicProviderConfig(cfg));
-      return true;
-    }
-  }
-
-  if (parts.length >= 5 && parts[1] === 'providers' && parts[3] === 'keys') {
-    const providerId = parts[2];
-    if (parts.length === 5 && parts[4] === 'import' && req.method === 'POST') {
-      const provider = cfg.providers.find(item => item.id === providerId);
-      if (!provider) throw Object.assign(new Error(`provider ${providerId} not found`), { statusCode: 404 });
-      const payload = await readJsonBody(req);
-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-        throw Object.assign(new Error('key import payload must be an object'), { statusCode: 400 });
-      }
-      const allowed = new Set(['keysText', 'defaults']);
-      const unknown = Object.keys(payload).filter(field => !allowed.has(field));
-      if (unknown.length) throw Object.assign(new Error(`unknown key import fields: ${unknown.join(', ')}`), { statusCode: 400 });
-      const prepared = managementValidation(
-        () => prepareKeyImport(provider, payload.keysText, payload.defaults),
-      );
-      if (prepared.addedCount > 0) commitProviderKeys(cfg, registry, provider, prepared.keys, 409);
-      const current = publicProviderConfig(cfg).providers.find(item => item.id === providerId);
-      writeJson(res, 200, {
-        addedCount: prepared.addedCount,
-        ignoredCount: prepared.ignoredCount,
-        ignored: prepared.ignored,
-        totalCount: current?.keys.length || provider.keys.length,
-      });
-      return true;
-    }
-    const keyName = parts[4];
-    const { provider, key } = resolveProviderKey(cfg, providerId, keyName);
-
-    if (parts.length === 6 && parts[5] === 'test' && req.method === 'POST') {
-      const runtime = registry.get(providerId);
-      const runtimeKey = runtime?.pool.keys.find(item => item.name === keyName);
-      if (!runtime || !runtimeKey) {
-        throw Object.assign(new Error(`key ${keyName} is not active in provider ${providerId}`), { statusCode: 409 });
-      }
-      const result = await testKeyConnection(runtime, runtimeKey);
-      writeJson(res, result.ok ? 200 : 502, result);
-      return true;
-    }
-
-    if (parts.length === 6 && parts[5] === 'balance' && req.method === 'POST') {
-      const runtime = registry.get(providerId);
-      const runtimeKey = runtime?.pool.keys.find(item => item.name === keyName);
-      if (!runtime || !runtimeKey) {
-        throw Object.assign(new Error(`key ${keyName} is not active in provider ${providerId}`), { statusCode: 409 });
-      }
-      if (!effectiveBalanceQuery(runtime.provider)) {
-        throw Object.assign(new Error(`balance query is not configured for provider ${providerId}`), { statusCode: 409 });
-      }
-      try {
-        await refreshKeyBalance(runtime, runtimeKey);
-      } catch (error) {
-        if (!error.statusCode) error.statusCode = 502;
-        throw error;
-      }
-      const result = runtime.pool.stats().keys.find(item => item.name === keyName);
-      writeJson(res, 200, result);
-      return true;
-    }
-
-    if (parts.length === 5 && req.method === 'PATCH') {
-      const payload = await readJsonBody(req);
-      const allowed = new Set(['enabled', 'weight', 'alwaysTry']);
-      const unknown = Object.keys(payload).filter(field => !allowed.has(field));
-      if (unknown.length) {
-        throw Object.assign(new Error(`unknown key settings: ${unknown.join(', ')}`), { statusCode: 400 });
-      }
-      if (Object.hasOwn(payload, 'enabled') && typeof payload.enabled !== 'boolean') {
-        throw Object.assign(new Error('key enabled must be a boolean'), { statusCode: 400 });
-      }
-      if (Object.hasOwn(payload, 'weight') && typeof payload.weight !== 'number') {
-        throw Object.assign(new Error('key weight must be a number'), { statusCode: 400 });
-      }
-      if (Object.hasOwn(payload, 'alwaysTry') && typeof payload.alwaysTry !== 'boolean') {
-        throw Object.assign(new Error('key alwaysTry must be a boolean'), { statusCode: 400 });
-      }
-      const updatedKey = {
-        ...key,
-        ...(Object.hasOwn(payload, 'enabled') ? { enabled: payload.enabled } : {}),
-        ...(Object.hasOwn(payload, 'weight') ? { weight: payload.weight } : {}),
-        ...(Object.hasOwn(payload, 'alwaysTry') ? { alwaysTry: payload.alwaysTry } : {}),
-      };
-      const keys = provider.keys.map(item => item.name === keyName ? updatedKey : item);
-      const statusCode = payload.enabled === false ? 409 : 400;
-      writeJson(res, 200, commitProviderKeys(cfg, registry, provider, keys, statusCode));
-      return true;
-    }
-
-    if (parts.length === 5 && req.method === 'DELETE') {
-      const keys = provider.keys.filter(item => item.name !== keyName);
-      writeJson(res, 200, commitProviderKeys(cfg, registry, provider, keys, 409));
-      return true;
-    }
-  }
-
-  if (parts.length === 4 && parts[1] === 'providers' && parts[3] === 'test' && req.method === 'POST') {
-    const runtime = registry.get(parts[2]);
-    if (!runtime) throw Object.assign(new Error(`provider ${parts[2]} not found`), { statusCode: 404 });
-    const result = await testProviderConnection(runtime);
-    writeJson(res, result.ok ? 200 : 502, result);
-    return true;
-  }
-
-  writeJson(res, 404, { error: { message: 'management endpoint not found' } });
-  return true;
-}
+const handleManagementApi = createManagementApi({
+  buildCodexArtifacts,
+  clearSessionCookie,
+  commitProviderConfig,
+  commitProviderKeys,
+  commitSettingsConfig,
+  effectiveBalanceQuery,
+  fetchProviderModels,
+  managementValidation,
+  nextProviderConfig,
+  nextSettingsConfig,
+  normalizeProvider,
+  prepareKeyImport,
+  providerModelAlias,
+  publicProviderConfig,
+  publicSettings,
+  readJsonBody,
+  refreshKeyBalance,
+  resolveBalanceTestInput,
+  resolveModelFetchInput,
+  resolveProviderKey,
+  sameOrigin,
+  serializableConfig,
+  setSessionCookie,
+  testBalanceQuery,
+  testKeyConnection,
+  testProviderConnection,
+  writeJson,
+});
 
 const UI_CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],

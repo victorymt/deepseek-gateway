@@ -1,16 +1,16 @@
 # deepseek-gateway
 
-本地多 Provider Codex 网关。它把多个 OpenAI Responses 或 Chat Completions 兼容上游接入同一个地址，每个 Provider 拥有独立 KeyPool、冷却、失败状态和统计。Codex 只配置一个 Gateway Provider，并可直接通过 `/model` 在 `provider--model` 别名之间切换。
+本地多 Provider Codex 网关。它把多个 OpenAI Responses 或 Chat Completions 兼容上游接入同一个地址，每个 Provider 拥有独立 KeyPool、冷却、失败状态和统计。Codex 只配置一个 Gateway Provider，并可直接通过 `/model` 在 `Provider.model` 别名之间切换；网关同时兼容旧的 `provider--model` 请求。
 
 ```text
 Codex / API client
         |
         |  http://127.0.0.1:8787
         v
-gateway.mjs  -- 根据请求 model 解析 provider--model
+gateway.mjs  -- 根据请求 model 解析 Provider.model（兼容 provider--model）
         |
-        +-- DeepSeek KeyPool  -- deepseek--v4-flash
-        +-- OpenRouter KeyPool -- openrouter--claude-sonnet
+        +-- DeepSeek KeyPool  -- Deepseek.v4-flash
+        +-- OpenRouter KeyPool -- Openrouter.claude-sonnet
         +-- Responses / Chat Completions 兼容 Provider
 ```
 
@@ -200,7 +200,12 @@ cp keys.example.json keys.json
         "refreshMs": 300000
       },
       "models": [
-        { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash" }
+        {
+          "id": "v4-flash",
+          "name": "V4 Flash",
+          "upstreamModel": "deepseek-v4-flash",
+          "inputModalities": ["text"]
+        }
       ],
       "keys": [
         {
@@ -277,6 +282,10 @@ DEEPSEEK_KEYS="main=sk-xxx,backup=sk-yyy" node gateway.mjs
 
 `setup-codex.sh` 仍可作为底层兼容入口直接运行。
 
+模型的输入能力通过 `providers[].models[].inputModalities` 按模型配置，支持 `text` 和 `image`，且必须包含 `text`。默认值为 `["text"]`；DeepSeek 默认模型保持文本-only。只有显式配置为 `["text", "image"]` 的模型才会接受图片输入，网关会对文本-only 模型返回 400。
+
+Provider ID 保持小写字母、数字和单连字符格式。模型 ID 另行支持模型服务常见的 `.`, `_`, `/`, `:` 和 `+` 字符，但保留 `--` 作为 Provider 与模型的内部 canonical alias 分隔符。Codex catalog 使用首字母大写的 `${providerId}.${modelId}` 作为模型 ID 和展示名称，例如内部别名 `openrouter--gpt-4.1` 在 Codex 中显示为 `Openrouter.gpt-4.1`。网关对旧的双连字符 alias 保持兼容。
+
 脚本会备份并合并：
 
 - `~/.codex/config.toml`
@@ -285,7 +294,7 @@ DEEPSEEK_KEYS="main=sk-xxx,backup=sk-yyy" node gateway.mjs
 自定义模型和网关地址：
 
 ```bash
-MODEL="deepseek--v4-pro" \
+MODEL="Deepseek.v4-pro" \
 GATEWAY_URL="http://127.0.0.1:8787" \
 ./setup-codex.sh
 ```
@@ -314,7 +323,7 @@ Gateway 服务端读取的是 `keys.json` 中的 `token`、`DS_GATEWAY_TOKEN` �
 codex
 ```
 
-启动信息应显示 `deepseek--v4-flash` 或配置的默认别名。在 Codex 内执行 `/model` 即可切换到其他 Provider 的别名；新增目录项后需要重启一次 Codex 以重新加载 `model_catalog_json`。恢复最近一次 Codex 配置备份：
+启动信息应显示 `Deepseek.v4-flash` 或配置的 Codex 默认别名。在 Codex 内执行 `/model` 即可切换到其他 Provider 的别名；新增目录项后需要重启一次 Codex 以重新加载 `model_catalog_json`。修改模型的 `inputModalities` 后，重新运行 `./gatewayctl codex`（或在 Web UI 下载并应用最新配置），然后重启 Codex，使新的 `input_modalities` 能力目录生效。恢复最近一次 Codex 配置备份：
 
 ```bash
 ./setup-codex.sh --undo
@@ -396,6 +405,8 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 | `host` | `--host` | - | `127.0.0.1` | 监听地址 |
 | `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`upstreamFormat`、`models`、`keys`、`balanceQuery` 和启用状态 |
 | `providers[].upstreamFormat` | - | - | `responses` | 上游协议，可选 `responses` 或 `chat-completions` |
+| `providers[].models[].id` | - | - | - | Codex 路由模型 ID，支持 `.`, `_`, `/`, `:`、`+` 和单连字符；不能包含保留分隔符 `--` |
+| `providers[].models[].inputModalities` | - | - | `["text"]` | 模型输入能力，可选 `text`、`image`；必须包含 `text`。图片仅对显式启用 `image` 的模型放行 |
 | `providers[].keys[].alwaysTry` | - | - | `false` | 鉴权或上游失败后仍允许新的请求继续调度该 Key；仍尊重 429 冷却和手动停用 |
 | `defaultProvider` | - | - | 第一个启用项 | 未带别名前缀时使用的 Provider |
 | `defaultModel` | - | - | 默认 Provider 首个模型 | Codex 启动模型别名 |

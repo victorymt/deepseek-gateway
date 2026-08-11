@@ -8,12 +8,24 @@ import { fileURLToPath } from 'node:url';
 
 export const DEFAULT_UPSTREAM = 'https://api.deepseek.com';
 export const UPSTREAM_FORMATS = ['responses', 'chat-completions'];
+export const MODEL_INPUT_MODALITIES = ['text', 'image'];
 export const DEFAULT_MODELS = [
-  { id: 'v4-flash', name: 'V4 Flash', upstreamModel: 'deepseek-v4-flash' },
-  { id: 'v4-pro', name: 'V4 Pro', upstreamModel: 'deepseek-v4-pro' },
+  {
+    id: 'v4-flash',
+    name: 'V4 Flash',
+    upstreamModel: 'deepseek-v4-flash',
+    inputModalities: ['text'],
+  },
+  {
+    id: 'v4-pro',
+    name: 'V4 Pro',
+    upstreamModel: 'deepseek-v4-pro',
+    inputModalities: ['text'],
+  },
 ];
 
 const PROVIDER_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const MODEL_ID_RE = /^[a-z0-9](?:[a-z0-9._\/:+-]{0,61}[a-z0-9])?$/;
 const MAX_BALANCE_SCRIPT_BYTES = 64 * 1024;
 
 function isLoopbackHost(value) {
@@ -27,6 +39,11 @@ function isLoopbackHost(value) {
 
 export function providerModelAlias(providerId, modelId) {
   return `${providerId}--${modelId}`;
+}
+
+export function codexModelAlias(providerId, modelId) {
+  const provider = String(providerId);
+  return `${provider.charAt(0).toUpperCase()}${provider.slice(1)}.${modelId}`;
 }
 
 export function normalizeBaseUrl(value, field = 'baseUrl') {
@@ -51,12 +68,36 @@ export function normalizeIdentifier(value, field) {
   return id;
 }
 
+export function normalizeModelIdentifier(value, field = 'model id') {
+  const id = String(value || '').trim().toLowerCase();
+  if (id.includes('--')) throw new Error(`${field} must not contain the reserved separator --`);
+  if (!MODEL_ID_RE.test(id)) {
+    throw new Error(`${field} must use letters, numbers, dots, underscores, slashes, colons, plus signs, and single hyphens`);
+  }
+  return id;
+}
+
 export function normalizeUpstreamFormat(value, field = 'upstreamFormat') {
   const format = String(value || 'responses').trim().toLowerCase();
   if (!UPSTREAM_FORMATS.includes(format)) {
     throw new Error(`${field} must be one of: ${UPSTREAM_FORMATS.join(', ')}`);
   }
   return format;
+}
+
+export function normalizeInputModalities(value, field = 'inputModalities') {
+  const source = value === undefined ? ['text'] : value;
+  if (!Array.isArray(source) || !source.length) {
+    throw new Error(`${field} must be a non-empty array`);
+  }
+  const values = source.map(item => String(item || '').trim().toLowerCase());
+  const unknown = values.filter(item => !MODEL_INPUT_MODALITIES.includes(item));
+  if (unknown.length) {
+    throw new Error(`${field} must contain only: ${MODEL_INPUT_MODALITIES.join(', ')}`);
+  }
+  const modalities = MODEL_INPUT_MODALITIES.filter(item => values.includes(item));
+  if (!modalities.includes('text')) throw new Error(`${field} must include text`);
+  return modalities;
 }
 
 export function normalizeNumber(value, field, { min = 0, max = Infinity, integer = false } = {}) {
@@ -126,12 +167,16 @@ export function normalizeProvider(input, existing = null) {
 
   const models = rawModels.map(model => {
     if (!model || typeof model !== 'object' || Array.isArray(model)) throw new Error(`provider ${id} has an invalid model`);
-    const modelId = normalizeIdentifier(model.id, `provider ${id} model id`);
+    const modelId = normalizeModelIdentifier(model.id, `provider ${id} model id`);
     const modelName = String(model.name || modelId).trim();
     const upstreamModel = String(model.upstreamModel || '').trim();
+    const inputModalities = normalizeInputModalities(
+      model.inputModalities,
+      `provider ${id} model ${modelId} inputModalities`,
+    );
     if (!modelName || modelName.length > 100) throw new Error(`provider ${id} model ${modelId} name is invalid`);
     if (!upstreamModel || upstreamModel.length > 200) throw new Error(`provider ${id} model ${modelId} upstreamModel is required`);
-    return { id: modelId, name: modelName, upstreamModel };
+    return { id: modelId, name: modelName, upstreamModel, inputModalities };
   });
 
   const existingKeys = new Map((existing?.keys || []).map(key => [key.name, key]));

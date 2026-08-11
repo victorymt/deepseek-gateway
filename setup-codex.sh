@@ -123,6 +123,8 @@ fi
 
 if [ -z "$MODEL" ]; then
   MODEL="$(node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --print-model)"
+else
+  MODEL="$(node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --model "$MODEL" --print-model)"
 fi
 AUTH_EFFECTIVE="$(node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --print-auth)"
 node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --model "$MODEL"
@@ -131,7 +133,7 @@ if [ -n "$DRY" ]; then
 else
   node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --models-path "$MODELS" --write-catalog "$MODELS"
   chmod 600 "$MODELS"
-  now "wrote $MODELS (provider-scoped model aliases)"
+  now "wrote $MODELS (Codex Provider.model aliases)"
 fi
 
 if [ ! -f "$CONFIG" ]; then

@@ -82,8 +82,16 @@ import type {
 } from "@/gateway-types"
 import { apiRequest } from "@/lib/api-request"
 
-type ModelDraft = { id: string; name: string; upstreamModel: string }
-type FetchedModel = ModelDraft & { ownedBy: string | null }
+type InputModality = "text" | "image"
+type ModelDraft = {
+  id: string
+  name: string
+  upstreamModel: string
+  inputModalities: InputModality[]
+}
+type FetchedModel = Omit<ModelDraft, "inputModalities"> & {
+  ownedBy: string | null
+}
 type KeyDraft = {
   name: string
   key: string
@@ -197,6 +205,7 @@ const copy = {
     modelId: "Model ID",
     modelName: "Model name",
     upstreamModel: "Upstream model",
+    imageInput: "Image input",
     keyName: "Key name",
     apiKey: "API key",
     keepKey: "Leave blank to keep the current key.",
@@ -266,6 +275,7 @@ const copy = {
     modelId: "模型 ID",
     modelName: "模型名称",
     upstreamModel: "上游模型",
+    imageInput: "图像输入",
     keyName: "密钥名称",
     apiKey: "API 密钥",
     keepKey: "留空可保留当前密钥。",
@@ -303,7 +313,9 @@ const emptyDraft = (): ProviderDraft => ({
   baseUrl: "https://",
   upstreamFormat: "responses",
   enabled: true,
-  models: [{ id: "", name: "", upstreamModel: "" }],
+  models: [
+    { id: "", name: "", upstreamModel: "", inputModalities: ["text"] },
+  ],
   keys: [
     {
       name: "primary",
@@ -328,10 +340,11 @@ function providerDraft(provider: Provider): ProviderDraft {
     baseUrl: provider.baseUrl,
     upstreamFormat: provider.upstreamFormat,
     enabled: provider.enabled,
-    models: provider.models.map(({ id, name, upstreamModel }) => ({
+    models: provider.models.map(({ id, name, upstreamModel, inputModalities }) => ({
       id,
       name,
       upstreamModel,
+      inputModalities: [...inputModalities],
     })),
     keys: provider.keys.map((key) => ({
       ...key,
@@ -566,6 +579,7 @@ export function ProviderManager({
         id,
         name: model.name,
         upstreamModel: model.upstreamModel,
+        inputModalities: ["text"] as InputModality[],
       }
       const hasOnlyEmptyModel =
         value.models.length === 1 &&
@@ -750,7 +764,12 @@ export function ProviderManager({
                       className="flex flex-wrap items-center justify-between gap-3"
                     >
                       <div className="min-w-0">
-                        <p className="font-medium">{model.name}</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-medium">{model.name}</p>
+                          {model.inputModalities.includes("image") && (
+                            <Badge variant="secondary">{t.imageInput}</Badge>
+                          )}
+                        </div>
                         <p className="font-mono text-xs break-all text-muted-foreground">
                           {model.alias} → {model.upstreamModel}
                         </p>
@@ -1115,7 +1134,12 @@ export function ProviderManager({
                         ...value,
                         models: [
                           ...value.models,
-                          { id: "", name: "", upstreamModel: "" },
+                          {
+                            id: "",
+                            name: "",
+                            upstreamModel: "",
+                            inputModalities: ["text"],
+                          },
                         ],
                       }))
                     }
@@ -1177,7 +1201,7 @@ export function ProviderManager({
                 {draft.models.map((model, index) => (
                   <div
                     key={`model-${index}`}
-                    className="grid items-end gap-3 sm:grid-cols-[1fr_1fr_1.2fr_auto]"
+                    className="grid items-end gap-3 sm:grid-cols-[1fr_1fr_1.2fr_auto_auto]"
                   >
                     <Field>
                       <FieldLabel htmlFor={`model-id-${index}`}>
@@ -1233,6 +1257,31 @@ export function ProviderManager({
                             models: value.models.map((item, itemIndex) =>
                               itemIndex === index
                                 ? { ...item, upstreamModel: event.target.value }
+                                : item
+                            ),
+                          }))
+                        }
+                      />
+                    </Field>
+                    <Field orientation="horizontal">
+                      <FieldContent>
+                        <FieldTitle>{t.imageInput}</FieldTitle>
+                      </FieldContent>
+                      <Switch
+                        size="sm"
+                        aria-label={t.imageInput}
+                        checked={model.inputModalities.includes("image")}
+                        onCheckedChange={(checked) =>
+                          setDraft((value) => ({
+                            ...value,
+                            models: value.models.map((item, itemIndex) =>
+                              itemIndex === index
+                                ? {
+                                    ...item,
+                                    inputModalities: checked
+                                      ? ["text", "image"]
+                                      : ["text"],
+                                  }
                                 : item
                             ),
                           }))

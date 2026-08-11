@@ -2,5 +2,6 @@ node_modules/
 __pycache__/
 *.py[cod]
 keys.json
+keys.json.*
 .gateway-backups/
 *.log

@@ -26,8 +26,8 @@
         "refreshMs": 300000
       },
       "models": [
-        { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash" },
-        { "id": "v4-pro", "name": "V4 Pro", "upstreamModel": "deepseek-v4-pro" }
+        { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash", "inputModalities": ["text"] },
+        { "id": "v4-pro", "name": "V4 Pro", "upstreamModel": "deepseek-v4-pro", "inputModalities": ["text"] }
       ],
       "keys": [
         { "name": "primary", "key": "sk-REPLACE-WITH-YOUR-KEY-1", "weight": 1, "enabled": true, "alwaysTry": true },

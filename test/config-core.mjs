@@ -2,11 +2,19 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 
 import {
+  codexModelAlias,
   normalizeBalanceQuery,
   normalizeConfig,
+  normalizeInputModalities,
+  normalizeModelIdentifier,
   normalizeUpstreamFormat,
   serializableConfig,
 } from '../config-core.mjs';
+
+test('Codex model aliases capitalize the provider and use a dot separator', () => {
+  assert.equal(codexModelAlias('aihub', 'gpt-5.6-sol'), 'Aihub.gpt-5.6-sol');
+  assert.equal(codexModelAlias('open-router', 'claude/3.5-sonnet'), 'Open-router.claude/3.5-sonnet');
+});
 
 test('legacy config normalizes and serializes as canonical v2', () => {
   const normalized = normalizeConfig({
@@ -24,6 +32,7 @@ test('legacy config normalizes and serializes as canonical v2', () => {
   assert.equal(stored.blacklistThreshold, 4);
   assert.equal(stored.providers[0].baseUrl, 'https://legacy.example/v1');
   assert.equal(stored.providers[0].upstreamFormat, 'responses');
+  assert.deepEqual(stored.providers[0].models[0].inputModalities, ['text']);
   assert.equal(stored.providers[0].keys[0].key, 'sk-legacy');
   assert.equal(stored.providers[0].keys[0].enabled, true);
   assert.equal(normalized.providers[0].keys[0].alwaysTry, false);
@@ -74,6 +83,45 @@ test('provider upstream format defaults to Responses and accepts Chat Completion
     }],
   });
   assert.equal(serializableConfig(normalized).providers[0].upstreamFormat, 'chat-completions');
+});
+
+test('model input modalities default to text and normalize image capability', () => {
+  assert.deepEqual(normalizeInputModalities(undefined), ['text']);
+  assert.deepEqual(normalizeInputModalities(['image', 'text', 'image']), ['text', 'image']);
+  assert.throws(() => normalizeInputModalities(['image']), /must include text/);
+  assert.throws(() => normalizeInputModalities(['text', 'audio']), /must contain only/);
+  assert.throws(() => normalizeInputModalities([]), /non-empty array/);
+
+  const normalized = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--gpt-4.1',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      models: [{
+        id: 'gpt-4.1',
+        upstreamModel: 'gpt-4.1',
+        inputModalities: ['image', 'text'],
+      }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+    }],
+  });
+  assert.equal(normalized.providers[0].models[0].id, 'gpt-4.1');
+  assert.deepEqual(normalized.providers[0].models[0].inputModalities, ['text', 'image']);
+  assert.deepEqual(
+    serializableConfig(normalized).providers[0].models[0].inputModalities,
+    ['text', 'image'],
+  );
+});
+
+test('model identifiers preserve common upstream punctuation without weakening provider ids', () => {
+  assert.equal(normalizeModelIdentifier('GPT-4.1'), 'gpt-4.1');
+  assert.equal(normalizeModelIdentifier('Claude/3.5-Sonnet'), 'claude/3.5-sonnet');
+  assert.equal(normalizeModelIdentifier('llama3.1:8b_instruct+fast'), 'llama3.1:8b_instruct+fast');
+  assert.throws(() => normalizeModelIdentifier('gpt--4.1'), /reserved separator/);
+  assert.throws(() => normalizeModelIdentifier('gpt 4.1'), /must use letters/);
+  assert.throws(() => normalizeModelIdentifier('.gpt-4.1'), /must use letters/);
 });
 
 test('config validation rejects duplicate key secrets', () => {

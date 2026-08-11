@@ -149,6 +149,103 @@ function multiProviderConfig(overrides = {}) {
   };
 }
 
+test('text-only model rejects image input while image-enabled models accept it', async () => {
+  const textOnlyConfig = multiProviderConfig({
+    providers: [{
+      id: 'alpha',
+      name: 'Alpha',
+      baseUrl: 'https://alpha.example',
+      enabled: true,
+      models: [{
+        id: 'text-only',
+        name: 'Text Only',
+        upstreamModel: 'text-only-upstream',
+        inputModalities: ['text'],
+      }],
+      keys: [{ name: 'alpha-key', key: 'sk-alpha-ok', weight: 1 }],
+    }],
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--text-only',
+  });
+  const textOnly = await startGateway('', [], {}, textOnlyConfig, { keysArg: false });
+  try {
+    const rejected = await textOnly.responses({
+      model: 'alpha--text-only',
+      input: [{
+        role: 'user',
+        content: [{ type: 'input_image', image_url: 'data:image/png;base64,AA==' }],
+      }],
+    });
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.text, /does not support image input/);
+  } finally {
+    await textOnly.stop();
+  }
+
+  const imageConfig = multiProviderConfig({
+    providers: [{
+      id: 'alpha',
+      name: 'Alpha',
+      baseUrl: 'https://alpha.example',
+      enabled: true,
+      models: [{
+        id: 'vision',
+        name: 'Vision',
+        upstreamModel: 'vision-upstream',
+        inputModalities: ['text', 'image'],
+      }],
+      keys: [{ name: 'alpha-key', key: 'sk-alpha-ok', weight: 1 }],
+    }],
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--vision',
+  });
+  const responsesGateway = await startGateway('', [], {}, imageConfig, { keysArg: false });
+  try {
+    const accepted = await responsesGateway.responses({
+      model: 'alpha--vision',
+      input: [{
+        role: 'user',
+        content: [{ type: 'input_image', image_url: 'data:image/png;base64,AA==' }],
+      }],
+    });
+    assert.equal(accepted.status, 200, accepted.text);
+  } finally {
+    await responsesGateway.stop();
+  }
+
+  const chatConfig = multiProviderConfig({
+    providers: [{
+      id: 'alpha',
+      name: 'Alpha Chat',
+      baseUrl: 'https://alpha.example',
+      upstreamFormat: 'chat-completions',
+      enabled: true,
+      models: [{
+        id: 'vision',
+        name: 'Vision',
+        upstreamModel: 'vision-upstream',
+        inputModalities: ['text', 'image'],
+      }],
+      keys: [{ name: 'alpha-key', key: 'sk-alpha-ok', weight: 1 }],
+    }],
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--vision',
+  });
+  const chatGateway = await startGateway('', [], {}, chatConfig, { keysArg: false });
+  try {
+    const accepted = await chatGateway.chat({
+      model: 'alpha--vision',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }],
+      }],
+    });
+    assert.equal(accepted.status, 200, accepted.text);
+  } finally {
+    await chatGateway.stop();
+  }
+});
+
 test('round-robin distributes across keys', async () => {
   const gw = await startGateway('alice=sk-a-ok,bob=sk-b-ok');
   try {
@@ -642,10 +739,43 @@ test('unknown prefixed aliases fail closed while legacy model names use the defa
     const unknown = await gw.chat({ model: 'missing--shared' });
     assert.equal(unknown.status, 400);
     assert.match(unknown.text, /unknown or disabled model alias/);
+    const unknownCodex = await gw.chat({ model: 'Missing.shared' });
+    assert.equal(unknownCodex.status, 400);
+    assert.match(unknownCodex.text, /unknown or disabled model alias/);
     const legacy = await gw.chat({ model: 'same-upstream-model' });
     assert.equal(legacy.status, 200);
     assert.equal(legacy.headers.get('x-gateway-provider'), 'alpha');
     assert.equal(JSON.parse(legacy.text).gateway_key_name, 'alpha-key');
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('Codex dotted aliases route Responses requests to the matching provider model', async () => {
+  const config = multiProviderConfig({
+    defaultProvider: 'routify',
+    defaultModel: 'routify--deepseek-v4-flash',
+    providers: [{
+      id: 'routify',
+      name: 'Routify',
+      baseUrl: 'https://routify.example/v1',
+      enabled: true,
+      models: [{
+        id: 'deepseek-v4-flash',
+        name: 'deepseek-v4-flash',
+        upstreamModel: 'deepseek-v4-flash',
+      }],
+      keys: [{ name: 'routify-key', key: 'sk-routify-ok', weight: 1 }],
+    }],
+  });
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
+  try {
+    const routed = await gw.responses({
+      model: 'Routify.deepseek-v4-flash',
+      input: 'hello',
+    });
+    assert.equal(routed.status, 200, routed.text);
+    assert.equal(routed.headers.get('x-gateway-provider'), 'routify');
   } finally {
     await gw.stop();
   }
@@ -941,9 +1071,9 @@ test('model discovery proxies OpenAI-compatible endpoints and normalizes upstrea
       'Qwen/Qwen3-235B-A22B-Instruct',
     ]);
     assert.deepEqual(payload.models.map(model => model.id), [
-      'claude-3-5-sonnet',
+      'claude/3.5-sonnet',
       'gpt-4o-mini',
-      'qwen-qwen3-235b-a22b-instruct',
+      'qwen/qwen3-235b-a22b-instruct',
     ]);
     assert.equal(payload.models[2].ownedBy, 'qwen');
     assert.equal(payload.models[0].name, 'Claude 3.5 Sonnet');
@@ -1248,8 +1378,22 @@ test('changing provider baseUrl drains an active stream before retiring its runt
 });
 
 test('generated Codex artifacts omit env auth when the gateway has no token', async () => {
-  const gw = await startGateway('', [], {}, multiProviderConfig(), { keysArg: false });
+  const config = multiProviderConfig();
+  config.providers[1].models[0] = {
+    id: 'gpt-4.1',
+    name: 'GPT 4.1',
+    upstreamModel: 'gpt-4.1',
+    inputModalities: ['text', 'image'],
+  };
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
   try {
+    const routed = await gw.chat({ model: 'beta--gpt-4.1' });
+    assert.equal(routed.status, 200, routed.text);
+    assert.equal(routed.headers.get('x-gateway-provider'), 'beta');
+    const dotted = await gw.chat({ model: 'Beta.gpt-4.1' });
+    assert.equal(dotted.status, 200, dotted.text);
+    assert.equal(dotted.headers.get('x-gateway-provider'), 'beta');
+
     const response = await fetch(`${gw.base}/api/codex/config`);
     assert.equal(response.status, 200);
     const text = await response.text();
@@ -1259,12 +1403,22 @@ test('generated Codex artifacts omit env auth when the gateway has no token', as
     assert.equal(artifacts.providerId, 'multi-provider-gateway');
     assert.equal(artifacts.authRequired, false);
     assert.equal(artifacts.envKey, null);
+    assert.equal(artifacts.defaultModel, 'Alpha.shared');
     assert.match(artifacts.configToml, /model_provider = "multi-provider-gateway"/);
     assert.doesNotMatch(artifacts.configToml, /env_key/);
     assert.doesNotMatch(artifacts.configToml, /experimental_bearer_token/);
     assert.equal((artifacts.configToml.match(/\[model_providers\./g) || []).length, 1);
-    const aliases = JSON.parse(artifacts.catalogJson).models.map(model => model.slug);
-    assert.deepEqual(aliases, ['alpha--shared', 'beta--shared']);
+    const catalog = JSON.parse(artifacts.catalogJson);
+    const aliases = catalog.models.map(model => model.slug);
+    assert.deepEqual(aliases, ['Alpha.shared', 'Beta.gpt-4.1']);
+    assert.deepEqual(catalog.models.map(model => model.display_name), [
+      'Alpha.shared',
+      'Beta.gpt-4.1',
+    ]);
+    assert.deepEqual(catalog.models.map(model => model.input_modalities), [
+      ['text'],
+      ['text', 'image'],
+    ]);
   } finally {
     await gw.stop();
   }
@@ -1702,7 +1856,7 @@ test('merge-config preserves codex profiles', async () => {
   assert.match(merged, /model = "gpt-5-fast"/, 'profile model must be preserved');
   assert.match(merged, /\[profiles\.deepseek\]/);
   assert.match(merged, /base_url = "https:\/\/deepseek\.example"/, 'profile deepseek must be preserved');
-  assert.match(merged, /^model = "deepseek--v4-flash"/m, 'top-level model must be replaced');
+  assert.match(merged, /^model = "Deepseek.v4-flash"/m, 'top-level model must be replaced');
   assert.equal((merged.match(/\[model_providers\.multi-provider-gateway\]/g) || []).length, 1);
   assert.doesNotMatch(merged, /env_key/);
   assert.doesNotMatch(merged, /experimental_bearer_token/);
@@ -1789,9 +1943,9 @@ test('setup script is idempotent and dry-run is pure', async () => {
   assert.match(merged, /env_key = "DEEPSEEK_GATEWAY_TOKEN"/);
   assert.doesNotMatch(merged, /experimental_bearer_token/);
   assert.ok(!merged.includes('configured-token'));
-  assert.match(merged, /model = "alpha--shared"/);
+  assert.match(merged, /model = "Alpha.shared"/);
   const catalog = JSON.parse(fs.readFileSync(path.join(codexDir, 'gateway-models.json'), 'utf8'));
-  assert.deepEqual(catalog.models.map(model => model.slug), ['alpha--shared', 'beta--shared']);
+  assert.deepEqual(catalog.models.map(model => model.slug), ['Alpha.shared', 'Beta.shared']);
   assert.ok(
     catalog.models.every(model => model.supports_search_tool === false),
     'catalog models must not enable supports_search_tool (hides MCP tools in Codex CLI)',

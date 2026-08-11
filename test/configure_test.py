@@ -145,7 +145,12 @@ class ConfigureWizardTests(unittest.TestCase):
                     "baseUrl": "https://api.deepseek.com",
                     "enabled": True,
                     "models": [
-                        {"id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-chat"}
+                        {
+                            "id": "v4-flash",
+                            "name": "V4 Flash",
+                            "upstreamModel": "deepseek-chat",
+                            "inputModalities": ["text"],
+                        }
                     ],
                     "keys": [
                         {
@@ -162,7 +167,12 @@ class ConfigureWizardTests(unittest.TestCase):
                     "baseUrl": "https://openrouter.ai/api/v1",
                     "enabled": True,
                     "models": [
-                        {"id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-chat"}
+                        {
+                            "id": "v4-flash",
+                            "name": "V4 Flash",
+                            "upstreamModel": "deepseek-chat",
+                            "inputModalities": ["text"],
+                        }
                     ],
                     "keys": [
                         {

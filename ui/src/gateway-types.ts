@@ -83,6 +83,7 @@ export type ProviderModel = {
   id: string
   name: string
   upstreamModel: string
+  inputModalities: Array<"text" | "image">
   alias: string
 }
 

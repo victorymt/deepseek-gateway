@@ -70,6 +70,26 @@ test('Responses requests convert messages, tools, settings, and usage options', 
   assert.equal(context.byChatName.get('apply_patch').kind, 'custom');
 });
 
+test('Responses input images convert to Chat image URLs with data URL and detail', () => {
+  const imageUrl = 'data:image/png;base64,AAECAw==';
+  const { payload } = responsesRequestToChatCompletions({
+    model: 'vision-model',
+    input: [{
+      type: 'message',
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'What is shown?' },
+        { type: 'input_image', image_url: imageUrl, detail: 'high' },
+      ],
+    }],
+  });
+
+  assert.deepEqual(payload.messages[0].content, [
+    { type: 'text', text: 'What is shown?' },
+    { type: 'image_url', image_url: { url: imageUrl, detail: 'high' } },
+  ]);
+});
+
 test('Responses request conversion rejects stateful and hosted features explicitly', () => {
   assert.throws(
     () => responsesRequestToChatCompletions({ model: 'x', previous_response_id: 'resp_old', input: 'x' }),

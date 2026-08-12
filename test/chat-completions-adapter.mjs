@@ -91,6 +91,52 @@ test('Responses input images convert to Chat image URLs with data URL and detail
   ]);
 });
 
+test('reasoning capability maps configured efforts to provider-specific Chat parameters', () => {
+  const { payload } = responsesRequestToChatCompletions({
+    model: 'budget-model',
+    input: 'inspect',
+    reasoning: { effort: 'high' },
+  }, {
+    reasoning: {
+      parameter: 'thinking_budget',
+      default: 'high',
+      levels: [
+        { effort: 'low', upstreamValue: 1024 },
+        { effort: 'high', upstreamValue: 8192 },
+      ],
+    },
+  });
+
+  assert.equal(payload.thinking_budget, 8192);
+  assert.equal(payload.reasoning_effort, undefined);
+  const toggle = responsesRequestToChatCompletions({
+    model: 'toggle-model',
+    input: 'inspect',
+    reasoning: { effort: 'on' },
+  }, {
+    reasoning: {
+      parameter: 'enable_thinking',
+      default: 'on',
+      levels: [{ effort: 'off' }, { effort: 'on' }],
+    },
+  });
+  assert.equal(toggle.payload.enable_thinking, true);
+  assert.throws(
+    () => responsesRequestToChatCompletions({
+      model: 'budget-model',
+      input: 'inspect',
+      reasoning: { effort: 'max' },
+    }, {
+      reasoning: {
+        parameter: 'thinking_budget',
+        default: 'high',
+        levels: [{ effort: 'high', upstreamValue: 8192 }],
+      },
+    }),
+    /not supported by this model/,
+  );
+});
+
 test('MultiAgentV2 agent messages unwrap without rewriting ordinary encrypted content', () => {
   const request = {
     model: 'provider-model',

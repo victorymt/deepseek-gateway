@@ -46,11 +46,21 @@ export const providerCopy = {
     modelName: "Model name",
     upstreamModel: "Upstream model",
     imageInput: "Image input",
+    textOnly: "Text only",
     hostedWebSearch: "Hosted Web Search",
     hostedWebSearchDescription:
       "Allow Codex to send the Responses web_search hosted tool.",
     hostedWebSearchUnavailable:
       "Hosted Web Search requires a Responses upstream.",
+    reasoning: "Reasoning effort",
+    reasoningDescription:
+      "Expose model-supported thinking levels to Codex and map them upstream.",
+    reasoningLevels: "Available levels",
+    reasoningParameter: "Chat parameter",
+    reasoningValues: "Upstream values",
+    reasoningValuesDescription:
+      "Optional comma-separated values matching the levels; useful for budgets or boolean switches.",
+    reasoningDefault: "Default level",
     keyName: "Key name",
     apiKey: "API key",
     keepKey: "Leave blank to keep the current key.",
@@ -132,10 +142,20 @@ export const providerCopy = {
     modelName: "模型名称",
     upstreamModel: "上游模型",
     imageInput: "图像输入",
+    textOnly: "仅文本",
     hostedWebSearch: "托管网页搜索",
     hostedWebSearchDescription:
       "允许 Codex 发送 Responses web_search 托管工具。",
     hostedWebSearchUnavailable: "托管网页搜索要求上游使用 Responses 协议。",
+    reasoning: "思考强度",
+    reasoningDescription:
+      "向 Codex 声明模型支持的思考级别，并映射到上游参数。",
+    reasoningLevels: "可用级别",
+    reasoningParameter: "Chat 参数",
+    reasoningValues: "上游取值",
+    reasoningValuesDescription:
+      "可选，按级别顺序填写上游值，适用于预算或布尔开关参数。",
+    reasoningDefault: "默认级别",
     keyName: "密钥名称",
     apiKey: "API 密钥",
     keepKey: "留空可保留当前密钥。",

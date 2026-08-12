@@ -42,6 +42,7 @@ export function ProviderManager({
     fetchModels,
     loading,
     modelFetchError,
+    modelCapabilities,
     notice,
     originalBaseUrl,
     openCreate,
@@ -142,6 +143,7 @@ export function ProviderManager({
         fetchedModels={fetchedModels}
         fetchingModels={fetchingModels}
         modelFetchError={modelFetchError}
+        modelCapabilities={modelCapabilities}
         setDraft={setDraft}
         onAddFetchedModel={addFetchedModel}
         onFetchModels={fetchModels}

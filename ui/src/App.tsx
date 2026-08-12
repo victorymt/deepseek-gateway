@@ -1,26 +1,48 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import {
   ActivityIcon,
+  ArrowLeftIcon,
+  BoxIcon,
+  BotIcon,
   CircleDotIcon,
+  ChevronRightIcon,
+  DatabaseIcon,
+  Globe2Icon,
   LayoutDashboardIcon,
   KeyRoundIcon,
   LanguagesIcon,
   LogOutIcon,
   MoonIcon,
+  MonitorIcon,
+  PowerIcon,
+  SearchIcon,
   ServerCogIcon,
-  ServerCrashIcon,
+  SlidersHorizontalIcon,
   Settings2Icon,
+  StarIcon,
   SunIcon,
   TerminalSquareIcon,
+  Trash2Icon,
 } from "lucide-react"
 
 import { CodexSetup } from "@/components/codex-setup"
 import { GatewaySettingsPanel } from "@/components/gateway-settings"
 import { useLanguage, type Locale } from "@/components/language-provider"
+import { OperationsPanel } from "@/components/operations-panel"
 import { ProviderManager } from "@/components/provider-manager"
 import { useTheme } from "@/components/theme-provider"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import {
   Card,
   CardAction,
@@ -30,13 +52,6 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
-import {
   Field,
   FieldError,
   FieldGroup,
@@ -45,7 +60,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Switch } from "@/components/ui/switch"
 import {
   Tooltip,
   TooltipContent,
@@ -53,7 +68,8 @@ import {
 } from "@/components/ui/tooltip"
 import { Button } from "@/components/ui/button"
 import { ProviderKeySection } from "@/features/provider-keys/provider-key-section"
-import type { Health } from "@/gateway-types"
+import type { Health, ProviderConfig } from "@/gateway-types"
+import { apiRequest } from "@/lib/api-request"
 import { formatNumber } from "@/lib/format-number"
 
 type ConnectionState = "connecting" | "live" | "offline" | "auth"
@@ -434,42 +450,6 @@ function MetricCard({
   )
 }
 
-function LoadingKeyCards() {
-  return (
-    <section className="flex flex-col gap-4">
-      <div className="flex items-end justify-between gap-4">
-        <div className="flex flex-col gap-2">
-          <Skeleton className="h-5 w-32" />
-          <Skeleton className="h-3 w-56" />
-        </div>
-        <Skeleton className="h-3 w-28" />
-      </div>
-      <div className="grid gap-3 md:grid-cols-2">
-        {Array.from({ length: 2 }, (_, index) => (
-          <Card key={index} size="sm" className="min-h-72">
-            <CardHeader>
-              <CardTitle>
-                <Skeleton className="h-4 w-28" />
-              </CardTitle>
-              <CardAction>
-                <Skeleton className="h-5 w-16" />
-              </CardAction>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-5">
-              <Skeleton className="h-16 w-40" />
-              <div className="grid grid-cols-3 gap-4">
-                {Array.from({ length: 6 }, (_, metric) => (
-                  <Skeleton key={metric} className="h-9 w-full" />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-    </section>
-  )
-}
-
 function LoginView() {
   const { locale } = useLanguage()
   const t = translations[locale]
@@ -554,6 +534,164 @@ function LoginView() {
   )
 }
 
+function ProviderWorkspace({
+  health,
+  loading,
+  locale,
+  onRefresh,
+}: {
+  health: Health | null
+  loading: boolean
+  locale: Locale
+  onRefresh: () => Promise<void>
+}) {
+  const [query, setQuery] = useState("")
+  const [enabledOnly, setEnabledOnly] = useState(false)
+  const [detailTab, setDetailTab] = useState<"overview" | "models" | "usage" | "keys" | "settings">("overview")
+  const [detailVisible, setDetailVisible] = useState(false)
+  const [config, setConfig] = useState<ProviderConfig | null>(null)
+  const [actionError, setActionError] = useState("")
+  useEffect(() => {
+    const timer = window.setTimeout(() => void apiRequest<ProviderConfig>("/api/providers").then(setConfig).catch(cause => setActionError(cause instanceof Error ? cause.message : "Request failed")), 0)
+    return () => window.clearTimeout(timer)
+  }, [])
+  const providers = health?.providers?.length
+    ? health.providers
+    : health
+      ? [{
+          id: health.defaultProvider,
+          name: health.defaultProvider,
+          baseUrl: health.upstream || "",
+          upstreamFormat: "responses" as const,
+          enabled: true,
+          balanceQueryEnabled: false,
+          modelCount: 0,
+          total: health.total,
+          keys: health.keys,
+        }]
+      : []
+  const visibleProviders = providers.filter((provider) =>
+    (!enabledOnly || provider.enabled) &&
+    (provider.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) ||
+      provider.id.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+  )
+  const [selectedId, setSelectedId] = useState(health?.defaultProvider || providers[0]?.id || "")
+  const selected = providers.find((provider) => provider.id === selectedId) || providers[0]
+  const totals = selected?.total || { requests: 0, success: 0, errors: 0, ratelimited: 0, tokens: 0 }
+  const requestCount = totals.requests || 0
+  const configured = config?.providers.find(provider => provider.id === selected?.id)
+
+  async function patchSelected(payload: Record<string, unknown>) {
+    if (!selected) return
+    try {
+      setConfig(await apiRequest<ProviderConfig>(`/api/providers/${encodeURIComponent(selected.id)}`, { method: "PATCH", body: JSON.stringify(payload) }))
+      setActionError("")
+      await onRefresh()
+    } catch (cause) { setActionError(cause instanceof Error ? cause.message : "Request failed") }
+  }
+
+  async function deleteSelected() {
+    if (!selected) return
+    try {
+      setConfig(await apiRequest<ProviderConfig>(`/api/providers/${encodeURIComponent(selected.id)}`, { method: "DELETE" }))
+      setSelectedId("")
+      await onRefresh()
+    } catch (cause) { setActionError(cause instanceof Error ? cause.message : "Request failed") }
+  }
+
+  return (
+    <div className="provider-workspace">
+      <div className="provider-list-pane">
+        <div className="workspace-heading">
+          <h1>{locale === "zh-CN" ? "提供方" : "Providers"}</h1>
+          <span className="provider-count">{providers.length}</span>
+        </div>
+        <div className="provider-search-row">
+          <label className="provider-search">
+            <SearchIcon size={18} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={locale === "zh-CN" ? "搜索提供商..." : "Search providers..."} />
+          </label>
+          <button className={`filter-button ${enabledOnly ? "active" : ""}`} aria-label={locale === "zh-CN" ? "仅显示已启用" : "Show enabled only"} aria-pressed={enabledOnly} onClick={() => setEnabledOnly((value) => !value)}><SlidersHorizontalIcon size={18} /></button>
+        </div>
+        <div className="provider-group-label">{locale === "zh-CN" ? "就绪" : "READY"}<span>{visibleProviders.length}</span></div>
+        <div className="provider-list">
+          {loading && !providers.length ? (
+            <div className="provider-list-loading">{locale === "zh-CN" ? "正在加载..." : "Loading..."}</div>
+          ) : visibleProviders.map((provider) => (
+            <button key={provider.id} className={`provider-list-item ${provider.id === selected?.id ? "selected" : ""}`} aria-pressed={provider.id === selected?.id} onClick={() => { setSelectedId(provider.id); setDetailVisible(true) }}>
+              <span className="provider-avatar">{provider.name.slice(0, 1).toUpperCase()}</span>
+              <span className="provider-list-copy"><strong>{provider.name}</strong><small>{locale === "zh-CN" ? `${provider.modelCount || provider.keys.length} 个模型` : `${provider.modelCount || provider.keys.length} ${(provider.modelCount || provider.keys.length) === 1 ? "model" : "models"}`}</small></span>
+              {provider.id === health?.defaultProvider && <StarIcon className="provider-star" aria-label={locale === "zh-CN" ? "默认提供方" : "Default provider"} />}
+              <span className={`status-dot ${provider.enabled ? "online" : "offline"}`} aria-label={provider.enabled ? (locale === "zh-CN" ? "已启用" : "Enabled") : (locale === "zh-CN" ? "已停用" : "Disabled")} />
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className={`provider-detail-pane ${detailVisible ? "mobile-visible" : ""}`}>
+        {actionError && <p className="provider-action-error">{actionError}</p>}
+        <div className="detail-topbar">
+          <button className="back-button" aria-label={locale === "zh-CN" ? "返回提供方列表" : "Back to providers"} title={locale === "zh-CN" ? "返回提供方列表" : "Back to providers"} onClick={() => setDetailVisible(false)}><ArrowLeftIcon /></button>
+          <h2>{locale === "zh-CN" ? "提供商概览" : "Provider overview"}</h2>
+          <Button className="add-provider-button" onClick={() => window.dispatchEvent(new CustomEvent("open-provider-manager"))}>+ {locale === "zh-CN" ? "添加提供方" : "Add provider"}</Button>
+        </div>
+        {selected ? (
+          <>
+            <div className="provider-identity">
+              <span className="provider-logo large">{selected.name.slice(0, 1).toUpperCase()}</span>
+              <h3>{selected.name}</h3>
+              <div className="detail-actions"><Button variant="outline" size="sm" disabled={selected.id === health?.defaultProvider} onClick={() => void patchSelected({ makeDefault: true })}>{locale === "zh-CN" ? "设为默认" : "Set default"}</Button><AlertDialog><AlertDialogTrigger render={<Button className="provider-delete-button" variant="outline" size="icon-sm" aria-label={locale === "zh-CN" ? "删除提供方" : "Delete provider"} />}><Trash2Icon /></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{locale === "zh-CN" ? "删除提供方？" : "Delete provider?"}</AlertDialogTitle><AlertDialogDescription>{locale === "zh-CN" ? "此操作会删除提供方及其密钥配置。" : "This removes the provider and its key configuration."}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{locale === "zh-CN" ? "取消" : "Cancel"}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void deleteSelected()}>{locale === "zh-CN" ? "删除" : "Delete"}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog><label className="enabled-control"><span className="enabled-label">{selected.enabled ? (locale === "zh-CN" ? "已启用" : "Enabled") : (locale === "zh-CN" ? "已停用" : "Disabled")}</span><Switch checked={selected.enabled} aria-label={locale === "zh-CN" ? `${selected.name} 启用状态` : `${selected.name} enabled state`} disabled={selected.id === health?.defaultProvider} onCheckedChange={checked => void patchSelected({ enabled: checked })} /></label></div>
+            </div>
+            <nav className="detail-tabs"><button className={detailTab === "overview" ? "active" : ""} onClick={() => setDetailTab("overview")}>{locale === "zh-CN" ? "概览" : "Overview"}</button><button className={detailTab === "models" ? "active" : ""} onClick={() => setDetailTab("models")}>{locale === "zh-CN" ? "模型" : "Models"}</button><button className={detailTab === "usage" ? "active" : ""} onClick={() => setDetailTab("usage")}>{locale === "zh-CN" ? "用量" : "Usage"}</button><button className={detailTab === "keys" ? "active" : ""} onClick={() => setDetailTab("keys")}>{locale === "zh-CN" ? "API 密钥" : "API keys"}</button><button className={detailTab === "settings" ? "active" : ""} onClick={() => setDetailTab("settings")}>{locale === "zh-CN" ? "设置" : "Settings"}</button></nav>
+            {detailTab === "overview" ? <div className="detail-grid">
+              <section className="detail-section"><h4>{locale === "zh-CN" ? "连接" : "Connection"}</h4><dl><div><dt>{locale === "zh-CN" ? "状态" : "Status"}</dt><dd className="success-text">✓ {selected.enabled ? (locale === "zh-CN" ? "已连接" : "Connected") : (locale === "zh-CN" ? "已停用" : "Disabled")}</dd></div><div><dt>Base URL</dt><dd className="mono">{selected.baseUrl || "-"}</dd></div><div><dt>{locale === "zh-CN" ? "认证" : "Auth"}</dt><dd>{locale === "zh-CN" ? "API 密钥" : "API key"}</dd></div><div><dt>{locale === "zh-CN" ? "默认模型（可选）" : "Default model"}</dt><dd>{health?.defaultModel || "-"}</dd></div></dl><button className="edit-link" onClick={() => window.dispatchEvent(new CustomEvent("open-provider-manager"))}>{locale === "zh-CN" ? "编辑设置" : "Edit settings"}</button></section>
+              <section className="detail-section"><h4>{locale === "zh-CN" ? "运行统计" : "Runtime totals"}</h4><dl><div><dt>{locale === "zh-CN" ? "请求" : "Requests"}</dt><dd>{formatNumber(requestCount, locale)}</dd></div><div><dt>{locale === "zh-CN" ? "成功" : "Success"}</dt><dd>{formatNumber(totals.success, locale)}</dd></div><div><dt>{locale === "zh-CN" ? "错误" : "Errors"}</dt><dd>{formatNumber(totals.errors, locale)}</dd></div><div><dt>{locale === "zh-CN" ? "令牌" : "Tokens"}</dt><dd>{formatNumber(totals.tokens, locale)}</dd></div></dl><button className="edit-link" onClick={() => setDetailTab("usage")}>{locale === "zh-CN" ? "查看详细用量 →" : "View usage →"}</button></section>
+              <section className="detail-section speed-section"><h4>{locale === "zh-CN" ? "可用资源" : "Available resources"}</h4><dl><div><dt>{locale === "zh-CN" ? "模型" : "Models"}</dt><dd>{formatNumber(selected.modelCount || configured?.models.length || 0, locale)}</dd></div><div><dt>API keys</dt><dd>{formatNumber(selected.keys.length, locale)}</dd></div><div><dt>{locale === "zh-CN" ? "限流" : "Rate limited"}</dt><dd>{formatNumber(totals.ratelimited, locale)}</dd></div></dl></section>
+              <section className="detail-section auth-section"><h4>{locale === "zh-CN" ? "认证" : "Authentication"}</h4><p className="auth-status"><span className={`status-dot ${selected.keys.length ? "online" : "offline"}`} /> {selected.keys.length ? (locale === "zh-CN" ? `${selected.keys.length} 个 API 密钥已配置` : `${selected.keys.length} API ${selected.keys.length === 1 ? "key" : "keys"} configured`) : (locale === "zh-CN" ? "尚未配置 API 密钥" : "No API keys configured")}</p></section>
+            </div> : detailTab === "models" ? (
+              configured?.models.length ? (
+                <section className="provider-model-list">
+                  {configured.models.map(model => <div key={model.alias}><span><strong>{model.name}</strong><small>{model.alias} → {model.upstreamModel}</small></span>{health?.defaultModel === model.alias ? <Badge>{locale === "zh-CN" ? "默认" : "Default"}</Badge> : <Button variant="ghost" size="sm" onClick={() => void patchSelected({ makeDefault: true, defaultModel: model.alias })}>{locale === "zh-CN" ? "设为默认" : "Set default"}</Button>}</div>)}
+                </section>
+              ) : (
+                <section className="tab-summary">
+                  <div><h4>{locale === "zh-CN" ? "暂无模型" : "No models configured"}</h4><p>{locale === "zh-CN" ? "在提供方管理中添加模型。" : "Add a model in provider management."}</p></div>
+                  <Button variant="outline" onClick={() => window.dispatchEvent(new CustomEvent("open-provider-manager"))}>{locale === "zh-CN" ? "打开管理" : "Open management"}</Button>
+                </section>
+              )
+            ) : detailTab === "keys" ? (
+              <div className="provider-keys-tab"><ProviderKeySection provider={selected} locale={locale} copy={translations[locale]} onRefresh={onRefresh} /></div>
+            ) : detailTab === "usage" ? (
+              <section className="detail-summary-tab">
+                <h4>{locale === "zh-CN" ? "运行时用量" : "Runtime usage"}</h4>
+                <div className="detail-summary-grid">
+                  {[
+                    [locale === "zh-CN" ? "请求" : "Requests", totals.requests],
+                    [locale === "zh-CN" ? "成功" : "Success", totals.success],
+                    [locale === "zh-CN" ? "错误" : "Errors", totals.errors],
+                    [locale === "zh-CN" ? "限流" : "Rate limited", totals.ratelimited],
+                    [locale === "zh-CN" ? "令牌" : "Tokens", totals.tokens],
+                  ].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong>{formatNumber(Number(value), locale)}</strong></div>)}
+                </div>
+                {!requestCount && <p className="muted-note">{locale === "zh-CN" ? "此提供方还没有运行时用量数据。" : "No runtime usage has been recorded for this provider."}</p>}
+              </section>
+            ) : (
+              <section className="detail-settings-tab detail-section">
+                <h4>{locale === "zh-CN" ? "提供方设置" : "Provider settings"}</h4>
+                <dl>
+                  <div><dt>Base URL</dt><dd className="mono">{selected.baseUrl || "-"}</dd></div>
+                  <div><dt>{locale === "zh-CN" ? "上游格式" : "Upstream format"}</dt><dd>{selected.upstreamFormat}</dd></div>
+                  <div><dt>{locale === "zh-CN" ? "余额查询" : "Balance query"}</dt><dd>{selected.balanceQueryEnabled ? (locale === "zh-CN" ? "已启用" : "Enabled") : (locale === "zh-CN" ? "已停用" : "Disabled")}</dd></div>
+                </dl>
+                <Button variant="outline" onClick={() => window.dispatchEvent(new CustomEvent("open-provider-manager"))}>{locale === "zh-CN" ? "编辑提供方" : "Edit provider"}</Button>
+              </section>
+            )}
+          </>
+        ) : <div className="empty-provider-detail">{locale === "zh-CN" ? "暂无提供方" : "No providers configured"}</div>}
+      </div>
+    </div>
+  )
+}
+
 function Dashboard({
   health,
   connection,
@@ -567,244 +705,52 @@ function Dashboard({
   error: string
   onRefresh: () => Promise<void>
 }) {
-  const { locale } = useLanguage()
+  const { locale, setLocale } = useLanguage()
+  const { theme, setTheme } = useTheme()
   const t = translations[locale]
-  const totals = health?.total ?? {
-    requests: 0,
-    success: 0,
-    errors: 0,
-    ratelimited: 0,
-    tokens: 0,
+  const [activeSection, setActiveSection] = useState<"dashboard" | "providers" | "settings" | "codex" | "models" | "agents" | "logs" | "usage" | "storage" | "integrations">("providers")
+  const [managerOpen, setManagerOpen] = useState(false)
+  useEffect(() => {
+    const open = () => { setManagerOpen(true); setActiveSection("providers") }
+    window.addEventListener("open-provider-manager", open)
+    return () => window.removeEventListener("open-provider-manager", open)
+  }, [])
+  const totals = health?.total ?? { requests: 0, success: 0, errors: 0, ratelimited: 0, tokens: 0 }
+  const navItems = [
+    { id: "dashboard" as const, label: t.navigation.dashboard, icon: LayoutDashboardIcon },
+    { id: "codex" as const, label: locale === "zh-CN" ? "Codex 认证" : "Codex auth", icon: KeyRoundIcon },
+    { id: "providers" as const, label: t.navigation.providers, icon: ServerCogIcon },
+    { id: "models" as const, label: locale === "zh-CN" ? "模型" : "Models", icon: BoxIcon },
+    { id: "agents" as const, label: locale === "zh-CN" ? "子代理" : "Subagents", icon: BotIcon },
+    { id: "logs" as const, label: locale === "zh-CN" ? "日志与调试" : "Logs & debug", icon: TerminalSquareIcon },
+    { id: "usage" as const, label: locale === "zh-CN" ? "用量" : "Usage", icon: ActivityIcon },
+    { id: "storage" as const, label: locale === "zh-CN" ? "存储" : "Storage", icon: DatabaseIcon },
+    { id: "integrations" as const, label: locale === "zh-CN" ? "集成" : "Integrations", icon: Globe2Icon },
+    { id: "settings" as const, label: t.navigation.settings, icon: Settings2Icon },
+  ]
+  const renderContent = () => {
+    if (health?.setupRequired) return <ProviderManager locale={locale} setupMode onConfigured={onRefresh} />
+    if (activeSection === "settings") return <section className="workspace-page form-workspace"><GatewaySettingsPanel locale={locale} /></section>
+    if (activeSection === "codex") return <section className="workspace-page"><CodexSetup locale={locale} /></section>
+    if (["models", "agents", "logs", "usage", "storage", "integrations"].includes(activeSection)) return <OperationsPanel kind={activeSection as "models" | "agents" | "logs" | "usage" | "storage" | "integrations"} locale={locale} health={health} />
+    if (activeSection === "dashboard") return <section className="overview-dashboard"><div className="overview-title"><h1>{locale === "zh-CN" ? "仪表盘" : "Dashboard"}</h1><ConnectionBadge state={connection} locale={locale} /></div><div className="overview-metrics">{[
+      [t.metrics.requests, totals.requests], [t.metrics.success, totals.success], [t.metrics.errors, totals.errors], [t.metrics.rateLimited, totals.ratelimited], [t.metrics.tokens, totals.tokens],
+    ].map(([label, value]) => <MetricCard key={String(label)} label={String(label)} value={Number(value)} note={t.metrics.lifetime} badge={t.metrics.total} loading={loading} locale={locale} />)}</div></section>
+    if (managerOpen) return <section className="manager-page"><button className="manager-back" onClick={() => setManagerOpen(false)}><ArrowLeftIcon aria-hidden="true" />{locale === "zh-CN" ? "返回提供方概览" : "Back to provider overview"}</button><ProviderManager locale={locale} /></section>
+    return <ProviderWorkspace health={health} loading={loading} locale={locale} onRefresh={onRefresh} />
   }
-  const refreshedAt = new Date().toLocaleTimeString(locale)
-  const providers = health?.setupRequired
-    ? []
-    : health
-      ? health.providers?.length
-        ? health.providers
-        : [
-            {
-              id: health.defaultProvider,
-              name: health.defaultProvider,
-              baseUrl: health.upstream || "",
-              upstreamFormat: "responses" as const,
-              enabled: true,
-              balanceQueryEnabled: false,
-              modelCount: 0,
-              total: health.total,
-              keys: health.keys,
-            },
-          ]
-      : []
-  const keyCount = providers.reduce(
-    (count, provider) => count + provider.keys.length,
-    0
-  )
 
   return (
-    <main className="min-h-svh bg-background text-foreground">
-      <header className="border-b border-border/60">
-        <div className="mx-auto flex w-full max-w-7xl flex-col items-stretch gap-6 px-6 py-8 sm:flex-row sm:items-start sm:justify-between lg:px-8">
-          <div className="flex items-start gap-4">
-            <BrandMark />
-            <div className="flex flex-col gap-1">
-              <p className="font-mono text-xs font-semibold text-primary">
-                {t.operations}
-              </p>
-              <h1 className="text-3xl font-semibold sm:text-4xl">{t.title}</h1>
-              <p className="text-sm text-muted-foreground">{t.subtitle}</p>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
-            <LanguageToggle />
-            <ThemeToggle />
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              aria-label={t.logout}
-              title={t.logout}
-              onClick={() => window.location.assign("/logout")}
-            >
-              <LogOutIcon />
-            </Button>
-            <ConnectionBadge state={connection} locale={locale} />
-          </div>
-        </div>
-      </header>
-
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-8 px-6 py-8 lg:px-8">
-        <div className="flex flex-wrap items-center justify-between gap-3 font-mono text-xs text-muted-foreground">
-          <span>
-            {health
-              ? health.setupRequired
-                ? `${t.meta.setupRequired} · ${t.meta.port} ${health.port} · ${t.meta.gateway} v${health.version}`
-                : `${t.meta.upstream} ${health.upstream} · ${t.meta.port} ${health.port} · ${t.meta.uptime} ${health.uptime}s · ${t.meta.gateway} v${health.version}`
-              : connection === "connecting"
-                ? t.meta.connecting
-                : t.meta.unreachable}
-          </span>
-          <span>{health ? `${t.meta.refreshed} ${refreshedAt}` : ""}</span>
-        </div>
-
-        {error && (
-          <Alert variant="destructive">
-            <ServerCrashIcon />
-            <AlertTitle>{t.alertTitle}</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-
-        {health?.setupRequired ? (
-          <ProviderManager locale={locale} setupMode onConfigured={onRefresh} />
-        ) : (
-          <Tabs defaultValue="dashboard" className="flex flex-col gap-5">
-            <TabsList
-              variant="line"
-              className="w-full justify-start overflow-x-auto"
-            >
-              <TabsTrigger
-                value="dashboard"
-                aria-label={t.navigation.dashboard}
-                title={t.navigation.dashboard}
-              >
-                <LayoutDashboardIcon data-icon="inline-start" />
-                <span className="hidden sm:inline">
-                  {t.navigation.dashboard}
-                </span>
-              </TabsTrigger>
-              <TabsTrigger
-                value="providers"
-                aria-label={t.navigation.providers}
-                title={t.navigation.providers}
-              >
-                <ServerCogIcon data-icon="inline-start" />
-                <span className="hidden sm:inline">
-                  {t.navigation.providers}
-                </span>
-              </TabsTrigger>
-              <TabsTrigger
-                value="settings"
-                aria-label={t.navigation.settings}
-                title={t.navigation.settings}
-              >
-                <Settings2Icon data-icon="inline-start" />
-                <span className="hidden sm:inline">
-                  {t.navigation.settings}
-                </span>
-              </TabsTrigger>
-              <TabsTrigger
-                value="codex"
-                aria-label={t.navigation.codex}
-                title={t.navigation.codex}
-              >
-                <TerminalSquareIcon data-icon="inline-start" />
-                <span className="hidden sm:inline">{t.navigation.codex}</span>
-              </TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="dashboard" className="flex flex-col gap-8 pt-2">
-              <section
-                className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"
-                aria-label={t.metricsLabel}
-              >
-                <MetricCard
-                  label={t.metrics.requests}
-                  value={totals.requests}
-                  note={t.metrics.lifetime}
-                  badge={t.metrics.total}
-                  loading={loading}
-                  locale={locale}
-                />
-                <MetricCard
-                  label={t.metrics.success}
-                  value={totals.success}
-                  note={t.metrics.lifetime}
-                  badge={t.metrics.ok}
-                  loading={loading}
-                  locale={locale}
-                />
-                <MetricCard
-                  label={t.metrics.errors}
-                  value={totals.errors}
-                  note={t.metrics.lifetime}
-                  badge={t.metrics.fail}
-                  loading={loading}
-                  locale={locale}
-                />
-                <MetricCard
-                  label={t.metrics.rateLimited}
-                  value={totals.ratelimited}
-                  note={t.metrics.upstream}
-                  badge="HTTP 429"
-                  loading={loading}
-                  locale={locale}
-                />
-                <MetricCard
-                  label={t.metrics.tokens}
-                  value={totals.tokens}
-                  note={t.metrics.lifetime}
-                  badge={t.metrics.usage}
-                  loading={loading}
-                  locale={locale}
-                />
-              </section>
-
-              <section className="flex flex-col gap-6" aria-label={t.keyPool}>
-                <header className="flex flex-wrap items-end justify-between gap-3">
-                  <div className="flex flex-col gap-1">
-                    <p className="font-mono text-xs text-muted-foreground">
-                      {t.keyPool}
-                    </p>
-                    <h2 className="text-xl font-semibold">
-                      {t.connectionHealth}
-                    </h2>
-                  </div>
-                  <p className="font-mono text-xs text-muted-foreground">
-                    {health ? t.keysSynced(keyCount) : t.waitingForKeys}
-                  </p>
-                </header>
-
-                {loading && !health ? <LoadingKeyCards /> : null}
-                {!loading && keyCount === 0 ? (
-                  <Empty className="border">
-                    <EmptyHeader>
-                      <EmptyMedia variant="icon">
-                        <KeyRoundIcon />
-                      </EmptyMedia>
-                      <EmptyTitle>{t.noKeys}</EmptyTitle>
-                      <EmptyDescription>{t.noKeysDescription}</EmptyDescription>
-                    </EmptyHeader>
-                  </Empty>
-                ) : null}
-                {providers.map((provider) => (
-                  <ProviderKeySection
-                    key={provider.id}
-                    provider={provider}
-                    locale={locale}
-                    copy={t}
-                    onRefresh={onRefresh}
-                  />
-                ))}
-              </section>
-
-              <footer className="flex justify-between gap-4 font-mono text-xs text-muted-foreground">
-                <span>{t.autoRefresh}</span>
-                <span>Codex Provider Gateway</span>
-              </footer>
-            </TabsContent>
-            <TabsContent value="providers" className="pt-2">
-              <ProviderManager locale={locale} />
-            </TabsContent>
-            <TabsContent value="settings" className="pt-2">
-              <GatewaySettingsPanel locale={locale} />
-            </TabsContent>
-            <TabsContent value="codex" className="pt-2">
-              <CodexSetup locale={locale} />
-            </TabsContent>
-          </Tabs>
-        )}
-      </div>
+    <main className="app-shell">
+      <aside className="app-sidebar" aria-label={locale === "zh-CN" ? "应用侧栏" : "Application sidebar"}>
+        <div className="sidebar-brand"><BrandMark /><span>opencodex</span><small>v2.12.0</small></div>
+        <nav className="sidebar-nav" aria-label={locale === "zh-CN" ? "主导航" : "Main navigation"}>{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`sidebar-item ${activeSection === id ? "active" : ""}`} aria-label={label} title={label} aria-current={activeSection === id ? "page" : undefined} onClick={() => { setActiveSection(id); setManagerOpen(false) }}><Icon aria-hidden="true" /><span>{label}</span></button>)}</nav>
+        <div className="sidebar-bottom"><button className="sidebar-item" aria-label={locale === "zh-CN" ? "Switch to English" : "切换到中文"} title={locale === "zh-CN" ? "Switch to English" : "切换到中文"} onClick={() => setLocale(locale === "zh-CN" ? "en" : "zh-CN")}><LanguagesIcon aria-hidden="true" /><span>{locale === "zh-CN" ? "中文" : "English"}</span><ChevronRightIcon className="item-end" aria-hidden="true" /></button><button className="sidebar-item" aria-label={locale === "zh-CN" ? "切换界面主题" : "Change interface theme"} title={locale === "zh-CN" ? "切换界面主题" : "Change interface theme"} onClick={() => setTheme(theme === "system" ? "light" : theme === "light" ? "dark" : "system")}><MonitorIcon aria-hidden="true" /><span>{theme === "system" ? (locale === "zh-CN" ? "跟随系统" : "System theme") : theme === "light" ? (locale === "zh-CN" ? "浅色" : "Light") : (locale === "zh-CN" ? "深色" : "Dark")}</span></button><button className="sidebar-item danger" aria-label={locale === "zh-CN" ? "停止 Gateway" : "Stop gateway"} title={locale === "zh-CN" ? "停止 Gateway" : "Stop gateway"} onClick={() => void apiRequest("/api/runtime/stop", { method: "POST" }).catch(cause => window.alert(cause instanceof Error ? cause.message : "Request failed"))}><PowerIcon aria-hidden="true" /><span>{locale === "zh-CN" ? "停止 Gateway" : "Stop gateway"}</span></button></div>
+      </aside>
+      <section className="app-main">
+        <div className="shell-toolbar"><div className="toolbar-status" title={error}><span className={`status-dot ${connection === "live" ? "online" : "offline"}`} />{connection === "live" ? (locale === "zh-CN" ? "网关已连接" : "Gateway connected") : error ? t.alertTitle : (locale === "zh-CN" ? "正在连接" : "Connecting")}</div>{(activeSection !== "providers" || managerOpen) && <div className="toolbar-actions"><Button variant="outline" size="icon" aria-label={t.logout} title={t.logout} onClick={() => window.location.assign("/logout")}><LogOutIcon /></Button></div>}</div>
+        {renderContent()}
+      </section>
     </main>
   )
 }
@@ -858,11 +804,23 @@ export function App() {
     let timer = 0
     const poll = async () => {
       await refresh()
-      if (!stopped) timer = window.setTimeout(poll, 2000)
+      if (!stopped && !document.hidden) {
+        timer = window.setTimeout(poll, 7500)
+      }
     }
+    const handleVisibility = () => {
+      if (!document.hidden) {
+        window.clearTimeout(timer)
+        void poll()
+      } else {
+        window.clearTimeout(timer)
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility)
     void poll()
     return () => {
       stopped = true
+      document.removeEventListener("visibilitychange", handleVisibility)
       window.clearTimeout(timer)
       activeRequest.current?.abort()
     }

@@ -98,6 +98,7 @@ async function startGateway(keys, extra = [], env = {}, config = {}, options = {
     configPath,
     async health() { return fetch(`${base}/health`).then(r => r.json()); },
     async providers() { return fetch(`${base}/api/providers`).then(r => r.json()); },
+    async operation(pathname, init) { return fetch(`${base}${pathname}`, init); },
     async settings(init) { return fetch(`${base}/api/settings`, init); },
     async chat(body = {}, headers = {}) {
       const res = await fetch(`${base}/v1/chat/completions`, {
@@ -684,7 +685,19 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
       baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
       upstreamFormat: 'chat-completions',
       enabled: true,
-      models: [{ id: 'shared', name: 'Shared', upstreamModel: 'same-upstream-model' }],
+      models: [{
+        id: 'shared',
+        name: 'Shared',
+        upstreamModel: 'same-upstream-model',
+        reasoning: {
+          parameter: 'thinking_budget',
+          default: 'high',
+          levels: [
+            { effort: 'low', upstreamValue: 1024 },
+            { effort: 'high', upstreamValue: 8192 },
+          ],
+        },
+      }],
       keys: [{ name: 'alpha-key', key: 'sk-alpha', weight: 1, enabled: true }],
     }],
   });
@@ -694,6 +707,7 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
       model: 'alpha--shared',
       instructions: 'Use tools carefully.',
       input: [{ role: 'user', content: [{ type: 'input_text', text: 'inspect' }] }],
+      reasoning: { effort: 'high' },
     }, { cookie: 'dsgw=must-not-reach-upstream' }, '?trace=adapted');
     assert.equal(nonStream.status, 200, nonStream.text);
     assert.equal(nonStream.headers.get('x-gateway-provider'), 'alpha');
@@ -708,6 +722,8 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
 
     assert.equal(requests[0].url, '/v1/chat/completions?trace=adapted');
     assert.equal(requests[0].body.model, 'same-upstream-model');
+    assert.equal(requests[0].body.thinking_budget, 8192);
+    assert.equal(requests[0].body.reasoning_effort, undefined);
     assert.deepEqual(requests[0].body.messages.map(message => message.role), ['system', 'user']);
     assert.equal(requests[0].cookie, undefined);
 
@@ -1030,6 +1046,162 @@ test('provider API persists file values instead of scalar runtime overrides', as
   }
 });
 
+test('operations API aggregates usage and restores provider configuration', async () => {
+  const original = multiProviderConfig({ cooldownMs: 1200 });
+  const gw = await startGateway('', [], {}, original, { keysArg: false });
+  try {
+    const response = await gw.chat({ model: 'alpha--shared' });
+    assert.equal(response.status, 200);
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const usage = await gw.operation('/api/usage?range=30d');
+    assert.equal(usage.status, 200);
+    const usageBody = await usage.json();
+    assert.equal(usageBody.total.requests, 1);
+    assert.equal(usageBody.total.tokens, 15);
+
+    const backupResponse = await gw.operation('/api/storage', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ action: 'backup' }),
+    });
+    assert.equal(backupResponse.status, 201);
+    const backup = await backupResponse.json();
+    const changed = await fetch(`${gw.base}/api/providers/alpha`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ name: 'Changed Alpha', expectedRevision: (await gw.providers()).revision }),
+    });
+    assert.equal(changed.status, 200, await changed.text());
+    assert.equal((await gw.providers()).providers[0].name, 'Changed Alpha');
+
+    const restored = await gw.operation('/api/storage', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ action: 'restore', id: backup.id }),
+    });
+    assert.equal(restored.status, 200, await restored.text());
+    assert.equal((await gw.providers()).providers[0].name, 'Alpha');
+    const settings = await gw.settings({ headers: { authorization: `Bearer ${original.adminToken}` } });
+    assert.equal((await settings.json()).effective.cooldownMs, 1200);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('native Codex agents project TOML without changing gateway model routing', async () => {
+  const upstreamPort = await freePort();
+  const upstreamRequests = [];
+  const upstream = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    upstreamRequests.push({
+      url: req.url,
+      body: JSON.parse(Buffer.concat(chunks).toString('utf8')),
+    });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'chatcmpl-native',
+      object: 'chat.completion',
+      model: 'upstream-agent-model',
+      choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'ordinary model ok' } }],
+      usage: { prompt_tokens: 4, completion_tokens: 5, total_tokens: 9 },
+    }));
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig({
+    providers: [{
+      id: 'alpha',
+      name: 'Alpha',
+      baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+      upstreamFormat: 'chat-completions',
+      enabled: true,
+      models: [{ id: 'shared', name: 'Shared', upstreamModel: 'upstream-agent-model' }],
+      keys: [{ name: 'alpha-key', key: 'sk-alpha', weight: 1 }],
+    }],
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--shared',
+  });
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-codex-home-'));
+  const gw = await startGateway('', [], { CODEX_HOME: codexHome }, config, { mock: false, keysArg: false });
+  try {
+    const createdResponse = await gw.operation('/api/subagents', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({
+        name: 'code_reviewer',
+        description: 'Reviews correctness and security.',
+        providerId: 'alpha',
+        model: 'alpha--shared',
+        developerInstructions: 'Review correctness, security, and missing tests.',
+        enabled: true,
+      }),
+    });
+    const createdText = await createdResponse.text();
+    assert.equal(createdResponse.status, 201, createdText);
+    const agent = JSON.parse(createdText).subagent;
+    assert.equal(agent.name, 'code_reviewer');
+    const agentFile = path.join(codexHome, 'agents', 'code_reviewer.toml');
+    assert.match(fs.readFileSync(agentFile, 'utf8'), /^name = "code_reviewer"/m);
+    assert.match(fs.readFileSync(agentFile, 'utf8'), /^description = /m);
+    assert.match(fs.readFileSync(agentFile, 'utf8'), /^model = "Alpha\.shared"/m);
+    assert.match(fs.readFileSync(agentFile, 'utf8'), /developer_instructions/);
+
+    const modelsResponse = await fetch(`${gw.base}/v1/models`);
+    assert.equal(modelsResponse.status, 200);
+    const models = await modelsResponse.json();
+    assert.ok(models.data.some(model => model.id === 'Alpha.shared'));
+    assert.equal(models.data.some(model => model.id.startsWith('agent--')), false);
+    assert.deepEqual(
+      models.data.find(model => model.id === 'Alpha.shared').input_modalities,
+      ['text', 'image'],
+    );
+
+    const response = await gw.responses({
+      model: 'Alpha.shared',
+      instructions: 'Keep the client requirements.',
+      input: [{ role: 'user', content: 'Inspect this patch.' }],
+    });
+    assert.equal(response.status, 200, response.text);
+    assert.equal(response.headers.get('x-gateway-agent'), null);
+    assert.equal(JSON.parse(response.text).output[0].content[0].text, 'ordinary model ok');
+    assert.equal(upstreamRequests[0].url, '/v1/chat/completions');
+    assert.equal(upstreamRequests[0].body.model, 'upstream-agent-model');
+    assert.deepEqual(upstreamRequests[0].body.messages.map(message => message.role), ['system', 'user']);
+    assert.match(upstreamRequests[0].body.messages[0].content, /Keep the client requirements/);
+    assert.doesNotMatch(upstreamRequests[0].body.messages[0].content, /Review correctness/);
+
+    const chatResponse = await gw.chat({
+      model: 'Alpha.shared',
+      messages: [
+        { role: 'system', content: 'Client system message.' },
+        { role: 'user', content: 'Review directly.' },
+      ],
+    });
+    assert.equal(chatResponse.status, 200, chatResponse.text);
+    assert.deepEqual(upstreamRequests[1].body.messages.map(message => message.role), ['system', 'user']);
+    assert.equal(upstreamRequests[1].body.messages[0].content, 'Client system message.');
+
+    const catalogResponse = await gw.operation('/api/codex/config');
+    const catalogText = await catalogResponse.text();
+    assert.equal(catalogResponse.status, 200, catalogText);
+    const catalog = JSON.parse(catalogText);
+    assert.deepEqual(catalog.catalog.models.map(model => model.slug), ['Alpha.shared']);
+
+    const disabledResponse = await gw.operation(`/api/subagents/${agent.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ ...agent, enabled: false }),
+    });
+    const disabledText = await disabledResponse.text();
+    assert.equal(disabledResponse.status, 200, disabledText);
+    assert.equal(fs.existsSync(agentFile), false);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
 test('settings API redacts tokens and applies runtime settings live', async () => {
   const config = multiProviderConfig({
     cooldownMs: 60000,
@@ -1253,9 +1425,17 @@ test('model discovery proxies OpenAI-compatible endpoints and normalizes upstrea
     res.end(JSON.stringify({
       object: 'list',
       data: [
-        { id: 'Qwen/Qwen3-235B-A22B-Instruct', owned_by: 'qwen' },
+        {
+          id: 'Qwen/Qwen3-235B-A22B-Instruct',
+          owned_by: 'qwen',
+          architecture: { input_modalities: ['text'] },
+        },
         { id: 'gpt-4o-mini', owned_by: 'openai' },
-        { id: 'claude/3.5-sonnet', name: 'Claude 3.5 Sonnet' },
+        {
+          id: 'claude/3.5-sonnet',
+          name: 'Claude 3.5 Sonnet',
+          supports_image: false,
+        },
       ],
     }));
   });
@@ -1288,7 +1468,26 @@ test('model discovery proxies OpenAI-compatible endpoints and normalizes upstrea
     ]);
     assert.equal(payload.models[2].ownedBy, 'qwen');
     assert.equal(payload.models[0].name, 'Claude 3.5 Sonnet');
+    assert.deepEqual(payload.models.map(model => model.inputModalities), [
+      ['text'],
+      ['text', 'image'],
+      ['text'],
+    ]);
+    assert.deepEqual(payload.models.map(model => model.capabilitySource), [
+      'upstream',
+      'default',
+      'upstream',
+    ]);
     assert.ok(!JSON.stringify(payload).includes(secret));
+
+    const capabilitiesResponse = await fetch(`${gw.base}/api/model-capabilities`);
+    assert.equal(capabilitiesResponse.status, 200);
+    const capabilities = await capabilitiesResponse.json();
+    assert.deepEqual(capabilities.unknownModel.inputModalities, ['text', 'image']);
+    assert.ok(capabilities.models.some(model => (
+      model.id === 'deepseek-v4-pro'
+      && JSON.stringify(model.inputModalities) === JSON.stringify(['text'])
+    )));
 
     const providerKeyResponse = await fetch(`${gw.base}/api/models`, {
       method: 'POST',
@@ -1724,7 +1923,7 @@ test('generated Codex artifacts omit env auth when the gateway has no token', as
       'Beta.gpt-4.1',
     ]);
     assert.deepEqual(catalog.models.map(model => model.input_modalities), [
-      ['text'],
+      ['text', 'image'],
       ['text', 'image'],
     ]);
     assert.equal(catalog.models[0].web_search_tool_type, 'text');
@@ -2138,6 +2337,125 @@ test('token auth: cookie login for dashboard, bearer for proxy', async () => {
       body: JSON.stringify({ model: 'deepseek-v4-flash' }),
     });
     assert.equal(proxyWithBearer.status, 200);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('browser management mutations require an origin and admin token rotation invalidates old sessions', async () => {
+  const adminToken = 'csrf-admin-token-123456';
+  const nextAdminToken = 'rotated-csrf-admin-token-123456';
+  const gw = await startGateway('', [], {}, multiProviderConfig({ adminToken }), { keysArg: false });
+  try {
+    const login = await fetch(`${gw.base}/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ token: adminToken }),
+      redirect: 'manual',
+    });
+    assert.equal(login.status, 302);
+    const cookie = login.headers.get('set-cookie').split(';', 1)[0];
+
+    const missingOrigin = await gw.settings({
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ maxRetries: 1 }),
+    });
+    assert.equal(missingOrigin.status, 403);
+
+    const crossOrigin = await gw.settings({
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json', origin: 'https://attacker.example' },
+      body: JSON.stringify({ maxRetries: 1 }),
+    });
+    assert.equal(crossOrigin.status, 403);
+
+    const rotated = await gw.settings({
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json', origin: gw.base },
+      body: JSON.stringify({ adminToken: nextAdminToken }),
+    });
+    assert.equal(rotated.status, 200, await rotated.text());
+    assert.equal((await gw.settings({ headers: { cookie } })).status, 401);
+    assert.equal((await gw.settings({ headers: { authorization: `Bearer ${nextAdminToken}` } })).status, 200);
+
+    const logs = await gw.operation('/api/logs?level=audit', {
+      headers: { authorization: `Bearer ${nextAdminToken}` },
+    });
+    assert.equal(logs.status, 200);
+    const audit = (await logs.json()).logs;
+    assert.ok(audit.some(entry => entry.message === 'admin login succeeded'));
+    assert.ok(audit.some(entry => entry.message === 'management mutation rejected by origin policy'));
+    assert.ok(audit.some(entry => entry.message === 'management mutation completed'));
+    assert.ok(!JSON.stringify(audit).includes(adminToken));
+    assert.ok(!JSON.stringify(audit).includes(nextAdminToken));
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('admin login rate limit blocks the sixth request from one socket source', async () => {
+  const adminToken = 'rate-limit-admin-token-1234';
+  const gw = await startGateway(
+    'alice=sk-a-ok',
+    [],
+    { DS_GATEWAY_ADMIN_TOKEN: adminToken },
+  );
+  try {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const res = await fetch(`${gw.base}/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: `invalid-${attempt}` }),
+      });
+      assert.equal(res.status, 401);
+    }
+
+    const blocked = await fetch(`${gw.base}/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'invalid-blocked-request' }),
+    });
+    assert.equal(blocked.status, 429);
+    assert.match(blocked.headers.get('retry-after') || '', /^[1-9]\d*$/);
+    const body = await blocked.text();
+    assert.ok(!body.includes(adminToken), 'rate-limit response must not expose the admin token');
+  } finally {
+    await gw.stop();
+  }
+});
+
+test('successful admin login resets the source failure count', async () => {
+  const adminToken = 'rate-reset-admin-token-1234';
+  const gw = await startGateway(
+    'alice=sk-a-ok',
+    [],
+    { DS_GATEWAY_ADMIN_TOKEN: adminToken },
+  );
+  try {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const res = await fetch(`${gw.base}/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: `invalid-${attempt}` }),
+      });
+      assert.equal(res.status, 401);
+    }
+
+    const login = await fetch(`${gw.base}/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: adminToken }),
+      redirect: 'manual',
+    });
+    assert.equal(login.status, 302);
+
+    const afterReset = await fetch(`${gw.base}/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'invalid-after-reset' }),
+    });
+    assert.equal(afterReset.status, 401);
   } finally {
     await gw.stop();
   }
@@ -2627,8 +2945,23 @@ test('setup script is idempotent and dry-run is pure', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-setup-'));
   const codexDir = path.join(tmp, 'codex');
   fs.mkdirSync(codexDir);
+  fs.mkdirSync(path.join(codexDir, 'agents'));
+  fs.writeFileSync(path.join(codexDir, 'agents', 'reviewer.toml'), 'name = "personal_reviewer"\n');
   const gatewayConfig = path.join(tmp, 'gateway.json');
   fs.writeFileSync(gatewayConfig, JSON.stringify(multiProviderConfig({ token: 'gateway-secret' })));
+  const operationsPath = path.join(tmp, 'gateway-operations.json');
+  fs.writeFileSync(operationsPath, JSON.stringify({
+    schemaVersion: 2,
+    subagents: [{
+      id: 'reviewer',
+      name: 'reviewer',
+      description: 'Reviews code.',
+      providerId: 'alpha',
+      model: 'alpha--shared',
+      developerInstructions: 'Review correctness and missing tests.',
+      enabled: true,
+    }],
+  }));
   const setup = path.join(ROOT, 'setup-codex.sh');
   const runSetup = (args) => spawnSync('bash', [setup, ...args], {
     env: {
@@ -2650,10 +2983,20 @@ test('setup script is idempotent and dry-run is pure', async () => {
   const first = runSetup([]);
   assert.equal(first.status, 0, first.stderr);
   const configPath = path.join(codexDir, 'config.toml');
+  const agentPath = path.join(codexDir, 'agents', 'reviewer.toml');
+  assert.match(fs.readFileSync(agentPath, 'utf8'), /model = "Alpha\.shared"/);
+  const preSecondAgent = fs.readFileSync(agentPath, 'utf8');
+  const operations = JSON.parse(fs.readFileSync(operationsPath, 'utf8'));
+  operations.subagents[0].developerInstructions = 'Review security and regression risks first.';
+  fs.writeFileSync(operationsPath, JSON.stringify(operations));
   fs.appendFileSync(configPath, '[mcp_servers.demo]\ncommand = "echo"\n');
   const preSecond = fs.readFileSync(configPath, 'utf8');
   const second = runSetup([]);
   assert.equal(second.status, 0, second.stderr);
+  assert.match(
+    fs.readFileSync(agentPath, 'utf8'),
+    /developer_instructions = "Review security and regression risks first\."/,
+  );
 
   const merged = fs.readFileSync(configPath, 'utf8');
   const sectionCount = (merged.match(/\[model_providers\.multi-provider-gateway\]/g) || []).length;
@@ -2707,6 +3050,7 @@ with open(sys.argv[1], 'rb') as f: tomllib.load(f)
   const undo = runSetup(['--undo']);
   assert.equal(undo.status, 0, undo.stderr);
   assert.equal(fs.readFileSync(configPath, 'utf8'), preSecond, 'undo should restore the pre-run state');
+  assert.equal(fs.readFileSync(agentPath, 'utf8'), preSecondAgent, 'undo should restore managed agent files');
 
   fs.rmSync(tmp, { recursive: true, force: true });
 });

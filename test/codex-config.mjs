@@ -7,6 +7,7 @@ function config(
   upstreamFormat,
   supportsHostedWebSearch = false,
   upstreamModel = 'unknown-model',
+  reasoning,
 ) {
   return {
     schemaVersion: 2,
@@ -24,6 +25,7 @@ function config(
         upstreamModel,
         inputModalities: ['text'],
         supportsHostedWebSearch,
+        ...(reasoning ? { reasoning } : {}),
       }],
       keys: [{ name: 'one', key: 'sk-one', weight: 1 }],
     }],
@@ -67,6 +69,27 @@ test('Responses catalog entries opt into the template hosted web search type', (
   assert.equal(model.supports_search_tool, false);
 });
 
+test('model reasoning capabilities override neutral and matched catalog profiles', () => {
+  const reasoning = {
+    parameter: 'thinking_budget',
+    default: 'high',
+    levels: [
+      { effort: 'low', description: 'Fast', upstreamValue: 1024 },
+      { effort: 'high', description: 'Deep', upstreamValue: 8192 },
+    ],
+  };
+  for (const upstreamModel of ['unknown-model', 'deepseek-v4-flash']) {
+    const model = buildModelCatalog(
+      config('chat-completions', false, upstreamModel, reasoning),
+    ).models[0];
+    assert.deepEqual(model.supported_reasoning_levels, [
+      { effort: 'low', description: 'Fast' },
+      { effort: 'high', description: 'Deep' },
+    ]);
+    assert.equal(model.default_reasoning_level, 'high');
+  }
+});
+
 test('known templates keep proxy tools but strip them for native Responses', () => {
   const proxyChat = buildModelCatalog(
     config('chat-completions', false, 'deepseek-v4-flash'),
@@ -97,4 +120,40 @@ test('both upstream formats keep Codex on the local Responses route', () => {
   }
   assert.equal(proxyChat.catalog.models[0].apply_patch_tool_type, 'freeform');
   assert.equal(nativeResponses.catalog.models[0].apply_patch_tool_type, undefined);
+});
+
+test('native subagents are not exposed as model catalog aliases', () => {
+  const base = config('chat-completions');
+  const artifacts = buildCodexArtifacts(base, {
+    modelsPath: '/tmp/gateway-models.json',
+    subagents: [{
+      id: 'coder',
+      name: 'Code Reviewer',
+      providerId: 'alpha',
+      model: 'alpha--chat',
+      instructions: 'Review carefully.',
+      enabled: true,
+    }, {
+      id: 'disabled',
+      name: 'Disabled',
+      providerId: 'alpha',
+      model: 'alpha--chat',
+      enabled: false,
+    }],
+  });
+  assert.deepEqual(artifacts.catalog.models.map(model => model.slug), ['Alpha.chat']);
+  assert.equal(artifacts.catalogJson.includes('agent--'), false);
+});
+
+test('catalog uses inferred modalities when provider config omits them', () => {
+  const textOnly = config('responses', false, 'deepseek-v4-pro');
+  const unknown = config('responses', false, 'future-vision-model');
+  delete textOnly.providers[0].models[0].inputModalities;
+  delete unknown.providers[0].models[0].inputModalities;
+
+  assert.deepEqual(buildModelCatalog(textOnly).models[0].input_modalities, ['text']);
+  assert.deepEqual(
+    buildModelCatalog(unknown).models[0].input_modalities,
+    ['text', 'image'],
+  );
 });

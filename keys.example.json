@@ -28,7 +28,22 @@
         "refreshMs": 300000
       },
       "models": [
-        { "id": "v4-flash", "name": "V4 Flash", "upstreamModel": "deepseek-v4-flash", "inputModalities": ["text"], "supportsHostedWebSearch": false },
+        {
+          "id": "v4-flash",
+          "name": "V4 Flash",
+          "upstreamModel": "deepseek-v4-flash",
+          "inputModalities": ["text"],
+          "supportsHostedWebSearch": false,
+          "reasoning": {
+            "parameter": "reasoning_effort",
+            "default": "high",
+            "levels": [
+              { "effort": "low", "description": "Fast responses with lighter reasoning" },
+              { "effort": "high", "description": "Extra high reasoning depth for complex problems" },
+              { "effort": "max", "description": "Maximum reasoning depth for the hardest problems" }
+            ]
+          }
+        },
         { "id": "v4-pro", "name": "V4 Pro", "upstreamModel": "deepseek-v4-pro", "inputModalities": ["text"], "supportsHostedWebSearch": false }
       ],
       "keys": [

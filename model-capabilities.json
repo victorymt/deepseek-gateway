@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "unknownModel": {
+    "inputModalities": ["text", "image"]
+  },
+  "models": [
+    { "id": "ark-code-latest", "inputModalities": ["text"] },
+    { "id": "deepseek-chat", "inputModalities": ["text"] },
+    { "id": "deepseek-reasoner", "inputModalities": ["text"] },
+    { "id": "deepseek-v4-flash", "inputModalities": ["text"] },
+    { "id": "deepseek-v4-pro", "inputModalities": ["text"] },
+    { "id": "glm-5.1", "inputModalities": ["text"] },
+    { "id": "glm-5.2", "inputModalities": ["text"] },
+    { "id": "glm-5.2v", "inputModalities": ["text", "image"] },
+    { "id": "grok-4.5", "inputModalities": ["text", "image"] },
+    { "id": "kat-coder", "inputModalities": ["text"] },
+    { "id": "kat-coder-pro", "inputModalities": ["text"] },
+    { "id": "kat-coder-pro v1", "inputModalities": ["text"] },
+    { "id": "kat-coder-pro v2", "inputModalities": ["text"] },
+    { "id": "kat-coder-pro-v1", "inputModalities": ["text"] },
+    { "id": "kat-coder-pro-v2", "inputModalities": ["text"] },
+    { "id": "ling-2.5-1t", "inputModalities": ["text"] },
+    { "id": "longcat-2.0", "inputModalities": ["text"] },
+    { "id": "longcat-flash-chat", "inputModalities": ["text"] },
+    { "id": "minimax-m2.7", "inputModalities": ["text"] },
+    { "id": "minimax-m2.7-highspeed", "inputModalities": ["text"] },
+    { "id": "minimax-m3", "inputModalities": ["text", "image"] },
+    { "id": "mimo-v2.5", "inputModalities": ["text", "image"] },
+    { "id": "mimo-v2.5-pro", "inputModalities": ["text"] },
+    { "id": "qwen3-coder-480b", "inputModalities": ["text"] },
+    { "id": "qwen3-coder-480b-a35b-instruct", "inputModalities": ["text"] },
+    { "id": "qwen3-coder-flash", "inputModalities": ["text"] },
+    { "id": "qwen3-coder-next", "inputModalities": ["text"] },
+    { "id": "qwen3-coder-plus", "inputModalities": ["text"] },
+    { "id": "step-3.5-flash", "inputModalities": ["text"] },
+    { "id": "step-3.5-flash-2603", "inputModalities": ["text"] },
+    { "id": "us.deepseek.r1-v1", "inputModalities": ["text"] }
+  ]
+}

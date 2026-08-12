@@ -119,6 +119,19 @@ function validateCatalogModel(model) {
       `Codex catalog model ${model.slug} requires supports_reasoning_summaries`,
     );
   }
+  if (!Array.isArray(model.supported_reasoning_levels)) {
+    throw new Error(`Codex catalog model ${model.slug} requires supported_reasoning_levels`);
+  }
+  if (
+    model.default_reasoning_level !== undefined
+    && !model.supported_reasoning_levels.some(
+      level => level?.effort === model.default_reasoning_level,
+    )
+  ) {
+    throw new Error(
+      `Codex catalog model ${model.slug} has an unsupported default_reasoning_level`,
+    );
+  }
 }
 
 function applyCatalogProfile(
@@ -133,6 +146,13 @@ function applyCatalogProfile(
   catalogModel.shell_type = 'shell_command';
   if (typeof catalogModel.supports_reasoning_summaries !== 'boolean') {
     catalogModel.supports_reasoning_summaries = false;
+  }
+  if (model.reasoning) {
+    catalogModel.supported_reasoning_levels = model.reasoning.levels.map(level => ({
+      effort: level.effort,
+      ...(level.description ? { description: level.description } : {}),
+    }));
+    catalogModel.default_reasoning_level = model.reasoning.default;
   }
 
   delete catalogModel.web_search_tool_type;
@@ -162,7 +182,7 @@ function applyCatalogProfile(
   return catalogModel;
 }
 
-export function buildModelCatalog(config) {
+export function buildModelCatalog(config, options = {}) {
   config = normalizeCatalogConfig(config);
   const templates = loadTemplates();
   const bySlug = new Map(templates.map(model => [model.slug, model]));

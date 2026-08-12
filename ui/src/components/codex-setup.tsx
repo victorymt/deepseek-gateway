@@ -125,7 +125,7 @@ export function CodexSetup({ locale }: { locale: Locale }) {
       : ""
 
   return (
-    <section className="flex flex-col gap-6">
+    <section className="flex min-w-0 flex-col gap-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1">
           <h2 className="text-xl font-semibold">{t.title}</h2>
@@ -215,13 +215,15 @@ export function CodexSetup({ locale }: { locale: Locale }) {
             </Alert>
           )}
 
-          <Tabs defaultValue="config">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <TabsList>
-                <TabsTrigger value="config">{t.config}</TabsTrigger>
-                <TabsTrigger value="catalog">{t.catalog}</TabsTrigger>
-              </TabsList>
-              <Badge variant="outline">{artifacts.gatewayUrl}</Badge>
+          <Tabs defaultValue="config" className="min-w-0">
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+              <div className="max-w-full overflow-x-auto">
+                <TabsList className="codex-artifact-tabs">
+                <TabsTrigger value="config" className="codex-artifact-tab">{t.config}</TabsTrigger>
+                <TabsTrigger value="catalog" className="codex-artifact-tab">{t.catalog}</TabsTrigger>
+                </TabsList>
+              </div>
+              <Badge className="max-w-full truncate" variant="outline" title={artifacts.gatewayUrl}>{artifacts.gatewayUrl}</Badge>
             </div>
             <TabsContent value="config" className="pt-3">
               <Card>
@@ -254,7 +256,7 @@ export function CodexSetup({ locale }: { locale: Locale }) {
                     </Button>
                   </CardAction>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="min-w-0">
                   <Textarea
                     readOnly
                     value={artifacts.configToml}
@@ -298,7 +300,7 @@ export function CodexSetup({ locale }: { locale: Locale }) {
                     </Button>
                   </CardAction>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="min-w-0">
                   <Textarea
                     readOnly
                     value={artifacts.catalogJson}

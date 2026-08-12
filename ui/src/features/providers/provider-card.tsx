@@ -196,6 +196,9 @@ export function ProviderCard({
                   {model.inputModalities.includes("image") && (
                     <Badge variant="secondary">{t.imageInput}</Badge>
                   )}
+                  {!model.inputModalities.includes("image") && (
+                    <Badge variant="outline">{t.textOnly}</Badge>
+                  )}
                   {model.supportsHostedWebSearch && (
                     <Badge variant="secondary">
                       <SearchIcon data-icon="inline-start" />

@@ -10,6 +10,8 @@ ENV_KEY="DEEPSEEK_GATEWAY_TOKEN"
 BACKUP_DIR="$CODEX_DIR/backup-gateway"
 CONFIG="$CODEX_DIR/config.toml"
 MODELS="$CODEX_DIR/gateway-models.json"
+AGENTS="$CODEX_DIR/agents"
+AGENT_MANIFEST="$CODEX_DIR/gateway-agents.json"
 if [ "${GATEWAY_CONFIG+x}" = "x" ]; then
   [ -f "$GATEWAY_CONFIG" ] || { echo "ERROR: gateway config not found: $GATEWAY_CONFIG" >&2; exit 1; }
 else
@@ -65,7 +67,16 @@ fi
 
 if [ -n "$UNDO" ]; then
     if [ ! -d "$BACKUP_DIR" ]; then echo "no backups found in $BACKUP_DIR"; exit 1; fi
-    SNAPSHOT="$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort | tail -1 || true)"
+    SNAPSHOT="$(
+      find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null |
+        while IFS= read -r CANDIDATE; do
+          if [ -f "$CANDIDATE/config.toml" ] || [ -f "$CANDIDATE/config.toml.missing" ]; then
+            printf '%s\n' "$CANDIDATE"
+          fi
+        done |
+        sort |
+        tail -1 || true
+    )"
     if [ -n "$SNAPSHOT" ]; then
       if [ -f "$SNAPSHOT/config.toml" ]; then
         cp "$SNAPSHOT/config.toml" "$CONFIG"
@@ -81,6 +92,8 @@ if [ -n "$UNDO" ]; then
         rm -f "$MODELS"
         echo "restored missing gateway-models.json state"
       fi
+      node "$SCRIPT_DIR/codex-agent-config.mjs" --codex-home "$CODEX_DIR" --restore-snapshot "$SNAPSHOT"
+      echo "restored managed Codex agents from $SNAPSHOT"
       exit 0
     fi
     CONFIG_BACKUP="$(ls -1 "$BACKUP_DIR"/config.toml.* 2>/dev/null | tail -1 || true)"
@@ -153,6 +166,21 @@ if [ -f "$MODELS" ]; then
 else
   run touch "$SNAPSHOT_DIR/gateway-models.json.missing"
 fi
+if [ -f "$AGENT_MANIFEST" ]; then
+  run cp "$AGENT_MANIFEST" "$SNAPSHOT_DIR/gateway-agents.json"
+else
+  run touch "$SNAPSHOT_DIR/gateway-agents.json.missing"
+fi
+MANAGED_AGENT_FILES="$(node "$SCRIPT_DIR/codex-agent-config.mjs" --config "$GATEWAY_CONFIG" --codex-home "$CODEX_DIR" --print-files)"
+if [ -n "$MANAGED_AGENT_FILES" ]; then
+  run mkdir -p "$SNAPSHOT_DIR/agents"
+  while IFS= read -r AGENT_FILE; do
+    [ -n "$AGENT_FILE" ] || continue
+    if [ -f "$AGENTS/$AGENT_FILE" ]; then
+      run cp "$AGENTS/$AGENT_FILE" "$SNAPSHOT_DIR/agents/$AGENT_FILE"
+    fi
+  done <<< "$MANAGED_AGENT_FILES"
+fi
 
 if [ -z "$MODEL" ]; then
   MODEL="$(node "$SCRIPT_DIR/codex-config.mjs" --config "$GATEWAY_CONFIG" --auth "$AUTH_MODE" --print-model)"
@@ -175,6 +203,13 @@ MERGE_ENV_KEY=""
 if [ "$AUTH_EFFECTIVE" = "required" ]; then MERGE_ENV_KEY="$ENV_KEY"; fi
 run python3 "$SCRIPT_DIR/merge-config.py" "$CONFIG" "$MODEL" "$PROVIDER_ID" "$GATEWAY_URL" "$MODELS" "$MERGE_ENV_KEY"
 now "merged gateway config into $CONFIG"
+
+if [ -n "$DRY" ]; then
+  echo "[dry-run] node $SCRIPT_DIR/codex-agent-config.mjs --config $GATEWAY_CONFIG --codex-home $CODEX_DIR --sync"
+else
+  node "$SCRIPT_DIR/codex-agent-config.mjs" --config "$GATEWAY_CONFIG" --codex-home "$CODEX_DIR" --sync
+  now "synced native Codex agents in $AGENTS"
+fi
 
 if [ -n "$DRY" ]; then
   echo "[dry-run] would validate $CONFIG (TOML)"

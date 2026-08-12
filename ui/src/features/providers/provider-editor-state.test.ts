@@ -1,16 +1,18 @@
 import { describe, expect, test } from "vitest"
 
-import type { Provider } from "@/gateway-types"
+import type { ModelCapabilityCatalog, Provider } from "@/gateway-types"
 
 import {
   addFetchedModelToDraft,
   balanceResultAmount,
   createEmptyProviderDraft,
+  inferModelInputModalities,
   providerDraftPayload,
   providerOriginsDiffer,
   providerToDraft,
   providerUpdatePayload,
   setProviderUpstreamFormat,
+  type FetchedModel,
 } from "./provider-editor-state"
 
 const provider: Provider = {
@@ -27,6 +29,14 @@ const provider: Provider = {
       upstreamModel: "deepseek-chat",
       inputModalities: ["text"],
       supportsHostedWebSearch: true,
+      reasoning: {
+        parameter: "reasoning_effort",
+        default: "high",
+        levels: [
+          { effort: "low", upstreamValue: "low" },
+          { effort: "high", upstreamValue: "high" },
+        ],
+      },
       alias: "Deepseek.chat",
     },
   ],
@@ -55,6 +65,31 @@ describe("provider editor state", () => {
     expect(second.keys[0].name).toBe("primary")
   })
 
+  test("infers exact registry capabilities and fails open for unknown models", () => {
+    const catalog: ModelCapabilityCatalog = {
+      schemaVersion: 1,
+      unknownModel: { inputModalities: ["text", "image"] },
+      models: [
+        { id: "deepseek-v4-pro", inputModalities: ["text"] },
+        {
+          id: "glm-5.2v",
+          inputModalities: ["text", "image"],
+        },
+      ],
+    }
+
+    expect(
+      inferModelInputModalities("deepseek/deepseek-v4-pro", catalog)
+    ).toEqual(["text"])
+    expect(inferModelInputModalities("glm-5.2v", catalog)).toEqual([
+      "text",
+      "image",
+    ])
+    expect(inferModelInputModalities("deepseek-v4-pro-vision", catalog)).toEqual(
+      ["text", "image"]
+    )
+  })
+
   test("converts public provider data into a safe editable draft", () => {
     const draft = providerToDraft(provider)
 
@@ -71,6 +106,7 @@ describe("provider editor state", () => {
       timeoutMs: 10000,
     })
     expect(draft.models[0].supportsHostedWebSearch).toBe(true)
+    expect(draft.models[0].reasoning).toEqual(provider.models[0].reasoning)
     expect(draft.supportsEncryptedAgentMessages).toBe(true)
 
     draft.models[0].inputModalities.push("image")
@@ -91,6 +127,7 @@ describe("provider editor state", () => {
     expect(keys[0]).not.toHaveProperty("maskedKey")
     expect(keys[0]).not.toHaveProperty("fingerprint")
     expect(payload.supportsEncryptedAgentMessages).toBe(true)
+    expect(payload.models![0].reasoning).toEqual(provider.models[0].reasoning)
   })
 
   test("sends the original key name only when a masked key is renamed", () => {
@@ -168,11 +205,13 @@ describe("provider editor state", () => {
 
   test("adds fetched models deterministically and ignores duplicates", () => {
     const empty = createEmptyProviderDraft()
-    const fetched = {
+    const fetched: FetchedModel = {
       id: "chat",
       name: "Chat",
       upstreamModel: "deepseek-chat",
       ownedBy: "deepseek",
+      inputModalities: ["text"],
+      capabilitySource: "registry" as const,
     }
     const added = addFetchedModelToDraft(empty, fetched)
 
@@ -192,8 +231,20 @@ describe("provider editor state", () => {
       name: "Reasoner",
       upstreamModel: "deepseek-reasoner",
       ownedBy: "deepseek",
+      inputModalities: ["text"],
+      capabilitySource: "registry" as const,
     })
     expect(collision.models[1].id).toBe("chat-2")
+
+    const visual = addFetchedModelToDraft(collision, {
+      id: "vision",
+      name: "Vision",
+      upstreamModel: "future-vision-model",
+      ownedBy: null,
+      inputModalities: ["text", "image"],
+      capabilitySource: "default",
+    })
+    expect(visual.models[2].inputModalities).toEqual(["text", "image"])
   })
 
   test("clears hosted web search when switching to Chat Completions", () => {

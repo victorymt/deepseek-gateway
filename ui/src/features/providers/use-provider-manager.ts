@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 
 import type { Locale } from "@/components/language-provider"
-import type { BalanceResult, Provider, ProviderConfig } from "@/gateway-types"
+import type {
+  BalanceResult,
+  ModelCapabilityCatalog,
+  Provider,
+  ProviderConfig,
+} from "@/gateway-types"
 import { apiRequest } from "@/lib/api-request"
 
 import {
@@ -50,6 +55,8 @@ export function useProviderManager({
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([])
   const [fetchingModels, setFetchingModels] = useState(false)
   const [modelFetchError, setModelFetchError] = useState("")
+  const [modelCapabilities, setModelCapabilities] =
+    useState<ModelCapabilityCatalog | null>(null)
   const [testingBalance, setTestingBalance] = useState(false)
   const [balanceTestError, setBalanceTestError] = useState("")
   const [balanceTestNotice, setBalanceTestNotice] = useState("")
@@ -79,7 +86,12 @@ export function useProviderManager({
 
   const refresh = useCallback(async () => {
     try {
-      setConfig(await apiRequest<ProviderConfig>("/api/providers"))
+      const [nextConfig, nextCapabilities] = await Promise.all([
+        apiRequest<ProviderConfig>("/api/providers"),
+        apiRequest<ModelCapabilityCatalog>("/api/model-capabilities"),
+      ])
+      setConfig(nextConfig)
+      setModelCapabilities(nextCapabilities)
       setError("")
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : messages.failed)
@@ -350,6 +362,7 @@ export function useProviderManager({
     fetchModels,
     loading,
     modelFetchError,
+    modelCapabilities,
     notice,
     originalBaseUrl,
     openCreate,

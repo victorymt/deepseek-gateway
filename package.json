@@ -8,5 +8,19 @@
   },
   "dependencies": {
     "quickjs-emscripten": "0.32.0"
+  },
+  "scripts": {
+    "test": "bash scripts/run-all-tests.sh",
+    "test:node": "bash scripts/run-node-tests.sh",
+    "test:python": ".venv/bin/python -m pytest",
+    "test:ui": "npm --prefix ui test",
+    "lint": "npm --prefix ui run lint",
+    "typecheck": "npm --prefix ui run typecheck",
+    "build": "npm --prefix ui run build",
+    "check": "npm run test:node && npm run test:ui && npm run lint && npm run typecheck && npm run build",
+    "check:all": "npm run check && npm run test:python"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.1"
   }
 }

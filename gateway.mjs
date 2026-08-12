@@ -31,6 +31,13 @@ import {
 import { buildCodexArtifacts } from './codex-config.mjs';
 import { prepareKeyImport } from './key-import.mjs';
 import { createManagementApi } from './management-api.mjs';
+import { createOperationsStore } from './management/operations-store.mjs';
+import { createLoginAttemptLimiter } from './login-attempt-limiter.mjs';
+import {
+  inferModelCapabilities,
+  modelCapabilityCatalog,
+} from './model-capabilities.mjs';
+import { createCodexAgentProjector } from './codex-agent-config.mjs';
 import {
   DEFAULT_UPSTREAM,
   codexModelAlias,
@@ -294,8 +301,9 @@ function loadConfig(opts) {
 }
 
 class KeyPool {
-  constructor(keys, cfg) {
+  constructor(keys, cfg, providerId) {
     this.keys = keys.map(key => this.createKeyState(key));
+    this.providerId = providerId;
     this.cursor = 0;
     this.cooldownMs = cfg.cooldownMs;
     this.blacklistThreshold = cfg.blacklistThreshold;
@@ -448,9 +456,15 @@ class KeyPool {
     }
   }
 
-  recordTokens(totalTokens) {
+  recordTokens(totalTokens, model = '') {
     const value = Number(totalTokens);
-    if (Number.isFinite(value) && value > 0) this.total.tokens += value;
+    if (!Number.isFinite(value) || value <= 0) return;
+    this.total.tokens += value;
+    activeOperations?.recordTokens({
+      provider: this.providerId,
+      model,
+      tokens: value,
+    });
   }
 
   state(key) {
@@ -642,7 +656,7 @@ class ProviderRegistry {
     const runtime = {
       provider,
       settings: this.settings,
-      pool: new KeyPool(provider.keys, this.settings),
+      pool: new KeyPool(provider.keys, this.settings, provider.id),
       agent: this.settings.mock ? undefined : new Agent({ keepAlive: true, maxSockets: 64 }),
       stopBalanceRefresh: () => {},
       activeRequests: 0,
@@ -778,6 +792,14 @@ class ProviderRegistry {
 
   resolveAlias(alias) {
     return this.aliases.get(alias) || null;
+  }
+
+  listAliases() {
+    return [...this.aliases.entries()].map(([alias, route]) => ({
+      alias,
+      providerId: route.runtime.provider.id,
+      model: route.model,
+    }));
   }
 
   close() {
@@ -964,11 +986,17 @@ function normalizeFetchedModels(payload) {
     const name = (typeof entry === 'object' && entry && String(entry.name || '').trim()
       ? String(entry.name).trim()
       : upstreamModel).slice(0, 100);
+    const capabilities = inferModelCapabilities(
+      upstreamModel,
+      typeof entry === 'object' && entry ? entry : null,
+    );
     models.push({
       id: modelDraftIdentifier(upstreamModel, used),
       name,
       upstreamModel,
       ownedBy,
+      inputModalities: capabilities.inputModalities,
+      capabilitySource: capabilities.source,
     });
   }
   return models.sort((a, b) => a.upstreamModel.localeCompare(b.upstreamModel));
@@ -1017,6 +1045,7 @@ function prepareUpstreamRequest({
   body,
   payload,
   aliasRoute,
+  model,
   runtime,
   requestUrl,
   isResponsesRequest,
@@ -1034,7 +1063,9 @@ function prepareUpstreamRequest({
     if (!preparedPayload) {
       throw Object.assign(new Error('Responses request body must be valid JSON'), { statusCode: 400 });
     }
-    const adapted = responsesRequestToChatCompletions(preparedPayload);
+    const adapted = responsesRequestToChatCompletions(preparedPayload, {
+      reasoning: model?.reasoning,
+    });
     return {
       body: Buffer.from(JSON.stringify(adapted.payload)),
       upstreamModel,
@@ -1114,6 +1145,7 @@ function resolveRequestRoute(registry, body, requestUrl) {
     body,
     payload: parsed,
     aliasRoute,
+    model: configuredModel,
     runtime,
     requestUrl,
     isResponsesRequest,
@@ -1159,9 +1191,57 @@ async function forwardOnce(runtime, key, clientReq, route, signal) {
   });
 }
 
+async function requestUpstream(runtime, clientReq, route, signal) {
+  const { pool, settings } = runtime;
+  const enabledKeyCount = pool.keys.filter(key => key.enabled).length;
+  const maxRetries = Math.min(settings.maxRetries, enabledKeyCount - 1);
+  const attempted = [];
+  let lastErr = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const key = pool.pickKey(attempted);
+    if (!key) {
+      lastErr = new Error('no keys available');
+      break;
+    }
+    attempted.push(key.name);
+    key.inFlight++;
+    try {
+      const response = await forwardOnce(runtime, key, clientReq, route, signal);
+      const status = response.statusCode;
+      if (status < 400) return { response, key, preRecorded: false, lastErr };
+      const retryAfter = retryAfterSec(response);
+      pool.recordResult(key, { status, retryAfterSec: retryAfter });
+      const retryable = status === 429 || status === 401 || status === 402 || status >= 500;
+      if (retryable && attempt < maxRetries) {
+        response.resume();
+        response.on('error', () => {});
+        continue;
+      }
+      return { response, key, preRecorded: true, lastErr };
+    } catch (error) {
+      const aborted = signal?.aborted;
+      pool.recordResult(key, aborted ? { clientAbort: true } : { networkError: true });
+      lastErr = error;
+      if (aborted || attempt >= maxRetries) break;
+    }
+  }
+  return { response: null, key: null, preRecorded: true, lastErr };
+}
+
+function routeLogContext(route, status, latencyMs) {
+  return {
+    status,
+    method: route.method,
+    route: route.clientPath,
+    provider: route.runtime.provider.id,
+    model: route.gatewayModel,
+    latencyMs,
+  };
+}
+
 async function relay(route, clientReq, clientRes, log) {
   const { runtime, body } = route;
-  const { pool, settings, provider } = runtime;
+  const { pool, provider } = runtime;
   const started = Date.now();
   runtime.retain();
   const abortController = new AbortController();
@@ -1176,57 +1256,32 @@ async function relay(route, clientReq, clientRes, log) {
     runtime.release();
   };
   try {
-    const enabledKeyCount = pool.keys.filter(key => key.enabled).length;
-    const maxRetries = Math.min(settings.maxRetries, enabledKeyCount - 1);
-    const attempted = [];
-    let res = null;
-    let key = null;
-    let lastErr = null;
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const k = pool.pickKey(attempted);
-      if (!k) { lastErr = new Error('no keys available'); break; }
-      attempted.push(k.name);
-      k.inFlight++;
-      try {
-        const r = await forwardOnce(runtime, k, clientReq, route, abortController.signal);
-        const status = r.statusCode;
-        if (status < 400) {
-          res = r;
-          key = k;
-          break;
-        }
-        const ra = retryAfterSec(r);
-        pool.recordResult(k, { status, retryAfterSec: ra });
-        const retryable = status === 429 || status === 401 || status === 402 || status >= 500;
-        if (retryable && attempt < maxRetries) {
-          r.resume();
-          r.on('error', () => {});
-          continue;
-        }
-        res = r;
-        key = k;
-        break;
-      } catch (err) {
-        const clientAbort = abortController.signal.aborted;
-        pool.recordResult(k, clientAbort ? { clientAbort: true } : { networkError: true });
-        lastErr = err;
-        if (clientAbort || attempt >= maxRetries) break;
-      }
-    }
+    const {
+      response: res,
+      key,
+      preRecorded,
+      lastErr,
+    } = await requestUpstream(runtime, clientReq, route, abortController.signal);
     const ms = Date.now() - started;
     if (!res) {
       if (abortController.signal.aborted || clientRes.destroyed) {
         releaseRuntime();
         return;
       }
-      log(`502 ${clientReq.method} ${clientReq.url} provider=${provider.id} all-keys-failed ${ms}ms`);
+      log(
+        `502 ${clientReq.method} ${clientReq.url} provider=${provider.id} model=${route.gatewayModel} all-keys-failed ${ms}ms`,
+        routeLogContext({ ...route, method: clientReq.method }, 502, ms),
+      );
       clientRes.writeHead(502, { 'content-type': 'application/json' });
       clientRes.end(JSON.stringify({ error: { message: lastErr ? lastErr.message : 'all upstream keys failed' } }));
       releaseRuntime();
       return;
     }
-    log(`${res.statusCode} ${clientReq.method} ${clientReq.url} provider=${provider.id} model=${route.gatewayModel} key=${key.name} ${ms}ms`);
-    await relayResponse(clientRes, res, key, pool, res.statusCode >= 400, route, releaseRuntime);
+    log(
+      `${res.statusCode} ${clientReq.method} ${clientReq.url} provider=${provider.id} model=${route.gatewayModel} key=${key.name} ${ms}ms`,
+      routeLogContext({ ...route, method: clientReq.method }, res.statusCode, ms),
+    );
+    await relayResponse(clientRes, res, key, pool, preRecorded, route, releaseRuntime);
   } catch (error) {
     releaseRuntime();
     throw error;
@@ -1317,7 +1372,7 @@ async function relayAdaptedResponse(clientRes, upRes, key, pool, route, finish) 
     headers['cache-control'] = 'no-cache';
     clientRes.writeHead(upRes.statusCode, headers);
     const transformer = new ChatCompletionsSseTransform(adapter.context, {
-      onUsage: usage => pool.recordTokens(usage?.total_tokens),
+      onUsage: usage => pool.recordTokens(usage?.total_tokens, route.gatewayModel),
     });
     let upstreamFailed = false;
     const failStream = (message, type) => {
@@ -1360,7 +1415,7 @@ async function relayAdaptedResponse(clientRes, upRes, key, pool, route, finish) 
       const payload = JSON.parse(body.toString('utf8'));
       if (adapter.stream) {
         const result = chatCompletionToResponsesSse(payload, adapter.context);
-        pool.recordTokens(result.usage?.total_tokens);
+        pool.recordTokens(result.usage?.total_tokens, route.gatewayModel);
         const output = Buffer.from(result.body);
         const headers = responseHeaders(upRes, key, route, {
           transformed: true,
@@ -1376,7 +1431,7 @@ async function relayAdaptedResponse(clientRes, upRes, key, pool, route, finish) 
       converted = chatCompletionToResponses(payload, adapter.context);
       usage = converted.usage;
     }
-    pool.recordTokens(usage?.total_tokens);
+    pool.recordTokens(usage?.total_tokens, route.gatewayModel);
     const output = Buffer.from(JSON.stringify(converted));
     const headers = responseHeaders(upRes, key, route, {
       transformed: true,
@@ -1419,7 +1474,7 @@ function parseSseBlock(block) {
   return { event, data: data.join('\n') };
 }
 
-function createUsageTracker(pool, protocol = '') {
+function createUsageTracker(pool, protocol = '', model = '') {
   const maxTrackedEventChars = 16 * 1024 * 1024;
   const maxRawUsageChars = 1024 * 1024;
   const decoder = new StringDecoder('utf8');
@@ -1571,7 +1626,7 @@ function createUsageTracker(pool, protocol = '') {
           if (matches.length) latestTotalTokens = Number(matches.at(-1)[1]);
         }
       }
-      if (latestTotalTokens !== undefined) pool.recordTokens(latestTotalTokens);
+      if (latestTotalTokens !== undefined) pool.recordTokens(latestTotalTokens, model);
       cb();
     },
   });
@@ -1598,7 +1653,7 @@ async function relayResponse(clientRes, upRes, key, pool, preRecorded, route, re
   clientRes.writeHead(upRes.statusCode, headers);
   const contentType = String(upRes.headers['content-type'] || '').toLowerCase();
   const streamProtocol = streamProtocolForRoute(route, contentType);
-  const tracker = createUsageTracker(pool, streamProtocol);
+  const tracker = createUsageTracker(pool, streamProtocol, route.gatewayModel);
   tracker.on('end', () => {
     if (streamProtocol && !tracker.protocolTerminal) {
       finish({ networkError: true });
@@ -1949,7 +2004,9 @@ function writeJson(res, status, payload, headers = {}) {
 
 function sameOrigin(req) {
   const origin = req.headers.origin;
-  if (!origin) return true;
+  if (!origin) {
+    return !parseCookies(req)[COOKIE_NAME];
+  }
   try {
     const parsed = new URL(origin);
     const protocol = requestProtocol(req);
@@ -2005,10 +2062,53 @@ async function readJsonBody(req, maxBytes = 1024 * 1024) {
 function commitProviderConfig(cfg, registry, next) {
   const previous = normalizeConfig(serializableConfig(cfg), { allowSetup: true });
   try {
+    createCodexAgentProjector().reconcile(next, activeOperations?.listSubagents() || []);
     registry.apply(next);
     persistConfig(cfg.configPath, next);
   } catch (error) {
+    try {
+      createCodexAgentProjector().reconcile(
+        previous,
+        activeOperations?.listSubagents() || [],
+        { force: true },
+      );
+    } catch {}
     registry.apply(previous);
+    throw error;
+  }
+  cfg._persistedConfig = normalizeConfig(serializableConfig(next), { allowSetup: true });
+  cfg._managementRevision = (cfg._managementRevision || 1) + 1;
+}
+
+function restoreOperationsConfig(cfg, registry, raw) {
+  const next = managementValidation(
+    () => normalizeConfig({ ...raw, configPath: cfg.configPath, mock: cfg.mock }, { allowSetup: true }),
+    400,
+  );
+  const previous = normalizeConfig(serializableConfig(cfg), { allowSetup: true });
+  const hotChanges = {};
+  const rollbackChanges = {};
+  for (const field of HOT_SETTING_FIELDS) {
+    if (!cfg._scalarOverrides[field]) {
+      hotChanges[field] = next[field];
+      rollbackChanges[field] = cfg[field];
+    }
+  }
+  try {
+    createCodexAgentProjector().reconcile(next, activeOperations?.listSubagents() || []);
+    registry.apply(next);
+    registry.updateSettings(hotChanges);
+    persistConfig(cfg.configPath, next);
+  } catch (error) {
+    try {
+      createCodexAgentProjector().reconcile(
+        previous,
+        activeOperations?.listSubagents() || [],
+        { force: true },
+      );
+    } catch {}
+    registry.apply(previous);
+    registry.updateSettings(rollbackChanges);
     throw error;
   }
   cfg._persistedConfig = normalizeConfig(serializableConfig(next), { allowSetup: true });
@@ -2164,6 +2264,9 @@ async function testBalanceQuery(cfg, input) {
   }
 }
 
+let activeOperations = null;
+let activeShutdown = null;
+
 const handleManagementApi = createManagementApi({
   buildCodexArtifacts,
   clearSessionCookie,
@@ -2173,6 +2276,7 @@ const handleManagementApi = createManagementApi({
   effectiveBalanceQuery,
   fetchProviderModels,
   managementValidation,
+  modelCapabilityCatalog,
   nextProviderConfig,
   nextSettingsConfig,
   normalizeProvider,
@@ -2192,6 +2296,10 @@ const handleManagementApi = createManagementApi({
   testKeyConnection,
   testProviderConnection,
   writeJson,
+  operations: () => activeOperations,
+  codexAgentProjector: createCodexAgentProjector(),
+  restoreConfig: restoreOperationsConfig,
+  stopGateway: () => activeShutdown?.(),
 });
 
 const UI_CONTENT_TYPES = new Map([
@@ -2521,7 +2629,18 @@ function readBody(req, maxBytes) {
   });
 }
 
-async function handleLogin(cfg, req, res) {
+async function handleLogin(cfg, req, res, loginLimiter) {
+  const source = req.socket?.remoteAddress || 'unknown';
+  const limit = loginLimiter?.check(source);
+  if (limit?.blocked) {
+    activeOperations?.addLog({ level: 'audit', message: 'admin login rate limited', method: 'POST', route: '/login', status: 429 });
+    res.writeHead(429, {
+      'content-type': 'application/json',
+      'retry-after': String(limit.retryAfterSeconds),
+    });
+    res.end(JSON.stringify({ error: { message: 'too many login attempts' } }));
+    return;
+  }
   const body = await readBody(req, 4096);
   let token = '';
   const ct = req.headers['content-type'] || '';
@@ -2531,16 +2650,20 @@ async function handleLogin(cfg, req, res) {
     token = new URLSearchParams(body.toString('utf8')).get('token') || '';
   }
   if (!cfg.adminToken || !secureEqual(token, cfg.adminToken)) {
+    loginLimiter?.recordFailure(source);
+    activeOperations?.addLog({ level: 'audit', message: 'admin login failed', method: 'POST', route: '/login', status: 401 });
     res.writeHead(401, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'invalid token' } }));
     return;
   }
+  loginLimiter?.recordSuccess(source);
+  activeOperations?.addLog({ level: 'audit', message: 'admin login succeeded', method: 'POST', route: '/login', status: 302 });
   setSessionCookie(res, cfg.adminToken, requestProtocol(req) === 'https:');
   res.writeHead(302, { location: '/' });
   res.end();
 }
 
-async function handleRequest(cfg, registry, req, res, log, startedAt, instanceId) {
+async function handleRequest(cfg, registry, req, res, log, startedAt, instanceId, loginLimiter) {
   const requestUrl = req.url || '/';
   if (maybeSendUiAsset(requestUrl, res)) return;
   const parsedUrl = new URL(requestUrl, 'http://gateway.local');
@@ -2553,7 +2676,13 @@ async function handleRequest(cfg, registry, req, res, log, startedAt, instanceId
     ? cookieValid(parseCookies(req)[COOKIE_NAME], cfg.adminToken)
     : false;
   if (url === '/login') {
-    if (req.method === 'POST') return handleLogin(cfg, req, res);
+    if (req.method === 'POST') {
+      if (!sameOrigin(req)) {
+        writeJson(res, 403, { error: { message: 'cross-origin login request rejected' } });
+        return;
+      }
+      return handleLogin(cfg, req, res, loginLimiter);
+    }
     sendUiDocument(res, LOGIN_HTML);
     return;
   }
@@ -2593,6 +2722,18 @@ async function handleRequest(cfg, registry, req, res, log, startedAt, instanceId
     res.end(JSON.stringify(buildHealth(cfg, registry, Date.now() - startedAt, instanceId)));
     return;
   }
+  if (url === '/v1/models' && ['GET', 'HEAD'].includes(req.method)) {
+    const created = Math.floor(Date.now() / 1000);
+    const data = registry.listAliases().map(item => ({
+      id: item.alias,
+      object: 'model',
+      created,
+      owned_by: item.providerId,
+      input_modalities: item.model.inputModalities,
+    }));
+    writeJson(res, 200, { object: 'list', data });
+    return;
+  }
   if (url.startsWith('/api/')) {
     await handleManagementApi(cfg, registry, req, res, parsedUrl);
     return;
@@ -2606,8 +2747,20 @@ async function handleRequest(cfg, registry, req, res, log, startedAt, instanceId
   await relay(route, req, res, log);
 }
 
-function makeLog(quiet) {
-  return quiet ? () => {} : msg => console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
+function makeLog(quiet, operations) {
+  return (msg, context = null) => {
+    if (!quiet) console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
+    const level = /^\d{3}\s/.test(String(msg)) && Number(String(msg).slice(0, 3)) >= 500
+      ? 'error'
+      : 'info';
+    operations?.addLog({ message: msg, level, ...(context || {}) });
+    if (context?.status) {
+      operations?.recordUsage(context);
+      return;
+    }
+    const match = /^(\d{3}) .*?provider=([^\s]+)(?: model=([^\s]+))?/.exec(String(msg));
+    if (match) operations?.recordUsage({ status: Number(match[1]), provider: match[2], model: match[3] });
+  };
 }
 
 let shutdownStarted = false;
@@ -2617,6 +2770,7 @@ async function shutdown(server, registry, runtimeHandle) {
   server.close();
   await registry.waitForIdle(2000);
   registry.close();
+  activeOperations?.flush();
   releaseGatewayRuntime(runtimeHandle);
   process.exit(0);
 }
@@ -2634,7 +2788,14 @@ function main() {
     console.error(`ERROR: ${error.message}`);
     process.exit(1);
   }
-  const log = makeLog(cfg.quiet);
+  activeOperations = createOperationsStore(cfg.configPath);
+  try {
+    createCodexAgentProjector().reconcile(cfg, activeOperations.listSubagents());
+  } catch (error) {
+    console.error(`ERROR: Cannot sync native Codex agents: ${error.message}`);
+    process.exit(1);
+  }
+  const log = makeLog(cfg.quiet, activeOperations);
   const startedAt = Date.now();
   const instanceId = crypto.randomUUID();
   let runtimeHandle = null;
@@ -2652,17 +2813,22 @@ function main() {
       process.exit(1);
     }
   }
-  process.once('exit', () => releaseGatewayRuntime(runtimeHandle));
+  process.once('exit', () => {
+    activeOperations?.flush();
+    releaseGatewayRuntime(runtimeHandle);
+  });
 
   const registry = new ProviderRegistry(cfg, log);
+  const loginLimiter = createLoginAttemptLimiter();
   const server = http.createServer((req, res) => {
-    handleRequest(cfg, registry, req, res, log, startedAt, instanceId).catch(err => {
+    handleRequest(cfg, registry, req, res, log, startedAt, instanceId, loginLimiter).catch(err => {
       const code = err.statusCode || 500;
       log(`${code} ${req.method} ${req.url} ${err.message}`);
       if (!res.headersSent) res.writeHead(code, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { message: err.message } }));
     });
   });
+  activeShutdown = () => shutdown(server, registry, runtimeHandle);
   server.once('error', error => {
     registry.close();
     releaseGatewayRuntime(runtimeHandle);

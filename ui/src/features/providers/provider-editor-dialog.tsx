@@ -1,4 +1,5 @@
 import type { Dispatch, FormEventHandler, SetStateAction } from "react"
+import type { ModelCapabilityCatalog } from "@/gateway-types"
 
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -55,6 +56,7 @@ type ProviderEditorDialogProps = {
   fetchedModels: FetchedModel[]
   fetchingModels: boolean
   modelFetchError: string
+  modelCapabilities: ModelCapabilityCatalog | null
   setDraft: Dispatch<SetStateAction<ProviderDraft>>
   onAddFetchedModel: (model: FetchedModel) => void
   onFetchModels: () => Promise<void>
@@ -77,6 +79,7 @@ export function ProviderEditorDialog({
   fetchedModels,
   fetchingModels,
   modelFetchError,
+  modelCapabilities,
   setDraft,
   onAddFetchedModel,
   onFetchModels,
@@ -245,6 +248,7 @@ export function ProviderEditorDialog({
               fetchedModels={fetchedModels}
               fetching={fetchingModels}
               fetchError={modelFetchError}
+              modelCapabilities={modelCapabilities}
               setDraft={setDraft}
               onAddFetchedModel={onAddFetchedModel}
               onFetchModels={onFetchModels}

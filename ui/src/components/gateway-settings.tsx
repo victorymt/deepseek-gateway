@@ -82,6 +82,7 @@ const copy = {
     authDisabled: "Gateway authentication is currently disabled.",
     persistedConfigured: "A token is also stored in the config file.",
     persistedNotConfigured: "No token is stored in the config file.",
+    persisted: (value: string | number) => `Saved: ${value}`,
     configured: "Configured",
     notConfigured: "Not configured",
     effective: (value: string | number) => `Effective: ${value}`,
@@ -124,6 +125,7 @@ const copy = {
     authDisabled: "Gateway 当前未启用认证。",
     persistedConfigured: "配置文件中也保存了 Token。",
     persistedNotConfigured: "配置文件中没有保存 Token。",
+    persisted: (value: string | number) => `配置值：${value}`,
     configured: "已配置",
     notConfigured: "未配置",
     effective: (value: string | number) => `当前生效：${value}`,
@@ -297,7 +299,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
     const inputType = field === "host" ? "text" : "number"
     return (
       <Field key={field} data-disabled={disabled || undefined}>
-        <FieldLabel htmlFor={`setting-${field}`}>
+        <FieldLabel className="flex-wrap" htmlFor={`setting-${field}`}>
           {t[field]}
           {source && <Badge variant="outline">{source}</Badge>}
           {restartRequired && (
@@ -310,7 +312,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
         <Input
           id={`setting-${field}`}
           type={inputType}
-          value={draft[field]}
+          value={source ? String(settings.effective[field]) : draft[field]}
           min={options.min}
           max={options.max}
           step={options.integer === false ? "any" : 1}
@@ -320,7 +322,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
         />
         <FieldDescription>
           {source
-            ? t.overridden(source)
+            ? `${t.overridden(source)} · ${t.persisted(settings.persisted[field])}`
             : t.effective(settings.effective[field])}
         </FieldDescription>
       </Field>
@@ -328,16 +330,16 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
   }
 
   return (
-    <section className="flex flex-col gap-6">
+    <section className="flex min-w-0 flex-col gap-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
           <p className="text-sm text-muted-foreground">{t.description}</p>
-          <h2 className="text-xl font-semibold">{t.title}</h2>
+          <h1 className="text-xl font-semibold">{t.title}</h1>
         </div>
         <Button
           type="button"
           variant="outline"
-          size="icon"
+          size="icon-lg"
           aria-label={t.refresh}
           title={t.refresh}
           disabled={loading || saving || dirty}
@@ -370,10 +372,10 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
       )}
 
       {settings && (
-        <form className="flex flex-col gap-8" onSubmit={handleSubmit}>
+        <form className="flex max-w-3xl flex-col gap-8" onSubmit={handleSubmit}>
           <section className="flex flex-col gap-4">
             <h3 className="text-sm font-semibold">{t.network}</h3>
-            <FieldGroup className="sm:grid sm:grid-cols-2">
+            <FieldGroup className="settings-field-grid">
               {settingField("host")}
               {settingField("port", { min: 0, max: 65535 })}
             </FieldGroup>
@@ -383,7 +385,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
 
           <section className="flex flex-col gap-4">
             <h3 className="text-sm font-semibold">{t.runtime}</h3>
-            <FieldGroup className="sm:grid sm:grid-cols-2 xl:grid-cols-3">
+            <FieldGroup className="settings-field-grid settings-field-grid-compact">
               {settingField("cooldownMs", { min: 0, integer: false })}
               {settingField("blacklistThreshold", { min: 0 })}
               {settingField("balanceRefreshMs", { min: 0, integer: false })}
@@ -397,7 +399,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
 
           <section className="flex flex-col gap-4">
             <h3 className="text-sm font-semibold">{t.access}</h3>
-            <FieldGroup className="lg:grid lg:grid-cols-2">
+            <FieldGroup className="settings-field-grid">
               <Field
                 data-disabled={
                   !settings.writable || settings.overrides.token
@@ -478,6 +480,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
               </Field>
 
               <Field
+                className="flex-wrap sm:flex-nowrap"
                 orientation="horizontal"
                 data-disabled={
                   !settings.writable ||

@@ -11,6 +11,7 @@ import {
   normalizeInputModalities,
   normalizeModelIdentifier,
   normalizeProvider,
+  normalizeReasoningConfig,
   normalizeUpstreamFormat,
   persistConfig,
   serializableConfig,
@@ -197,6 +198,7 @@ test('model input modalities default to text and normalize image capability', ()
     providers: [{
       id: 'alpha',
       baseUrl: 'https://alpha.example/v1',
+      upstreamFormat: 'chat-completions',
       models: [{
         id: 'gpt-4.1',
         upstreamModel: 'gpt-4.1',
@@ -211,6 +213,95 @@ test('model input modalities default to text and normalize image capability', ()
     serializableConfig(normalized).providers[0].models[0].inputModalities,
     ['text', 'image'],
   );
+});
+
+test('missing model input modalities are inferred from the capability registry', () => {
+  const normalizeModel = upstreamModel => normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--model',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      models: [{ id: 'model', upstreamModel }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+    }],
+  }).providers[0].models[0];
+
+  assert.deepEqual(normalizeModel('deepseek-v4-pro').inputModalities, ['text']);
+  assert.deepEqual(normalizeModel('glm-5.2v').inputModalities, ['text', 'image']);
+  assert.deepEqual(normalizeModel('future-vision-model').inputModalities, ['text', 'image']);
+});
+
+test('reasoning capability normalizes, validates, and persists per-model mappings', () => {
+  const reasoning = normalizeReasoningConfig({
+    parameter: 'thinking_budget',
+    default: 'high',
+    levels: [
+      { effort: 'low', description: 'Shorter reasoning', upstreamValue: 1024 },
+      { effort: 'high', description: 'Deeper reasoning', upstreamValue: 8192 },
+    ],
+  });
+  assert.deepEqual(reasoning, {
+    parameter: 'thinking_budget',
+    default: 'high',
+    levels: [
+      { effort: 'low', description: 'Shorter reasoning', upstreamValue: 1024 },
+      { effort: 'high', description: 'Deeper reasoning', upstreamValue: 8192 },
+    ],
+  });
+
+  const normalized = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--reasoner',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      upstreamFormat: 'chat-completions',
+      models: [{
+        id: 'reasoner',
+        upstreamModel: 'reasoner',
+        reasoning,
+      }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+    }],
+  });
+  assert.deepEqual(
+    serializableConfig(normalized).providers[0].models[0].reasoning,
+    reasoning,
+  );
+  assert.throws(
+    () => normalizeReasoningConfig({ levels: ['low', 'low'] }),
+    /duplicate effort/,
+  );
+  assert.throws(
+    () => normalizeReasoningConfig({ parameter: 'temperature', levels: ['low'] }),
+    /parameter must be one of/,
+  );
+  assert.throws(
+    () => normalizeReasoningConfig({ default: 'max', levels: ['low'] }),
+    /default must reference/,
+  );
+  assert.throws(() => normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--reasoner',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      upstreamFormat: 'responses',
+      models: [{
+        id: 'reasoner',
+        upstreamModel: 'reasoner',
+        reasoning: {
+          parameter: 'thinking_budget',
+          levels: [{ effort: 'high', upstreamValue: 8192 }],
+        },
+      }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+    }],
+  }), /custom reasoning parameters require a chat-completions upstream/);
 });
 
 test('hosted web search is explicit, persisted, and limited to Responses providers', () => {

@@ -5,6 +5,7 @@ export function createToolRoutes(services) {
     buildCodexArtifacts,
     fetchProviderModels,
     managementValidation,
+    modelCapabilityCatalog,
     readJsonBody,
     resolveBalanceTestInput,
     resolveModelFetchInput,
@@ -31,6 +32,11 @@ export function createToolRoutes(services) {
         input.modelsUrl,
       );
       writeJson(res, 200, { models });
+      return true;
+    }
+
+    if (pathname === '/api/model-capabilities' && req.method === 'GET') {
+      writeJson(res, 200, modelCapabilityCatalog());
       return true;
     }
 

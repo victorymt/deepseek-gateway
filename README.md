@@ -110,6 +110,24 @@ JSON 可以使用字符串数组，也可以为单个 Key 覆盖名称、权重�
 - “Provider 管理”：添加、编辑、测试或删除 Provider，维护模型别名和独立密钥池，并设置默认 Provider 或默认模型。
 - “Gateway 设置”：管理监听参数、运行策略和访问令牌。`host` 和 `port` 修改后需要重启，其余未被命令行或环境变量覆盖的设置会热生效。
 - “Codex 配置”：预览并下载 Codex Provider 配置和模型目录生成物。
+- “模型 / 子代理 / 日志与调试 / 用量 / 存储 / 集成”：查看模型统计，管理 Codex 原生 agent 配置和 HTTP 集成，查询运行日志、30 天用量及配置备份。日志支持后端 cursor 分页、级别/Provider/模型/状态码/关键字筛选和详情查看；用量页提供 Recharts 趋势图及 Provider/模型汇总。日志和用量可手动刷新或按 5/15/30 秒自动刷新，打开编辑草稿或日志详情时会暂停自动刷新。请求失败时编辑草稿会保留，可直接重试。
+
+### 运维数据与备份
+
+网关在配置文件同目录维护 `gateway-operations.json`，存储日志、每日用量、集成和 Codex agent 定义。文件包含独立 schema 版本，使用进程间锁和原子替换写入，权限为 `600`；旧的无版本格式和早期伪子代理记录会自动迁移。JSON 损坏时原文件会重命名为 `gateway-operations.json.corrupt-<时间>` 后从空状态恢复，并在标准错误和运行日志中留下诊断信息。
+
+- 日志保留 7 天且最多 5000 条，用量按日保留 30 天。
+- 配置备份位于配置文件同目录，名称为 `keys.json.backup-<时间>`，最多保留 5 个。
+- 恢复备份前会先备份当前配置；恢复会热更新 Provider 和可热更新设置。`host`、`port` 等监听设置仍需重启才能生效。
+- 多个网关实例共享同一配置目录时，日志和用量写入会在锁内合并；生产部署仍建议每个配置文件只运行一个实例。
+
+### Codex 原生子代理
+
+“子代理”页管理 Codex 原生 custom agent。启用项会原子投影为 `$CODEX_HOME/agents/<name>.toml`（默认 `~/.codex/agents`），其中包含官方要求的 `name`、`description`、`developer_instructions`，以及目标 Provider 模型的 Codex 点号别名。Codex 自己创建独立 agent thread，负责工具调用、上下文、等待、追问和结果汇总；网关只透明转发这些线程发出的普通模型请求，不注入角色提示词，也不生成 `agent--<id>` 伪模型。
+
+同名但不受网关管理的 agent 文件会在首次接管时备份到 `$CODEX_HOME/backup-gateway/agents/`，停用或删除后恢复。受管理文件被外部修改时，管理 API 返回 `409`，不会静默覆盖。目标 Provider 暂时不可用时 agent TOML 会撤下并显示 `unavailable`，目标恢复后重新投影。
+
+例如创建 `code_reviewer` 后，在 Codex 中输入：`让 code_reviewer 检查当前改动，并在完成后汇总风险。` 真实子会话由 Codex 创建，不是一次特殊模型请求。
 
 ## 交互式配置
 
@@ -234,6 +252,21 @@ cp keys.example.json keys.json
 }
 ```
 
+模型的 `reasoning` 能力会写入 Codex 模型目录。`levels` 决定 Codex 可选的思考强度，`default` 决定默认值。Responses 上游使用标准的 `reasoning.effort`；Chat Completions 上游使用 `parameter` 指定的字段，默认是 `reasoning_effort`。如果上游使用 `enable_thinking` 或 `thinking_budget`，可在 level 中增加 `upstreamValue` 映射，例如：
+
+```json
+{
+  "parameter": "thinking_budget",
+  "default": "high",
+  "levels": [
+    { "effort": "low", "upstreamValue": 1024 },
+    { "effort": "high", "upstreamValue": 8192 }
+  ]
+}
+```
+
+未配置 `reasoning` 的模型不会主动发送思考参数；只有确认上游真实支持对应字段和值时才应启用。修改后重新运行 `./gatewayctl codex` 并重启 Codex，使模型目录生效。
+
 `keys.example.json` 提供了可直接使用的 DeepSeek 额度查询脚本。DeepSeek Provider 未显式设置 `balanceQuery` 时也会使用同一内置脚本；设置 `"balanceQuery": { "enabled": false }` 可以关闭该 Provider 的查询。
 
 ## JavaScript 额度查询
@@ -295,7 +328,9 @@ DEEPSEEK_KEYS="main=sk-xxx,backup=sk-yyy" node gateway.mjs
 
 `setup-codex.sh` 仍可作为底层兼容入口直接运行。
 
-模型的输入能力通过 `providers[].models[].inputModalities` 按模型配置，支持 `text` 和 `image`，且必须包含 `text`。默认值为 `["text"]`；DeepSeek 默认模型保持文本-only。只有显式配置为 `["text", "image"]` 的模型才会接受图片输入，网关会对文本-only 模型返回 400。
+模型能力集中维护在 `model-capabilities.json`。创建或获取模型时会按“上游返回的能力字段 > 精确模型名单 > 未知模型默认值”的顺序推断 `inputModalities`；显式填写 `providers[].models[].inputModalities` 时始终以配置为准。名单使用精确、大小写不敏感的模型 ID，支持命名空间尾部匹配，不会让 `deepseek-v4-pro-vision` 之类的新后缀错误继承纯文本能力。已确认的纯文本模型使用 `["text"]`，未知模型默认 `["text", "image"]`，避免客户端在能力确认前拦截未来的视觉模型。网关仍会对最终配置为文本-only 的模型拒绝图片输入。
+
+Web UI 的模型发现列表和 Provider 模型列表会显示“图像输入”或“仅文本”；手动填写上游模型 ID 时也会自动套用目录能力。`GET /v1/models` 的每一项包含 OpenAI 兼容扩展字段 `input_modalities`，管理端可通过 `GET /api/model-capabilities` 读取完整能力目录。修改能力目录后需重启网关；已保存模型上的显式 `inputModalities` 不会被目录更新覆盖。
 
 Responses Provider 的模型可以通过 `supportsHostedWebSearch: true` 显式向 Codex 暴露 Responses `web_search` 托管工具。该能力默认关闭；`chat-completions` Provider 不允许启用。切换 Provider 协议为 Chat Completions 时，Web UI 会自动清除模型上的 Hosted Web Search 能力。修改后需要重新运行 `./gatewayctl codex` 并重启 Codex，使新的模型目录生效。
 
@@ -433,7 +468,7 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 | `providers[].upstreamFormat` | - | - | `responses` | 上游协议，可选 `responses` 或 `chat-completions` |
 | `providers[].supportsEncryptedAgentMessages` | - | - | `false` | 是否让原生 Responses 上游直接处理 Multi-agent `agent_message`；仅允许用于 `responses` Provider。默认关闭时，网关会兼容解包 Codex 自定义 Provider 发出的子代理任务 |
 | `providers[].models[].id` | - | - | - | Codex 路由模型 ID，支持 `.`, `_`, `/`, `:`、`+` 和单连字符；不能包含保留分隔符 `--` |
-| `providers[].models[].inputModalities` | - | - | `["text"]` | 模型输入能力，可选 `text`、`image`；必须包含 `text`。图片仅对显式启用 `image` 的模型放行 |
+| `providers[].models[].inputModalities` | - | - | 按 `model-capabilities.json` 推断 | 模型输入能力，可选 `text`、`image`，且必须包含 `text`；显式配置优先于自动识别 |
 | `providers[].models[].supportsHostedWebSearch` | - | - | `false` | 是否向 Codex 暴露 Responses Hosted Web Search；仅允许用于 `responses` Provider |
 | `providers[].keys[].alwaysTry` | - | - | `false` | 鉴权或上游失败后仍允许新的请求继续调度该 Key；仍尊重 429 冷却和手动停用 |
 | `defaultProvider` | - | - | 第一个启用项 | 未带别名前缀时使用的 Provider |
@@ -464,6 +499,7 @@ node gateway.mjs --config /path/to/keys.json
 - 状态面板使用 React、Vite 和 shadcn/ui；生产构建位于 `ui/dist`。
 - `GET /`：状态面板，每 2 秒刷新一次。
 - `GET /health`：JSON 健康状态，适合脚本和监控。
+- `GET /v1/models`：列出当前可调用的 Provider 模型别名；Codex 原生 agent 不作为模型暴露。
 - `GET/POST /api/providers`：读取脱敏配置或添加 Provider。
 - `PATCH/DELETE /api/providers/:id`：修改或删除 Provider。
 - `PATCH/DELETE /api/providers/:id/keys/:name`：热更新 Key 的启用状态或权重，或删除 Key。
@@ -472,16 +508,26 @@ node gateway.mjs --config /path/to/keys.json
 - `POST /api/providers/:id/keys/:name/balance`：立即刷新指定 Key 的额度并返回新的 Key 状态。
 - `GET/PATCH /api/settings`：读取或修改脱敏的 Gateway 标量设置；响应只返回 `tokenConfigured`，不会返回令牌内容。
 - `POST /api/models`：通过 Provider 的 Base URL 和 Key 获取上游模型列表；支持 `/v1/models`、`/models` 及兼容子路径回退，不会自动写入配置。
+- `GET /api/model-capabilities`：返回用于自动识别模型输入能力的集中目录和未知模型默认值。
 - `POST /api/balance/test`：测试尚未保存的 `balanceQuery` 草稿；不会修改 Provider 配置。
 - `POST /api/providers/:id/test`：测试 Provider 连接。
 - `GET /api/codex/config`：生成统一 Codex Provider 和模型目录。
+- `GET/DELETE /api/logs`：查询或清空运行日志。GET 支持 `search`、`level`、`provider`、`model`、`status`、`limit`（1-1000）和 opaque `cursor`；响应为 `{ logs, total, hasMore, nextCursor }`，按 `timestamp DESC, id DESC` 稳定分页。CSV 由浏览器本地生成，不会保存到服务器。
+- `GET /api/usage?range=24h|7d|30d`：读取按天、Provider 和模型聚合的请求及 token 用量，响应包含 `total`、`points`、`providers` 和 `models`。Codex 客户端是子代理线程归属的事实来源，Gateway 不从普通模型请求猜测 agent 身份。用量 CSV 同样只在浏览器本地生成。
+- `GET/POST /api/storage`：读取存储状态，或使用 `backup`、`restore` 动作管理配置备份。
+- `DELETE /api/storage/backups/:id`：删除指定配置备份。
+- `GET/POST/PATCH/DELETE /api/integrations`：管理 HTTP 集成；`POST /api/integrations/:id/test` 使用 5 秒超时且不会返回上游响应正文。
+- `GET/POST/PATCH/DELETE /api/subagents`：管理并投影 Codex 原生 agent 配置；GET 项目附带 live 文件的 `projection` 状态。
+- `POST /api/runtime/stop`：确认响应后优雅停止当前网关实例。
 - `GET /login`：输入 `adminToken`，签发 24 小时 HttpOnly、SameSite Cookie；可信本机 HTTPS 反向代理下同时设置 `Secure`。
+- 登录失败按直接 socket 来源执行进程内限流：默认 60 秒内最多记录 5 次失败，超限后冷却 5 分钟；成功登录会清除该来源的失败记录。限流状态在进程重启后清空，多实例之间不共享，也不会无条件信任 `X-Forwarded-For`。
 - `GET /logout`：清除面板会话。
 
 启用认证后：
 
 - 代理 API 必须使用 `Authorization: Bearer <token>`。
-- 浏览器使用独立 `adminToken` 通过 `/login` 登录后可以访问面板、`/health` 和管理 API；写操作同时校验同源。
+- 浏览器使用独立 `adminToken` 通过 `/login` 登录后可以访问面板、`/health` 和管理 API；Cookie 会话的写操作必须携带匹配当前协议和 Host 的 `Origin`，Bearer 管理调用可用于非浏览器自动化。
+- 管理令牌轮换后旧会话立即失效，当前设置页面会签发绑定新令牌的 Cookie。登录结果及管理写操作会以 `audit` 级别记录，但不记录请求体、令牌或密钥。
 - 面板 Cookie 不能调用代理 API。
 - 页面和健康接口不会返回 API Key 内容。
 
@@ -489,18 +535,42 @@ node gateway.mjs --config /path/to/keys.json
 
 ## 测试
 
-运行完整测试：
+当前以本地质量门禁为主，暂不建设 CI。首次准备开发环境：
 
 ```bash
-npm ci
-node --test test/balance-script.mjs test/chat-completions-adapter.mjs test/codex-config.mjs test/config-core.mjs test/gateway-runtime.mjs test/gatewayctl.mjs test/key-import.mjs test/smoke.mjs
-python3 -m unittest test/configure_test.py
-npm test --prefix ui
-npm run lint --prefix ui
-npm run build --prefix ui
+npm install
+npm --prefix ui install
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
 ```
 
-测试使用内置 mock 上游，不消耗真实 API Key。UI 单元测试覆盖 Provider 草稿转换、脱敏提交载荷、模型去重、Hosted Web Search 协议切换和额度格式化。Key 后缀可触发不同 mock 行为：
+日常开发检查（Node.js、UI 测试，以及 UI lint、类型检查和生产构建）：
+
+```bash
+npm run check
+```
+
+提交或发布前执行完整本地验收（额外包含 Python 测试）：
+
+```bash
+npm run check:all
+```
+
+也可以按需执行分项命令：
+
+```bash
+npm run test:node
+npm run test:python
+npm run test:ui
+npm run lint
+npm run typecheck
+npm run build
+```
+
+根目录 `npm test` 使用固定的 Node TAP、pytest 和 Vitest 命令，并隔离调用者追加的 runner 参数；需要直接向 Vitest 传参时使用 `npm --prefix ui test -- <vitest 参数>`。
+
+测试使用内置 mock 上游，不消耗真实 API Key。UI 单元测试覆盖 Provider 草稿转换、脱敏提交载荷、模型去重、Hosted Web Search 协议切换、reasoning 能力保留和额度格式化。Key 后缀可触发不同 mock 行为：
 
 | 后缀 | 行为 |
 | --- | --- |
@@ -512,4 +582,4 @@ npm run build --prefix ui
 | `-drip` | 分段流式响应 |
 | `-abort` | 流式传输中断 |
 
-测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、批量解析与原子导入、重复 secret 拒绝、上游模型发现与 ID 归一化、Responses 与 Chat Completions 双向转换、工具调用和分片 SSE 终止事件、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、请求体上限、`gatewayctl` 托管启动和安全停止、交互式配置及备份恢复。
+测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、批量解析与原子导入、重复 secret 拒绝、上游模型发现与 ID 归一化、Responses 与 Chat Completions 双向转换、工具调用和分片 SSE 终止事件、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、运维 JSON 迁移/损坏恢复/并发写入、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、CSRF、会话失效、审计、请求体上限、`gatewayctl` 托管启动和安全停止、交互式配置及备份恢复。

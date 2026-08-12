@@ -85,7 +85,36 @@ export type ProviderModel = {
   upstreamModel: string
   inputModalities: Array<"text" | "image">
   supportsHostedWebSearch: boolean
+  reasoning?: ReasoningConfig
   alias: string
+}
+
+export type ModelCapabilityCatalog = {
+  schemaVersion: number
+  unknownModel: {
+    inputModalities: Array<"text" | "image">
+  }
+  models: Array<{
+    id: string
+    inputModalities: Array<"text" | "image">
+  }>
+}
+
+export type ReasoningParameter =
+  | "reasoning_effort"
+  | "enable_thinking"
+  | "thinking_budget"
+
+export type ReasoningLevel = {
+  effort: string
+  description?: string
+  upstreamValue?: string | number | boolean
+}
+
+export type ReasoningConfig = {
+  parameter: ReasoningParameter
+  default: string
+  levels: ReasoningLevel[]
 }
 
 export type MaskedProviderKey = {
@@ -164,4 +193,86 @@ export type CodexArtifacts = {
   modelsPath: string
   configToml: string
   catalogJson: string
+}
+
+export type GatewayLogEntry = {
+  id: string
+  timestamp: number
+  level: string
+  message: string
+  method?: string
+  route?: string
+  status?: number
+  provider?: string
+  model?: string
+  latencyMs?: number
+}
+
+export type LogsPage = {
+  logs: GatewayLogEntry[]
+  total: number
+  hasMore: boolean
+  nextCursor: string | null
+}
+
+export type UsageTotals = Health["total"]
+
+export type UsagePoint = UsageTotals & {
+  date: string
+  providers: Record<string, UsageTotals>
+  models: Record<string, UsageTotals>
+}
+
+export type UsageResponse = {
+  range: string
+  total: UsageTotals
+  points: UsagePoint[]
+  providers: Record<string, UsageTotals>
+  models: Record<string, UsageTotals>
+}
+
+export type StorageBackup = {
+  id: string
+  path: string
+  createdAt: number
+  size: number
+}
+
+export type StorageInfo = {
+  configPath: string
+  configExists: boolean
+  configSize: number
+  operationsPath: string
+  schemaVersion: number
+  backups: StorageBackup[]
+  retention: { logsDays: number; usageDays: number; backupLimit: number }
+}
+
+export type Integration = {
+  id: string
+  name: string
+  type: string
+  baseUrl: string
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export type Subagent = {
+  id: string
+  name: string
+  description: string
+  providerId: string
+  model: string
+  developerInstructions: string
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+  projection: {
+    codexHome: string
+    path: string | null
+    installed: boolean
+    status: "installed" | "disabled" | "missing" | "modified" | "unmanaged" | "unavailable"
+    backupPath: string | null
+  }
 }

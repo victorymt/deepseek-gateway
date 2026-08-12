@@ -2,6 +2,7 @@ import { CheckIcon, PlusIcon, RefreshCwIcon, XIcon } from "lucide-react"
 import type { Dispatch, SetStateAction } from "react"
 
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
 import {
   Field,
   FieldContent,
@@ -14,12 +15,90 @@ import {
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
+import type {
+  ModelCapabilityCatalog,
+  ReasoningParameter,
+} from "@/gateway-types"
 
 import type { ProviderCopy } from "./provider-copy"
-import type {
-  FetchedModel,
-  ProviderDraft,
+import {
+  inferModelInputModalities,
+  type FetchedModel,
+  type ProviderDraft,
 } from "./provider-editor-state"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+
+const REASONING_PARAMETERS: Array<{
+  value: ReasoningParameter
+  label: string
+}> = [
+  { value: "reasoning_effort", label: "reasoning_effort" },
+  { value: "enable_thinking", label: "enable_thinking" },
+  { value: "thinking_budget", label: "thinking_budget" },
+]
+
+function updateReasoningLevels(
+  model: ProviderDraft["models"][number],
+  text: string,
+  parameter = model.reasoning?.parameter ?? "reasoning_effort",
+  valuesText?: string
+) {
+  const efforts = [
+    ...new Set(
+      text
+        .split(",")
+        .map((value) => value.trim().toLowerCase())
+        .filter(Boolean)
+    ),
+  ]
+  if (!efforts.length) return undefined
+  const existing = new Map(
+    model.reasoning?.levels.map((level) => [level.effort, level]) ?? []
+  )
+  const mappedValues =
+    valuesText === undefined
+      ? null
+      : valuesText.split(",").map((value) => value.trim())
+  const levels = efforts.map((effort, index) => {
+    const level = { ...(existing.get(effort) ?? {}), effort }
+    if (mappedValues) {
+      const raw = mappedValues[index] ?? ""
+      if (!raw) delete level.upstreamValue
+      else if (raw === "true" || raw === "false") {
+        level.upstreamValue = raw === "true"
+      } else if (Number.isFinite(Number(raw))) {
+        level.upstreamValue = Number(raw)
+      } else {
+        level.upstreamValue = raw
+      }
+    }
+    return level
+  })
+  const defaultEffort = levels.some(
+    (level) => level.effort === model.reasoning?.default
+  )
+    ? model.reasoning!.default
+    : levels[0].effort
+  return {
+    parameter,
+    default: defaultEffort,
+    levels,
+  }
+}
+
+function reasoningValuesText(model: ProviderDraft["models"][number]) {
+  const values = model.reasoning?.levels.map((level) => level.upstreamValue)
+  return values?.some((value) => value !== undefined)
+    ? values.map((value) => value ?? "").join(", ")
+    : ""
+}
 
 type ProviderModelFieldsProps = {
   copy: ProviderCopy
@@ -27,6 +106,7 @@ type ProviderModelFieldsProps = {
   fetchedModels: FetchedModel[]
   fetching: boolean
   fetchError: string
+  modelCapabilities: ModelCapabilityCatalog | null
   setDraft: Dispatch<SetStateAction<ProviderDraft>>
   onAddFetchedModel: (model: FetchedModel) => void
   onFetchModels: () => Promise<void>
@@ -38,6 +118,7 @@ export function ProviderModelFields({
   fetchedModels,
   fetching,
   fetchError,
+  modelCapabilities,
   setDraft,
   onAddFetchedModel,
   onFetchModels,
@@ -113,6 +194,11 @@ export function ProviderModelFields({
                         {model.ownedBy}
                       </p>
                     )}
+                    <Badge className="mt-1" variant="outline">
+                      {model.inputModalities.includes("image")
+                        ? t.imageInput
+                        : t.textOnly}
+                    </Badge>
                   </div>
                   <Button
                     type="button"
@@ -137,12 +223,10 @@ export function ProviderModelFields({
       {draft.models.map((model, index) => (
         <div
           key={`model-${index}`}
-          className="grid items-end gap-3 sm:grid-cols-[1fr_1fr_1.2fr_auto_auto]"
+          className="grid items-end gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(160px,280px)_auto]"
         >
-          <Field>
-            <FieldLabel htmlFor={`model-id-${index}`}>
-              {t.modelId}
-            </FieldLabel>
+          <Field className="min-w-0">
+            <FieldLabel htmlFor={`model-id-${index}`}>{t.modelId}</FieldLabel>
             <Input
               id={`model-id-${index}`}
               value={model.id}
@@ -159,7 +243,7 @@ export function ProviderModelFields({
               }
             />
           </Field>
-          <Field>
+          <Field className="min-w-0">
             <FieldLabel htmlFor={`model-name-${index}`}>
               {t.modelName}
             </FieldLabel>
@@ -179,7 +263,7 @@ export function ProviderModelFields({
               }
             />
           </Field>
-          <Field>
+          <Field className="min-w-0">
             <FieldLabel htmlFor={`upstream-model-${index}`}>
               {t.upstreamModel}
             </FieldLabel>
@@ -192,16 +276,23 @@ export function ProviderModelFields({
                   ...value,
                   models: value.models.map((item, itemIndex) =>
                     itemIndex === index
-                      ? { ...item, upstreamModel: event.target.value }
+                      ? {
+                          ...item,
+                          upstreamModel: event.target.value,
+                          inputModalities: inferModelInputModalities(
+                            event.target.value,
+                            modelCapabilities
+                          ),
+                        }
                       : item
                   ),
                 }))
               }
             />
           </Field>
-          <div className="flex flex-col gap-3">
+          <div className="flex min-w-0 flex-col gap-3">
             <Field orientation="horizontal">
-              <FieldContent>
+              <FieldContent className="min-w-0">
                 <FieldTitle>{t.imageInput}</FieldTitle>
               </FieldContent>
               <Switch
@@ -231,7 +322,7 @@ export function ProviderModelFields({
                 draft.upstreamFormat === "chat-completions" || undefined
               }
             >
-              <FieldContent>
+              <FieldContent className="min-w-0">
                 <FieldTitle>{t.hostedWebSearch}</FieldTitle>
                 <FieldDescription>
                   {draft.upstreamFormat === "chat-completions"
@@ -259,7 +350,195 @@ export function ProviderModelFields({
                 }
               />
             </Field>
+            <Field orientation="horizontal">
+              <FieldContent className="min-w-0">
+                <FieldTitle>{t.reasoning}</FieldTitle>
+                <FieldDescription>{t.reasoningDescription}</FieldDescription>
+              </FieldContent>
+              <Switch
+                size="sm"
+                aria-label={t.reasoning}
+                checked={Boolean(model.reasoning)}
+                onCheckedChange={(checked) =>
+                  setDraft((value) => ({
+                    ...value,
+                    models: value.models.map((item, itemIndex) =>
+                      itemIndex === index
+                        ? {
+                            ...item,
+                            reasoning: checked
+                              ? (item.reasoning ?? {
+                                  parameter: "reasoning_effort",
+                                  default: "medium",
+                                  levels: [
+                                    { effort: "low" },
+                                    { effort: "medium" },
+                                    { effort: "high" },
+                                  ],
+                                })
+                              : undefined,
+                          }
+                        : item
+                    ),
+                  }))
+                }
+              />
+            </Field>
           </div>
+          {model.reasoning && (
+            <div className="grid min-w-0 gap-3 rounded-md border p-3 sm:col-span-4 sm:grid-cols-4">
+              <Field>
+                <FieldLabel htmlFor={`reasoning-levels-${index}`}>
+                  {t.reasoningLevels}
+                </FieldLabel>
+                <Input
+                  id={`reasoning-levels-${index}`}
+                  value={model.reasoning.levels
+                    .map((level) => level.effort)
+                    .join(", ")}
+                  placeholder="low, medium, high"
+                  onChange={(event) =>
+                    setDraft((value) => ({
+                      ...value,
+                      models: value.models.map((item, itemIndex) =>
+                        itemIndex === index
+                          ? {
+                              ...item,
+                              reasoning: updateReasoningLevels(
+                                item,
+                                event.target.value,
+                                item.reasoning?.parameter
+                              ),
+                            }
+                          : item
+                      ),
+                    }))
+                  }
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor={`reasoning-parameter-${index}`}>
+                  {t.reasoningParameter}
+                </FieldLabel>
+                <Select
+                  value={model.reasoning.parameter}
+                  onValueChange={(value) => {
+                    if (!value) return
+                    setDraft((current) => ({
+                      ...current,
+                      models: current.models.map((item, itemIndex) =>
+                        itemIndex === index
+                          ? {
+                              ...item,
+                              reasoning: updateReasoningLevels(
+                                item,
+                                item.reasoning?.levels
+                                  .map((level) => level.effort)
+                                  .join(", ") ?? "",
+                                value as ReasoningParameter,
+                                item.reasoning?.levels
+                                  .map((level) => level.upstreamValue ?? "")
+                                  .join(", ")
+                              ),
+                            }
+                          : item
+                      ),
+                    }))
+                  }}
+                >
+                  <SelectTrigger
+                    id={`reasoning-parameter-${index}`}
+                    className="w-full"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {REASONING_PARAMETERS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor={`reasoning-values-${index}`}>
+                  {t.reasoningValues}
+                </FieldLabel>
+                <Input
+                  id={`reasoning-values-${index}`}
+                  value={reasoningValuesText(model)}
+                  placeholder="Optional; one value per level"
+                  onChange={(event) =>
+                    setDraft((value) => ({
+                      ...value,
+                      models: value.models.map((item, itemIndex) =>
+                        itemIndex === index && item.reasoning
+                          ? {
+                              ...item,
+                              reasoning: updateReasoningLevels(
+                                item,
+                                item.reasoning.levels
+                                  .map((level) => level.effort)
+                                  .join(", "),
+                                item.reasoning.parameter,
+                                event.target.value
+                              ),
+                            }
+                          : item
+                      ),
+                    }))
+                  }
+                />
+                <FieldDescription>
+                  {t.reasoningValuesDescription}
+                </FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor={`reasoning-default-${index}`}>
+                  {t.reasoningDefault}
+                </FieldLabel>
+                <Select
+                  value={model.reasoning.default}
+                  onValueChange={(value) => {
+                    if (!value) return
+                    setDraft((current) => ({
+                      ...current,
+                      models: current.models.map((item, itemIndex) =>
+                        itemIndex === index && item.reasoning
+                          ? {
+                              ...item,
+                              reasoning: {
+                                ...item.reasoning,
+                                default: value,
+                              },
+                            }
+                          : item
+                      ),
+                    }))
+                  }}
+                >
+                  <SelectTrigger
+                    id={`reasoning-default-${index}`}
+                    className="w-full"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {model.reasoning.levels.map((level) => (
+                        <SelectItem key={level.effort} value={level.effort}>
+                          {level.effort}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </Field>
+            </div>
+          )}
           <Button
             type="button"
             variant="ghost"

@@ -395,7 +395,7 @@ function chatToolChoice(choice, context) {
   return { type: 'function', function: { name: chatName } };
 }
 
-export function responsesRequestToChatCompletions(payload) {
+export function responsesRequestToChatCompletions(payload, options = {}) {
   if (!isObject(payload)) throw adapterError('Responses request body must be a JSON object');
   payload = normalizeAgentMessagesForUpstream(payload);
   if (payload.tools !== undefined && !Array.isArray(payload.tools)) throw adapterError('tools must be an array');
@@ -417,7 +417,24 @@ export function responsesRequestToChatCompletions(payload) {
   if (payload.max_output_tokens !== undefined) result.max_tokens = payload.max_output_tokens;
   if (payload.max_tokens !== undefined) result.max_tokens = payload.max_tokens;
   if (payload.max_completion_tokens !== undefined) result.max_completion_tokens = payload.max_completion_tokens;
-  if (payload.reasoning?.effort !== undefined) result.reasoning_effort = payload.reasoning.effort;
+  const requestedEffort = payload.reasoning?.effort;
+  const effort = typeof requestedEffort === 'string'
+    ? requestedEffort.trim().toLowerCase()
+    : requestedEffort;
+  if (effort !== undefined) {
+    const reasoning = options.reasoning;
+    const level = reasoning?.levels?.find(item => item.effort === effort);
+    if (reasoning?.levels && !level) {
+      throw adapterError(`reasoning effort ${effort} is not supported by this model`);
+    }
+    const parameter = reasoning?.parameter || 'reasoning_effort';
+    const value = level?.upstreamValue === undefined
+      ? (parameter === 'enable_thinking' && ['on', 'off'].includes(effort)
+        ? effort === 'on'
+        : effort)
+      : level.upstreamValue;
+    result[parameter] = value;
+  }
   for (const field of ['temperature', 'top_p', 'stream']) {
     if (payload[field] !== undefined) result[field] = payload[field];
   }

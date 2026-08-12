@@ -1,4 +1,10 @@
-import type { BalanceQuery, BalanceResult, Provider } from "@/gateway-types"
+import type {
+  BalanceQuery,
+  BalanceResult,
+  ModelCapabilityCatalog,
+  Provider,
+  ReasoningConfig,
+} from "@/gateway-types"
 
 export type InputModality = "text" | "image"
 
@@ -8,13 +14,12 @@ export type ModelDraft = {
   upstreamModel: string
   inputModalities: InputModality[]
   supportsHostedWebSearch: boolean
+  reasoning?: ReasoningConfig
 }
 
-export type FetchedModel = Omit<
-  ModelDraft,
-  "inputModalities" | "supportsHostedWebSearch"
-> & {
+export type FetchedModel = Omit<ModelDraft, "supportsHostedWebSearch"> & {
   ownedBy: string | null
+  capabilitySource: "upstream" | "registry" | "default"
 }
 
 export type KeyDraft = {
@@ -147,12 +152,19 @@ export function providerToDraft(provider: Provider): ProviderDraft {
         upstreamModel,
         inputModalities,
         supportsHostedWebSearch,
+        reasoning,
       }) => ({
         id,
         name,
         upstreamModel,
         inputModalities: [...inputModalities],
         supportsHostedWebSearch,
+        reasoning: reasoning
+          ? {
+              ...reasoning,
+              levels: reasoning.levels.map((level) => ({ ...level })),
+            }
+          : undefined,
       })
     ),
     keys: provider.keys.map((key) => ({
@@ -287,7 +299,7 @@ export function addFetchedModelToDraft(
     id,
     name: model.name,
     upstreamModel: model.upstreamModel,
-    inputModalities: ["text"],
+    inputModalities: [...model.inputModalities],
     supportsHostedWebSearch: false,
   }
   const hasOnlyEmptyModel =
@@ -300,6 +312,29 @@ export function addFetchedModelToDraft(
     ...draft,
     models: hasOnlyEmptyModel ? [nextModel] : [...draft.models, nextModel],
   }
+}
+
+function normalizeCapabilityModelId(value: string) {
+  return value
+    .trim()
+    .replace(/^models\//i, "")
+    .replace(/\[1m\]$/i, "")
+    .trim()
+    .toLowerCase()
+}
+
+export function inferModelInputModalities(
+  upstreamModel: string,
+  catalog: ModelCapabilityCatalog | null
+): InputModality[] {
+  if (!upstreamModel.trim() || !catalog) return ["text"]
+  const normalized = normalizeCapabilityModelId(upstreamModel)
+  const tail = normalized.split("/").at(-1)
+  const match = catalog.models.find((entry) => {
+    const candidate = normalizeCapabilityModelId(entry.id)
+    return candidate === normalized || candidate === tail
+  })
+  return [...(match?.inputModalities ?? catalog.unknownModel.inputModalities)]
 }
 
 export function setProviderUpstreamFormat(

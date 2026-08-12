@@ -1478,6 +1478,8 @@ test('model discovery proxies OpenAI-compatible endpoints and normalizes upstrea
       'default',
       'upstream',
     ]);
+    assert.equal(payload.models[0].reasoning, undefined);
+    assert.equal(payload.models[1].reasoning, undefined);
     assert.ok(!JSON.stringify(payload).includes(secret));
 
     const capabilitiesResponse = await fetch(`${gw.base}/api/model-capabilities`);
@@ -1488,6 +1490,18 @@ test('model discovery proxies OpenAI-compatible endpoints and normalizes upstrea
       model.id === 'deepseek-v4-pro'
       && JSON.stringify(model.inputModalities) === JSON.stringify(['text'])
     )));
+    assert.deepEqual(
+      capabilities.models.find(model => model.id === 'deepseek-v4-pro').reasoning,
+      {
+        parameter: 'reasoning_effort',
+        default: 'high',
+        levels: [
+          { effort: 'low', description: 'Fast responses with lighter reasoning' },
+          { effort: 'high', description: 'Extra high reasoning depth for complex problems' },
+          { effort: 'max', description: 'Maximum reasoning depth for the hardest problems' },
+        ],
+      },
+    );
 
     const providerKeyResponse = await fetch(`${gw.base}/api/models`, {
       method: 'POST',

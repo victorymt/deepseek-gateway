@@ -39,6 +39,11 @@ test('legacy config normalizes and serializes as canonical v2', () => {
   assert.equal(stored.providers[0].baseUrl, 'https://legacy.example/v1');
   assert.equal(stored.providers[0].upstreamFormat, 'responses');
   assert.deepEqual(stored.providers[0].models[0].inputModalities, ['text']);
+  assert.equal(stored.providers[0].models[0].reasoning.default, 'high');
+  assert.deepEqual(
+    stored.providers[0].models[0].reasoning.levels.map(level => level.effort),
+    ['low', 'high', 'max'],
+  );
   assert.equal(stored.providers[0].keys[0].key, 'sk-legacy');
   assert.equal(stored.providers[0].keys[0].enabled, true);
   assert.equal(normalized.providers[0].keys[0].alwaysTry, false);
@@ -231,6 +236,73 @@ test('missing model input modalities are inferred from the capability registry',
   assert.deepEqual(normalizeModel('deepseek-v4-pro').inputModalities, ['text']);
   assert.deepEqual(normalizeModel('glm-5.2v').inputModalities, ['text', 'image']);
   assert.deepEqual(normalizeModel('future-vision-model').inputModalities, ['text', 'image']);
+});
+
+test('missing model reasoning is inferred from the capability registry and persisted', () => {
+  const normalized = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--reasoner',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      models: [{ id: 'reasoner', upstreamModel: 'deepseek-v4-pro' }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+    }],
+  });
+  const expected = {
+    parameter: 'reasoning_effort',
+    default: 'high',
+    levels: [
+      { effort: 'low', description: 'Fast responses with lighter reasoning' },
+      { effort: 'high', description: 'Extra high reasoning depth for complex problems' },
+      { effort: 'max', description: 'Maximum reasoning depth for the hardest problems' },
+    ],
+  };
+
+  assert.deepEqual(normalized.providers[0].models[0].reasoning, expected);
+  assert.deepEqual(
+    serializableConfig(normalized).providers[0].models[0].reasoning,
+    expected,
+  );
+});
+
+test('explicit model reasoning overrides catalog defaults and null persists as opt-out', () => {
+  const base = {
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--reasoner',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      models: [{
+        id: 'reasoner',
+        upstreamModel: 'deepseek-v4-pro',
+        reasoning: {
+          parameter: 'reasoning_effort',
+          default: 'medium',
+          levels: ['medium', 'high'],
+        },
+      }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+    }],
+  };
+  const customized = normalizeConfig(base);
+  assert.deepEqual(customized.providers[0].models[0].reasoning, {
+    parameter: 'reasoning_effort',
+    default: 'medium',
+    levels: [{ effort: 'medium' }, { effort: 'high' }],
+  });
+
+  base.providers[0].models[0].reasoning = null;
+  const disabled = normalizeConfig(base);
+  assert.equal(disabled.providers[0].models[0].reasoning, null);
+  const stored = serializableConfig(disabled);
+  assert.equal(stored.providers[0].models[0].reasoning, null);
+  assert.equal(
+    normalizeConfig(stored).providers[0].models[0].reasoning,
+    null,
+  );
 });
 
 test('reasoning capability normalizes, validates, and persists per-model mappings', () => {

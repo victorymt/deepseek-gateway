@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeCatalogReasoningConfig } from './reasoning-config.mjs';
 
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CATALOG_PATH = path.join(PROJECT_DIR, 'model-capabilities.json');
@@ -64,6 +65,16 @@ function declaredInputModalities(declaration) {
   return null;
 }
 
+function cloneCapability(entry) {
+  return structuredClone(entry);
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value)) deepFreeze(nested);
+  return Object.freeze(value);
+}
+
 function loadCatalog() {
   const catalog = JSON.parse(fs.readFileSync(CATALOG_PATH, 'utf8'));
   if (catalog.schemaVersion !== 1 || !Array.isArray(catalog.models)) {
@@ -79,7 +90,18 @@ function loadCatalog() {
     if (models.has(id)) {
       throw new Error(`model-capabilities.json contains duplicate model: ${id}`);
     }
-    models.set(id, Object.freeze({ ...entry, id, inputModalities }));
+    const reasoning = entry.reasoning === undefined
+      ? undefined
+      : normalizeCatalogReasoningConfig(
+        entry.reasoning,
+        `model-capabilities.json model ${id} reasoning`,
+      );
+    models.set(id, deepFreeze({
+      ...entry,
+      id,
+      inputModalities,
+      ...(reasoning ? { reasoning } : {}),
+    }));
   }
   const unknownInputModalities = normalizeModalities(catalog.unknownModel?.inputModalities);
   if (!unknownInputModalities) {
@@ -87,7 +109,7 @@ function loadCatalog() {
   }
   return Object.freeze({
     schemaVersion: catalog.schemaVersion,
-    unknownModel: Object.freeze({ inputModalities: unknownInputModalities }),
+    unknownModel: Object.freeze({ inputModalities: Object.freeze(unknownInputModalities) }),
     models,
   });
 }
@@ -98,19 +120,23 @@ export function findModelCapability(model) {
   const normalized = normalizeModelId(model);
   if (!normalized) return null;
   const tail = normalized.split('/').at(-1);
-  return catalog.models.get(normalized) || catalog.models.get(tail) || null;
+  const registered = catalog.models.get(normalized) || catalog.models.get(tail);
+  return registered ? cloneCapability(registered) : null;
 }
 
 export function inferModelCapabilities(model, declaration = null) {
   const declared = declaredInputModalities(declaration);
-  if (declared) {
-    return { inputModalities: declared, source: 'upstream' };
-  }
   const registered = findModelCapability(model);
+  if (declared) {
+    return {
+      inputModalities: declared,
+      ...(registered?.reasoning ? { reasoning: structuredClone(registered.reasoning) } : {}),
+      source: 'upstream',
+    };
+  }
   if (registered) {
     return {
       ...registered,
-      inputModalities: [...registered.inputModalities],
       source: 'registry',
     };
   }
@@ -124,9 +150,6 @@ export function modelCapabilityCatalog() {
   return {
     schemaVersion: catalog.schemaVersion,
     unknownModel: { inputModalities: [...catalog.unknownModel.inputModalities] },
-    models: [...catalog.models.values()].map(entry => ({
-      ...entry,
-      inputModalities: [...entry.inputModalities],
-    })),
+    models: [...catalog.models.values()].map(cloneCapability),
   };
 }

@@ -6,7 +6,10 @@ import {
   addFetchedModelToDraft,
   balanceResultAmount,
   createEmptyProviderDraft,
+  inferModelCapabilityPreset,
   inferModelInputModalities,
+  modelDraftForUpstreamModel,
+  modelDraftWithReasoningEnabled,
   providerDraftPayload,
   providerOriginsDiffer,
   providerToDraft,
@@ -53,6 +56,32 @@ const provider: Provider = {
   balanceQuery: null,
 }
 
+const modelCapabilities: ModelCapabilityCatalog = {
+  schemaVersion: 1,
+  unknownModel: { inputModalities: ["text", "image"] },
+  models: [
+    {
+      id: "deepseek-v4-flash",
+      inputModalities: ["text"],
+      reasoning: {
+        parameter: "reasoning_effort",
+        default: "high",
+        levels: [{ effort: "low" }, { effort: "high" }, { effort: "max" }],
+      },
+    },
+    {
+      id: "deepseek-v4-pro",
+      inputModalities: ["text"],
+      reasoning: {
+        parameter: "reasoning_effort",
+        default: "high",
+        levels: [{ effort: "low" }, { effort: "high" }, { effort: "max" }],
+      },
+    },
+    { id: "glm-5.2v", inputModalities: ["text", "image"] },
+  ],
+}
+
 describe("provider editor state", () => {
   test("creates independent empty drafts", () => {
     const first = createEmptyProviderDraft()
@@ -66,28 +95,101 @@ describe("provider editor state", () => {
   })
 
   test("infers exact registry capabilities and fails open for unknown models", () => {
-    const catalog: ModelCapabilityCatalog = {
-      schemaVersion: 1,
-      unknownModel: { inputModalities: ["text", "image"] },
-      models: [
-        { id: "deepseek-v4-pro", inputModalities: ["text"] },
-        {
-          id: "glm-5.2v",
-          inputModalities: ["text", "image"],
-        },
-      ],
-    }
-
     expect(
-      inferModelInputModalities("deepseek/deepseek-v4-pro", catalog)
+      inferModelInputModalities("deepseek/deepseek-v4-pro", modelCapabilities)
     ).toEqual(["text"])
-    expect(inferModelInputModalities("glm-5.2v", catalog)).toEqual([
+    expect(inferModelInputModalities("glm-5.2v", modelCapabilities)).toEqual([
       "text",
       "image",
     ])
-    expect(inferModelInputModalities("deepseek-v4-pro-vision", catalog)).toEqual(
-      ["text", "image"]
+    expect(
+      inferModelInputModalities("deepseek-v4-pro-vision", modelCapabilities)
+    ).toEqual(["text", "image"])
+  })
+
+  test("returns independent capability presets with reasoning", () => {
+    const first = inferModelCapabilityPreset(
+      "models/deepseek/deepseek-v4-pro[1m]",
+      modelCapabilities
     )
+    const second = inferModelCapabilityPreset(
+      "deepseek-v4-pro",
+      modelCapabilities
+    )
+
+    expect(first).toEqual({
+      inputModalities: ["text"],
+      reasoning: modelCapabilities.models[1].reasoning,
+    })
+    first.inputModalities.push("image")
+    first.reasoning!.levels[0].effort = "changed"
+    expect(second).toEqual({
+      inputModalities: ["text"],
+      reasoning: modelCapabilities.models[1].reasoning,
+    })
+  })
+
+  test("updates only catalog-derived reasoning when the model ID changes", () => {
+    const base = createEmptyProviderDraft().models[0]
+    const catalogModel = modelDraftForUpstreamModel(
+      base,
+      "deepseek-v4-pro",
+      modelCapabilities
+    )
+    const unknownModel = modelDraftForUpstreamModel(
+      catalogModel,
+      "future-model",
+      modelCapabilities
+    )
+
+    expect(catalogModel.reasoning).toEqual(
+      modelCapabilities.models[1].reasoning
+    )
+    expect(unknownModel.reasoning).toBeUndefined()
+    expect(unknownModel.inputModalities).toEqual(["text", "image"])
+
+    const customReasoning = {
+      parameter: "thinking_budget" as const,
+      default: "large",
+      levels: [{ effort: "large", upstreamValue: 8192 }],
+    }
+    const customized = modelDraftForUpstreamModel(
+      { ...catalogModel, reasoning: customReasoning },
+      "future-model",
+      modelCapabilities
+    )
+    expect(customized.reasoning).toBe(customReasoning)
+
+    const disabled = modelDraftForUpstreamModel(
+      { ...catalogModel, reasoning: null },
+      "deepseek-v4-flash",
+      modelCapabilities
+    )
+    expect(disabled.reasoning).toBeNull()
+  })
+
+  test("uses the catalog when enabling reasoning and persists explicit off", () => {
+    const base = {
+      ...createEmptyProviderDraft().models[0],
+      upstreamModel: "deepseek-v4-pro",
+    }
+    const enabled = modelDraftWithReasoningEnabled(
+      base,
+      true,
+      modelCapabilities
+    )
+    const disabled = modelDraftWithReasoningEnabled(
+      enabled,
+      false,
+      modelCapabilities
+    )
+
+    expect(enabled.reasoning).toEqual(modelCapabilities.models[1].reasoning)
+    expect(disabled.reasoning).toBeNull()
+
+    const draft = createEmptyProviderDraft()
+    draft.models[0] = disabled
+    expect(providerDraftPayload(draft).models[0].reasoning).toBeNull()
   })
 
   test("converts public provider data into a safe editable draft", () => {
@@ -110,7 +212,13 @@ describe("provider editor state", () => {
     expect(draft.supportsEncryptedAgentMessages).toBe(true)
 
     draft.models[0].inputModalities.push("image")
+    draft.models[0].reasoning!.levels[0].effort = "changed"
     expect(provider.models[0].inputModalities).toEqual(["text"])
+    expect(provider.models[0].reasoning!.levels[0].effort).toBe("low")
+
+    const disabledProvider = structuredClone(provider)
+    disabledProvider.models[0].reasoning = null
+    expect(providerToDraft(disabledProvider).models[0].reasoning).toBeNull()
   })
 
   test("builds a persistence payload without public key metadata", () => {
@@ -212,6 +320,11 @@ describe("provider editor state", () => {
       ownedBy: "deepseek",
       inputModalities: ["text"],
       capabilitySource: "registry" as const,
+      reasoning: {
+        parameter: "reasoning_effort",
+        default: "high",
+        levels: [{ effort: "low" }, { effort: "high" }],
+      },
     }
     const added = addFetchedModelToDraft(empty, fetched)
 
@@ -222,8 +335,13 @@ describe("provider editor state", () => {
         upstreamModel: "deepseek-chat",
         inputModalities: ["text"],
         supportsHostedWebSearch: false,
+        reasoning: fetched.reasoning,
       },
     ])
+    expect(added.models[0].reasoning).not.toBe(fetched.reasoning)
+    expect(added.models[0].reasoning!.levels).not.toBe(
+      fetched.reasoning!.levels
+    )
     expect(addFetchedModelToDraft(added, fetched)).toBe(added)
 
     const collision = addFetchedModelToDraft(added, {

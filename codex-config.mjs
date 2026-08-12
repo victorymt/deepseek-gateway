@@ -153,6 +153,9 @@ function applyCatalogProfile(
       ...(level.description ? { description: level.description } : {}),
     }));
     catalogModel.default_reasoning_level = model.reasoning.default;
+  } else {
+    catalogModel.supported_reasoning_levels = [];
+    delete catalogModel.default_reasoning_level;
   }
 
   delete catalogModel.web_search_tool_type;

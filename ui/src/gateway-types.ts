@@ -85,7 +85,7 @@ export type ProviderModel = {
   upstreamModel: string
   inputModalities: Array<"text" | "image">
   supportsHostedWebSearch: boolean
-  reasoning?: ReasoningConfig
+  reasoning?: ReasoningConfig | null
   alias: string
 }
 
@@ -97,6 +97,16 @@ export type ModelCapabilityCatalog = {
   models: Array<{
     id: string
     inputModalities: Array<"text" | "image">
+    reasoning?: ModelCapabilityReasoningConfig
+  }>
+}
+
+export type ModelCapabilityReasoningConfig = {
+  parameter: "reasoning_effort"
+  default: string
+  levels: Array<{
+    effort: string
+    description?: string
   }>
 }
 

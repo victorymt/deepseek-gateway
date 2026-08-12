@@ -996,6 +996,9 @@ function normalizeFetchedModels(payload) {
       upstreamModel,
       ownedBy,
       inputModalities: capabilities.inputModalities,
+      ...(capabilities.reasoning ? {
+        reasoning: structuredClone(capabilities.reasoning),
+      } : {}),
       capabilitySource: capabilities.source,
     });
   }

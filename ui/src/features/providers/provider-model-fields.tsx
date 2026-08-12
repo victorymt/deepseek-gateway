@@ -22,7 +22,8 @@ import type {
 
 import type { ProviderCopy } from "./provider-copy"
 import {
-  inferModelInputModalities,
+  modelDraftForUpstreamModel,
+  modelDraftWithReasoningEnabled,
   type FetchedModel,
   type ProviderDraft,
 } from "./provider-editor-state"
@@ -276,14 +277,11 @@ export function ProviderModelFields({
                   ...value,
                   models: value.models.map((item, itemIndex) =>
                     itemIndex === index
-                      ? {
-                          ...item,
-                          upstreamModel: event.target.value,
-                          inputModalities: inferModelInputModalities(
-                            event.target.value,
-                            modelCapabilities
-                          ),
-                        }
+                      ? modelDraftForUpstreamModel(
+                          item,
+                          event.target.value,
+                          modelCapabilities
+                        )
                       : item
                   ),
                 }))
@@ -364,20 +362,11 @@ export function ProviderModelFields({
                     ...value,
                     models: value.models.map((item, itemIndex) =>
                       itemIndex === index
-                        ? {
-                            ...item,
-                            reasoning: checked
-                              ? (item.reasoning ?? {
-                                  parameter: "reasoning_effort",
-                                  default: "medium",
-                                  levels: [
-                                    { effort: "low" },
-                                    { effort: "medium" },
-                                    { effort: "high" },
-                                  ],
-                                })
-                              : undefined,
-                          }
+                        ? modelDraftWithReasoningEnabled(
+                            item,
+                            checked,
+                            modelCapabilities
+                          )
                         : item
                     ),
                   }))

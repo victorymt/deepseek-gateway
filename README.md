@@ -265,7 +265,7 @@ cp keys.example.json keys.json
 }
 ```
 
-未配置 `reasoning` 的模型不会主动发送思考参数；只有确认上游真实支持对应字段和值时才应启用。修改后重新运行 `./gatewayctl codex` 并重启 Codex，使模型目录生效。
+模型的思考能力也维护在 `model-capabilities.json`。已知模型在 `providers[].models[].reasoning` 缺失时会按精确模型 ID 自动采用目录中的通用 `reasoning_effort` profile；显式对象始终覆盖目录，`"reasoning": null` 会明确且持久地关闭该模型的目录预设。未知模型不会推断思考能力，避免向未确认的上游发送参数。Provider 保存后会把采用的 profile 固化到配置，因此后续目录更新不会改写已保存模型。只有确认上游真实支持对应字段和值时才应添加自定义 `enable_thinking` 或 `thinking_budget` 映射。修改后重新运行 `./gatewayctl codex` 并重启 Codex，使模型目录生效。
 
 `keys.example.json` 提供了可直接使用的 DeepSeek 额度查询脚本。DeepSeek Provider 未显式设置 `balanceQuery` 时也会使用同一内置脚本；设置 `"balanceQuery": { "enabled": false }` 可以关闭该 Provider 的查询。
 
@@ -328,9 +328,9 @@ DEEPSEEK_KEYS="main=sk-xxx,backup=sk-yyy" node gateway.mjs
 
 `setup-codex.sh` 仍可作为底层兼容入口直接运行。
 
-模型能力集中维护在 `model-capabilities.json`。创建或获取模型时会按“上游返回的能力字段 > 精确模型名单 > 未知模型默认值”的顺序推断 `inputModalities`；显式填写 `providers[].models[].inputModalities` 时始终以配置为准。名单使用精确、大小写不敏感的模型 ID，支持命名空间尾部匹配，不会让 `deepseek-v4-pro-vision` 之类的新后缀错误继承纯文本能力。已确认的纯文本模型使用 `["text"]`，未知模型默认 `["text", "image"]`，避免客户端在能力确认前拦截未来的视觉模型。网关仍会对最终配置为文本-only 的模型拒绝图片输入。
+模型能力集中维护在 `model-capabilities.json`。创建或获取模型时会按“上游返回的能力字段 > 精确模型名单 > 未知模型默认值”的顺序推断 `inputModalities`；显式填写 `providers[].models[].inputModalities` 时始终以配置为准。名单使用精确、大小写不敏感的模型 ID，支持命名空间尾部匹配，不会让 `deepseek-v4-pro-vision` 之类的新后缀错误继承纯文本能力。已确认的纯文本模型使用 `["text"]`，未知模型默认 `["text", "image"]`，避免客户端在能力确认前拦截未来的视觉模型。网关仍会对最终配置为文本-only 的模型拒绝图片输入。目录中的可选 `reasoning` profile 只适用于精确匹配的已确认模型，且首版只包含跨协议兼容的 `reasoning_effort`。
 
-Web UI 的模型发现列表和 Provider 模型列表会显示“图像输入”或“仅文本”；手动填写上游模型 ID 时也会自动套用目录能力。`GET /v1/models` 的每一项包含 OpenAI 兼容扩展字段 `input_modalities`，管理端可通过 `GET /api/model-capabilities` 读取完整能力目录。修改能力目录后需重启网关；已保存模型上的显式 `inputModalities` 不会被目录更新覆盖。
+Web UI 的模型发现列表和 Provider 模型列表会显示“图像输入”或“仅文本”；手动填写上游模型 ID 时也会自动套用目录能力和适用的思考预设。`GET /v1/models` 的每一项包含 OpenAI 兼容扩展字段 `input_modalities`，管理端可通过 `GET /api/model-capabilities` 读取完整能力目录。修改能力目录后需重启网关；已保存模型上的显式 `inputModalities` 和 reasoning 配置不会被目录更新覆盖。
 
 Responses Provider 的模型可以通过 `supportsHostedWebSearch: true` 显式向 Codex 暴露 Responses `web_search` 托管工具。该能力默认关闭；`chat-completions` Provider 不允许启用。切换 Provider 协议为 Chat Completions 时，Web UI 会自动清除模型上的 Hosted Web Search 能力。修改后需要重新运行 `./gatewayctl codex` 并重启 Codex，使新的模型目录生效。
 
@@ -469,6 +469,7 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 | `providers[].supportsEncryptedAgentMessages` | - | - | `false` | 是否让原生 Responses 上游直接处理 Multi-agent `agent_message`；仅允许用于 `responses` Provider。默认关闭时，网关会兼容解包 Codex 自定义 Provider 发出的子代理任务 |
 | `providers[].models[].id` | - | - | - | Codex 路由模型 ID，支持 `.`, `_`, `/`, `:`、`+` 和单连字符；不能包含保留分隔符 `--` |
 | `providers[].models[].inputModalities` | - | - | 按 `model-capabilities.json` 推断 | 模型输入能力，可选 `text`、`image`，且必须包含 `text`；显式配置优先于自动识别 |
+| `providers[].models[].reasoning` | - | - | 按已知模型目录推断 | Codex 思考等级及上游参数映射；对象覆盖目录，`null` 显式关闭目录预设，未知模型不自动启用 |
 | `providers[].models[].supportsHostedWebSearch` | - | - | `false` | 是否向 Codex 暴露 Responses Hosted Web Search；仅允许用于 `responses` Provider |
 | `providers[].keys[].alwaysTry` | - | - | `false` | 鉴权或上游失败后仍允许新的请求继续调度该 Key；仍尊重 429 冷却和手动停用 |
 | `defaultProvider` | - | - | 第一个启用项 | 未带别名前缀时使用的 Provider |
@@ -508,7 +509,7 @@ node gateway.mjs --config /path/to/keys.json
 - `POST /api/providers/:id/keys/:name/balance`：立即刷新指定 Key 的额度并返回新的 Key 状态。
 - `GET/PATCH /api/settings`：读取或修改脱敏的 Gateway 标量设置；响应只返回 `tokenConfigured`，不会返回令牌内容。
 - `POST /api/models`：通过 Provider 的 Base URL 和 Key 获取上游模型列表；支持 `/v1/models`、`/models` 及兼容子路径回退，不会自动写入配置。
-- `GET /api/model-capabilities`：返回用于自动识别模型输入能力的集中目录和未知模型默认值。
+- `GET /api/model-capabilities`：返回用于自动识别模型输入和已确认思考能力的集中目录及未知模型默认值。
 - `POST /api/balance/test`：测试尚未保存的 `balanceQuery` 草稿；不会修改 Provider 配置。
 - `POST /api/providers/:id/test`：测试 Provider 连接。
 - `GET /api/codex/config`：生成统一 Codex Provider 和模型目录。

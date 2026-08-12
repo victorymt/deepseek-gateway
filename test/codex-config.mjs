@@ -25,7 +25,7 @@ function config(
         upstreamModel,
         inputModalities: ['text'],
         supportsHostedWebSearch,
-        ...(reasoning ? { reasoning } : {}),
+        ...(reasoning === undefined ? {} : { reasoning }),
       }],
       keys: [{ name: 'one', key: 'sk-one', weight: 1 }],
     }],
@@ -87,6 +87,16 @@ test('model reasoning capabilities override neutral and matched catalog profiles
       { effort: 'high', description: 'Deep' },
     ]);
     assert.equal(model.default_reasoning_level, 'high');
+  }
+});
+
+test('models with reasoning explicitly disabled clear levels inherited from matched templates', () => {
+  for (const upstreamFormat of ['responses', 'chat-completions']) {
+    const model = buildModelCatalog(
+      config(upstreamFormat, false, 'deepseek-v4-flash', null),
+    ).models[0];
+    assert.deepEqual(model.supported_reasoning_levels, []);
+    assert.equal(model.default_reasoning_level, undefined);
   }
 });
 

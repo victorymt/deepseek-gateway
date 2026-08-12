@@ -14,12 +14,23 @@ export type ModelDraft = {
   upstreamModel: string
   inputModalities: InputModality[]
   supportsHostedWebSearch: boolean
-  reasoning?: ReasoningConfig
+  reasoning?: ReasoningConfig | null
 }
 
 export type FetchedModel = Omit<ModelDraft, "supportsHostedWebSearch"> & {
   ownedBy: string | null
   capabilitySource: "upstream" | "registry" | "default"
+}
+
+export type ModelCapabilityPreset = Pick<
+  ModelDraft,
+  "inputModalities" | "reasoning"
+>
+
+const DEFAULT_REASONING_CONFIG: ReasoningConfig = {
+  parameter: "reasoning_effort",
+  default: "medium",
+  levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }],
 }
 
 export type KeyDraft = {
@@ -159,12 +170,9 @@ export function providerToDraft(provider: Provider): ProviderDraft {
         upstreamModel,
         inputModalities: [...inputModalities],
         supportsHostedWebSearch,
-        reasoning: reasoning
-          ? {
-              ...reasoning,
-              levels: reasoning.levels.map((level) => ({ ...level })),
-            }
-          : undefined,
+        ...(reasoning === undefined
+          ? {}
+          : { reasoning: cloneReasoningConfig(reasoning) }),
       })
     ),
     keys: provider.keys.map((key) => ({
@@ -301,6 +309,9 @@ export function addFetchedModelToDraft(
     upstreamModel: model.upstreamModel,
     inputModalities: [...model.inputModalities],
     supportsHostedWebSearch: false,
+    ...(model.reasoning === undefined
+      ? {}
+      : { reasoning: cloneReasoningConfig(model.reasoning) }),
   }
   const hasOnlyEmptyModel =
     draft.models.length === 1 &&
@@ -327,14 +338,118 @@ export function inferModelInputModalities(
   upstreamModel: string,
   catalog: ModelCapabilityCatalog | null
 ): InputModality[] {
-  if (!upstreamModel.trim() || !catalog) return ["text"]
+  return inferModelCapabilityPreset(upstreamModel, catalog).inputModalities
+}
+
+export function inferModelCapabilityPreset(
+  upstreamModel: string,
+  catalog: ModelCapabilityCatalog | null
+): ModelCapabilityPreset {
+  if (!upstreamModel.trim() || !catalog) {
+    return { inputModalities: ["text"] }
+  }
   const normalized = normalizeCapabilityModelId(upstreamModel)
   const tail = normalized.split("/").at(-1)
   const match = catalog.models.find((entry) => {
     const candidate = normalizeCapabilityModelId(entry.id)
     return candidate === normalized || candidate === tail
   })
-  return [...(match?.inputModalities ?? catalog.unknownModel.inputModalities)]
+  return {
+    inputModalities: [
+      ...(match?.inputModalities ?? catalog.unknownModel.inputModalities),
+    ],
+    ...(match?.reasoning
+      ? { reasoning: cloneReasoningConfig(match.reasoning) }
+      : {}),
+  }
+}
+
+export function modelDraftForUpstreamModel(
+  model: ModelDraft,
+  upstreamModel: string,
+  catalog: ModelCapabilityCatalog | null
+): ModelDraft {
+  const previousPreset = inferModelCapabilityPreset(
+    model.upstreamModel,
+    catalog
+  )
+  const nextPreset = inferModelCapabilityPreset(upstreamModel, catalog)
+  const shouldApplyReasoning =
+    model.reasoning === undefined ||
+    reasoningConfigsEqual(model.reasoning, previousPreset.reasoning)
+
+  return {
+    ...model,
+    upstreamModel,
+    inputModalities: nextPreset.inputModalities,
+    ...(shouldApplyReasoning
+      ? nextPreset.reasoning === undefined
+        ? { reasoning: undefined }
+        : { reasoning: nextPreset.reasoning }
+      : {}),
+  }
+}
+
+export function enabledModelReasoning(
+  model: ModelDraft,
+  catalog: ModelCapabilityCatalog | null
+): ReasoningConfig {
+  if (model.reasoning) return cloneReasoningConfig(model.reasoning)
+  return (
+    inferModelCapabilityPreset(model.upstreamModel, catalog).reasoning ??
+    cloneReasoningConfig(DEFAULT_REASONING_CONFIG)
+  )
+}
+
+export function modelDraftWithReasoningEnabled(
+  model: ModelDraft,
+  enabled: boolean,
+  catalog: ModelCapabilityCatalog | null
+): ModelDraft {
+  return {
+    ...model,
+    reasoning: enabled ? enabledModelReasoning(model, catalog) : null,
+  }
+}
+
+export function cloneReasoningConfig(
+  reasoning: ReasoningConfig
+): ReasoningConfig
+export function cloneReasoningConfig(reasoning: null): null
+export function cloneReasoningConfig(
+  reasoning: ReasoningConfig | null
+): ReasoningConfig | null
+export function cloneReasoningConfig(
+  reasoning: ReasoningConfig | null
+): ReasoningConfig | null {
+  return reasoning
+    ? {
+        ...reasoning,
+        levels: reasoning.levels.map((level) => ({ ...level })),
+      }
+    : null
+}
+
+export function reasoningConfigsEqual(
+  left: ReasoningConfig | null | undefined,
+  right: ReasoningConfig | null | undefined
+) {
+  if (left === right) return true
+  if (!left || !right || left.levels.length !== right.levels.length) {
+    return false
+  }
+  return (
+    left.parameter === right.parameter &&
+    left.default === right.default &&
+    left.levels.every((level, index) => {
+      const other = right.levels[index]
+      return (
+        level.effort === other.effort &&
+        level.description === other.description &&
+        level.upstreamValue === other.upstreamValue
+      )
+    })
+  )
 }
 
 export function setProviderUpstreamFormat(

@@ -7,8 +7,48 @@
     { "id": "ark-code-latest", "inputModalities": ["text"] },
     { "id": "deepseek-chat", "inputModalities": ["text"] },
     { "id": "deepseek-reasoner", "inputModalities": ["text"] },
-    { "id": "deepseek-v4-flash", "inputModalities": ["text"] },
-    { "id": "deepseek-v4-pro", "inputModalities": ["text"] },
+    {
+      "id": "deepseek-v4-flash",
+      "inputModalities": ["text"],
+      "reasoning": {
+        "parameter": "reasoning_effort",
+        "default": "high",
+        "levels": [
+          { "effort": "low", "description": "Fast responses with lighter reasoning" },
+          { "effort": "high", "description": "Extra high reasoning depth for complex problems" },
+          { "effort": "max", "description": "Maximum reasoning depth for the hardest problems" }
+        ]
+      }
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "inputModalities": ["text"],
+      "reasoning": {
+        "parameter": "reasoning_effort",
+        "default": "high",
+        "levels": [
+          { "effort": "low", "description": "Fast responses with lighter reasoning" },
+          { "effort": "high", "description": "Extra high reasoning depth for complex problems" },
+          { "effort": "max", "description": "Maximum reasoning depth for the hardest problems" }
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "inputModalities": ["text", "image"],
+      "reasoning": {
+	"parameter": "reasoning_effort",
+	"default": "medium",
+	"levels": [
+          { "effort": "none", "description": "Lowest latency without additional reasoning" },
+          { "effort": "low", "description": "Fast responses with light reasoning" },
+          { "effort": "medium", "description": "Balanced reasoning for general work" },
+          { "effort": "high", "description": "Deeper reasoning for complex tasks" },
+          { "effort": "xhigh", "description": "Extra-high reasoning for difficult problems" },
+          { "effort": "max", "description": "Maximum reasoning for the hardest problems" }
+	]
+      }
+    },
     { "id": "glm-5.1", "inputModalities": ["text"] },
     { "id": "glm-5.2", "inputModalities": ["text"] },
     { "id": "glm-5.2v", "inputModalities": ["text", "image"] },

@@ -262,6 +262,40 @@ test('encrypted agent message passthrough is explicit and limited to Responses p
   }), /must be a boolean/);
 });
 
+test('prompt cache key forwarding is explicit and limited to Chat Completions providers', () => {
+  const baseProvider = {
+    id: 'alpha',
+    baseUrl: 'https://alpha.example/v1',
+    upstreamFormat: 'chat-completions',
+    models: [{ id: 'chat', upstreamModel: 'chat' }],
+    keys: [{ name: 'one', key: 'sk-one' }],
+  };
+  const defaults = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [baseProvider],
+  });
+  assert.equal(defaults.providers[0].supportsPromptCacheKey, false);
+  assert.equal(serializableConfig(defaults).providers[0].supportsPromptCacheKey, undefined);
+
+  const enabled = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{ ...baseProvider, supportsPromptCacheKey: true }],
+  });
+  assert.equal(enabled.providers[0].supportsPromptCacheKey, true);
+  assert.equal(serializableConfig(enabled).providers[0].supportsPromptCacheKey, true);
+
+  assert.throws(() => normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{ ...baseProvider, upstreamFormat: 'responses', supportsPromptCacheKey: true }],
+  }), /requires chat-completions upstreamFormat/);
+});
+
 test('model input modalities default to text and normalize image capability', () => {
   assert.deepEqual(normalizeInputModalities(undefined), ['text']);
   assert.deepEqual(normalizeInputModalities(['image', 'text', 'image']), ['text', 'image']);

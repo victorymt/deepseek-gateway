@@ -20,6 +20,7 @@
       "upstreamFormat": "responses",
       "apiProfile": "deepseek",
       "supportsEncryptedAgentMessages": false,
+      "supportsPromptCacheKey": false,
       "enabled": true,
       "balanceQuery": {
         "enabled": true,

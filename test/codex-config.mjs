@@ -85,6 +85,20 @@ test('official DeepSeek Responses defaults to hosted search and custom apply_pat
   assert.equal(model.web_search_tool_type, 'text');
   assert.equal(model.apply_patch_tool_type, 'freeform');
   assert.equal(model.shell_type, 'shell_command');
+  assert.equal(model.context_window, 1048576);
+  assert.ok(model.base_instructions.length > 10000);
+  assert.ok(model.model_messages?.instructions_template);
+});
+
+test('DeepSeek profile on a relay does not claim the official Responses harness', () => {
+  const relay = config('responses', false, 'deepseek-v4-flash');
+  relay.providers[0].apiProfile = 'deepseek';
+
+  const model = buildModelCatalog(relay).models[0];
+
+  assert.equal(model.model_messages, undefined);
+  assert.equal(model.context_window, 1048576);
+  assert.doesNotMatch(model.base_instructions, /apply_patch/);
 });
 
 test('generic native Responses only exposes custom apply_patch when enabled', () => {
@@ -128,7 +142,7 @@ test('models with reasoning explicitly disabled clear levels inherited from matc
   }
 });
 
-test('known templates keep proxy tools but strip them for native Responses', () => {
+test('known templates keep proxy tools but strip them for generic native Responses', () => {
   const proxyChat = buildModelCatalog(
     config('chat-completions', false, 'deepseek-v4-flash'),
   ).models[0];

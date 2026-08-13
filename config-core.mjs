@@ -135,6 +135,13 @@ export function normalizeEncryptedAgentMessages(value, field = 'supportsEncrypte
   return value === true;
 }
 
+export function normalizePromptCacheKey(value, field = 'supportsPromptCacheKey') {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value === true;
+}
+
 export function canExposeHostedWebSearch(provider, model) {
   return provider?.upstreamFormat === 'responses'
     && model?.supportsHostedWebSearch === true;
@@ -218,6 +225,17 @@ export function normalizeProvider(input, existing = null) {
   if (supportsEncryptedAgentMessages && upstreamFormat !== 'responses') {
     throw new Error(
       `provider ${id} supportsEncryptedAgentMessages requires responses upstreamFormat`,
+    );
+  }
+  const supportsPromptCacheKey = normalizePromptCacheKey(
+    input.supportsPromptCacheKey === undefined
+      ? existing?.supportsPromptCacheKey
+      : input.supportsPromptCacheKey,
+    `provider ${id} supportsPromptCacheKey`,
+  );
+  if (supportsPromptCacheKey && upstreamFormat !== 'chat-completions') {
+    throw new Error(
+      `provider ${id} supportsPromptCacheKey requires chat-completions upstreamFormat`,
     );
   }
   const enabled = input.enabled === undefined ? (existing?.enabled ?? true) : input.enabled === true;
@@ -333,6 +351,7 @@ export function normalizeProvider(input, existing = null) {
     upstreamFormat,
     apiProfile,
     supportsEncryptedAgentMessages,
+    supportsPromptCacheKey,
     enabled,
     models,
     keys,
@@ -502,11 +521,15 @@ export function serializableConfig(config) {
     defaultModel: config.defaultModel,
     providers: config.providers.map(({
       supportsEncryptedAgentMessages,
+      supportsPromptCacheKey,
       ...provider
     }) => ({
       ...provider,
       ...(supportsEncryptedAgentMessages
         ? { supportsEncryptedAgentMessages: true }
+        : {}),
+      ...(supportsPromptCacheKey
+        ? { supportsPromptCacheKey: true }
         : {}),
       models: provider.models.map(({
         supportsHostedWebSearch,

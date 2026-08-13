@@ -8,6 +8,7 @@ import { URL, fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { PassThrough, Transform } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import {
@@ -19,6 +20,8 @@ import {
   responsesRequestToChatCompletions,
 } from './chat-completions-adapter.mjs';
 import { normalizeAgentMessagesForUpstream } from './responses-request-normalizer.mjs';
+import { decodeRequestBody, requestContentEncoding } from './content-encoding.mjs';
+import { assertSupportedNodeVersion, MINIMUM_NODE_VERSION } from './node-version.mjs';
 import {
   claimGatewayRuntime,
   releaseGatewayRuntime,
@@ -63,6 +66,21 @@ const HOP_HEADERS = new Set([
 const SESSION_SECRET = crypto.randomBytes(32).toString('hex');
 const COOKIE_NAME = 'dsgw';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+function requireSupportedNodeVersion() {
+  try {
+    assertSupportedNodeVersion();
+  } catch {
+    console.error(
+      `ERROR: deepseek-gateway requires Node.js ${MINIMUM_NODE_VERSION} or newer; found ${process.versions.node}`,
+    );
+    process.exit(1);
+  }
+  if (typeof zlib.zstdDecompress !== 'function') {
+    console.error('ERROR: this Node.js build does not provide native zstd decompression');
+    process.exit(1);
+  }
+}
 
 function secureEqual(a, b) {
   const ba = Buffer.from(String(a));
@@ -1022,8 +1040,11 @@ async function fetchProviderModels(baseUrl, secret, modelsUrl = '') {
 
 function rewriteResponsesRequestUrl(requestUrl) {
   const url = new URL(requestUrl || '/', 'http://gateway.local');
-  if (url.pathname === '/v1/responses') url.pathname = '/v1/chat/completions';
-  else if (url.pathname === '/responses') url.pathname = '/chat/completions';
+  if (url.pathname === '/v1/responses' || url.pathname === '/v1/responses/compact') {
+    url.pathname = '/v1/chat/completions';
+  } else if (url.pathname === '/responses' || url.pathname === '/responses/compact') {
+    url.pathname = '/chat/completions';
+  }
   return `${url.pathname}${url.search}`;
 }
 
@@ -1068,6 +1089,7 @@ function prepareUpstreamRequest({
     }
     const adapted = responsesRequestToChatCompletions(preparedPayload, {
       reasoning: model?.reasoning,
+      supportsPromptCacheKey: runtime.provider.supportsPromptCacheKey,
     });
     return {
       body: Buffer.from(JSON.stringify(adapted.payload)),
@@ -1144,7 +1166,12 @@ function resolveRequestRoute(registry, body, requestUrl) {
     );
   }
   const pathname = new URL(requestUrl || '/', 'http://gateway.local').pathname;
-  const isResponsesRequest = ['/v1/responses', '/responses'].includes(pathname);
+  const isResponsesRequest = [
+    '/v1/responses',
+    '/responses',
+    '/v1/responses/compact',
+    '/responses/compact',
+  ].includes(pathname);
   const prepared = prepareUpstreamRequest({
     body,
     payload: parsed,
@@ -1174,7 +1201,14 @@ async function forwardOnce(runtime, key, clientReq, route, signal) {
   const u = upstreamRequestUrl(runtime.provider.baseUrl, route.upstreamRequestPath || clientReq.url);
   const headers = {};
   for (const [h, v] of Object.entries(clientReq.headers)) {
-    if (HOP_HEADERS.has(h) || h === 'host' || h === 'authorization' || h === 'cookie' || h === 'content-length') continue;
+    if (
+      HOP_HEADERS.has(h)
+      || h === 'host'
+      || h === 'authorization'
+      || h === 'cookie'
+      || h === 'content-length'
+      || (route.decodedRequestBody && h === 'content-encoding')
+    ) continue;
     headers[h] = Array.isArray(v) ? v.join(', ') : v;
   }
   headers.authorization = `Bearer ${key.key}`;
@@ -1348,7 +1382,7 @@ async function relayAdaptedResponse(clientRes, upRes, key, pool, route, finish) 
     try {
       const body = await readUpstreamBody(upRes, route.runtime.settings.maxBodyBytes);
       let payload;
-      try { payload = JSON.parse(body.toString('utf8')); } catch { payload = { message: body.toString('utf8') }; }
+      try { payload = JSON.parse(body.toString('utf8')); } catch { payload = body.toString('utf8'); }
       const output = Buffer.from(JSON.stringify(normalizeChatCompletionsError(payload, upRes.statusCode)));
       const headers = responseHeaders(upRes, key, route, {
         transformed: true,
@@ -1452,7 +1486,12 @@ async function relayAdaptedResponse(clientRes, upRes, key, pool, route, finish) 
     if (!clientRes.headersSent) {
       clientRes.writeHead(error.statusCode || 502, { 'content-type': 'application/json' });
     }
-    if (!clientRes.writableEnded) clientRes.end(JSON.stringify({ error: { message: error.message } }));
+    if (!clientRes.writableEnded) {
+      clientRes.end(JSON.stringify(normalizeChatCompletionsError({
+        message: error.message,
+        type: 'upstream_error',
+      }, error.statusCode || 502)));
+    }
   }
 }
 
@@ -1858,6 +1897,7 @@ function publicProvider(provider) {
     upstreamFormat: provider.upstreamFormat,
     apiProfile: provider.apiProfile,
     supportsEncryptedAgentMessages: provider.supportsEncryptedAgentMessages === true,
+    supportsPromptCacheKey: provider.supportsPromptCacheKey === true,
     enabled: provider.enabled,
     models: provider.models.map(model => ({
       ...model,
@@ -2747,8 +2787,14 @@ async function handleRequest(cfg, registry, req, res, log, startedAt, instanceId
     sendUiDocument(res, dashboardHtml());
     return;
   }
-  const body = await readBody(req, cfg.maxBodyBytes);
-  const route = resolveRequestRoute(registry, body, req.url);
+  const wireBody = await readBody(req, cfg.maxBodyBytes);
+  const decoded = await decodeRequestBody(
+    wireBody,
+    requestContentEncoding(req),
+    cfg.maxBodyBytes,
+  );
+  const route = resolveRequestRoute(registry, decoded.body, req.url);
+  route.decodedRequestBody = decoded.decoded;
   await relay(route, req, res, log);
 }
 
@@ -2874,4 +2920,5 @@ function main() {
   process.on('SIGTERM', () => shutdown(server, registry, runtimeHandle));
 }
 
+requireSupportedNodeVersion();
 main();

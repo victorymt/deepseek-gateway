@@ -71,6 +71,23 @@ test('Responses requests convert messages, tools, settings, and usage options', 
   assert.equal(context.byChatName.get('apply_patch').kind, 'custom');
 });
 
+test('prompt_cache_key is forwarded only with Provider opt-in', () => {
+  const request = {
+    model: 'provider-model',
+    input: 'inspect',
+    prompt_cache_key: 'stable-project-session',
+  };
+  assert.equal(
+    responsesRequestToChatCompletions(request).payload.prompt_cache_key,
+    undefined,
+  );
+  assert.equal(
+    responsesRequestToChatCompletions(request, { supportsPromptCacheKey: true })
+      .payload.prompt_cache_key,
+    'stable-project-session',
+  );
+});
+
 test('Responses input images convert to Chat image URLs with data URL and detail', () => {
   const imageUrl = 'data:image/png;base64,AAECAw==';
   const { payload } = responsesRequestToChatCompletions({
@@ -466,4 +483,24 @@ test('Chat error payloads normalize to the Responses error envelope', () => {
       param: null,
     },
   });
+  assert.deepEqual(normalizeChatCompletionsError('plain upstream error', 502), {
+    error: {
+      message: 'plain upstream error',
+      type: 'upstream_error',
+      code: null,
+      param: null,
+    },
+  });
+  assert.deepEqual(normalizeChatCompletionsError(null, 502), {
+    error: {
+      message: 'Upstream returned an empty error response',
+      type: 'upstream_error',
+      code: null,
+      param: null,
+    },
+  });
+  assert.equal(
+    normalizeChatCompletionsError({ unexpected: true }, 500).error.message,
+    '{"unexpected":true}',
+  );
 });

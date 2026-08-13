@@ -10,6 +10,7 @@ import {
   canExposeCustomApplyPatch,
   canExposeHostedWebSearch,
   codexModelAlias,
+  DEFAULT_UPSTREAM,
   normalizeConfig,
 } from './config-core.mjs';
 
@@ -100,6 +101,12 @@ function catalogProfile(provider) {
     : CATALOG_PROFILE.NATIVE_RESPONSES;
 }
 
+function usesOfficialDeepSeekCatalog(provider) {
+  return provider.apiProfile === 'deepseek'
+    && provider.upstreamFormat === 'responses'
+    && new URL(provider.baseUrl).origin === new URL(DEFAULT_UPSTREAM).origin;
+}
+
 function hasInstructionSource(model) {
   return Boolean(
     String(model.base_instructions || '').trim()
@@ -160,8 +167,8 @@ function applyCatalogProfile(
     delete catalogModel.default_reasoning_level;
   }
 
-  delete catalogModel.web_search_tool_type;
   if (profile === CATALOG_PROFILE.PROXY_CHAT) {
+    delete catalogModel.web_search_tool_type;
     if (usesNeutralTemplate) {
       catalogModel.base_instructions = proxyTemplate.base_instructions
         || NEUTRAL_BASE_INSTRUCTIONS;
@@ -172,7 +179,8 @@ function applyCatalogProfile(
     catalogModel.apply_patch_tool_type = proxyTemplate.apply_patch_tool_type
       || catalogModel.apply_patch_tool_type
       || 'freeform';
-  } else {
+  } else if (usesNeutralTemplate || !usesOfficialDeepSeekCatalog(provider)) {
+    delete catalogModel.web_search_tool_type;
     catalogModel.base_instructions = NEUTRAL_BASE_INSTRUCTIONS;
     delete catalogModel.apply_patch_tool_type;
     delete catalogModel.model_messages;
@@ -183,6 +191,9 @@ function applyCatalogProfile(
     if (canExposeCustomApplyPatch(provider, model)) {
       catalogModel.apply_patch_tool_type = template.apply_patch_tool_type || 'freeform';
     }
+  } else {
+    if (!canExposeHostedWebSearch(provider, model)) delete catalogModel.web_search_tool_type;
+    if (!canExposeCustomApplyPatch(provider, model)) delete catalogModel.apply_patch_tool_type;
   }
   if (!hasInstructionSource(catalogModel)) {
     catalogModel.base_instructions = NEUTRAL_BASE_INSTRUCTIONS;

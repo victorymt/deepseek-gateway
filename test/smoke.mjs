@@ -653,6 +653,7 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
       name: 'Alpha Chat',
       baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
       upstreamFormat: 'chat-completions',
+      supportsPromptCacheKey: true,
       enabled: true,
       models: [{
         id: 'shared',
@@ -695,6 +696,20 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
     assert.equal(requests[0].body.reasoning_effort, undefined);
     assert.deepEqual(requests[0].body.messages.map(message => message.role), ['system', 'user']);
     assert.equal(requests[0].cookie, undefined);
+
+    const compact = await fetch(`${gw.base}/v1/responses/compact?trace=adapted`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'alpha--shared',
+        input: 'compact',
+        prompt_cache_key: 'stable-project-session',
+      }),
+    });
+    assert.equal(compact.status, 200, await compact.clone().text());
+    assert.equal((await compact.json()).object, 'response');
+    assert.equal(requests.at(-1).url, '/v1/chat/completions?trace=adapted');
+    assert.equal(requests.at(-1).body.prompt_cache_key, 'stable-project-session');
 
     const stream = await gw.responses({ model: 'alpha--shared', input: 'stream', stream: true }, {}, '?trace=adapted');
     assert.equal(stream.status, 200, stream.text);
@@ -747,6 +762,69 @@ test('Chat Completions providers adapt Responses JSON and SSE while direct Chat 
     assert.match(agentRequest.messages[0].content, /Message Type: NEW_TASK/);
     assert.match(agentRequest.messages[0].content, /CHAT-SUBAGENT-9502/);
     assert.doesNotMatch(JSON.stringify(agentRequest), /agent_message|encrypted_content/);
+  } finally {
+    await gw.stop();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('compressed Codex requests are decoded and stale encoding headers are removed', async () => {
+  const upstreamPort = await freePort();
+  const requests = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      requests.push({
+        url: req.url,
+        headers: req.headers,
+        body: JSON.parse(Buffer.concat(chunks).toString('utf8')),
+      });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'resp-compressed',
+        object: 'response',
+        status: 'completed',
+        output: [],
+      }));
+    });
+  });
+  await new Promise(resolve => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const config = multiProviderConfig();
+  config.providers[0].baseUrl = `http://127.0.0.1:${upstreamPort}/v1`;
+  const gw = await startGateway('', [], {}, config, { keysArg: false, mock: false });
+  try {
+    const payload = Buffer.from(JSON.stringify({
+      model: 'alpha--shared',
+      input: 'compressed',
+    }));
+    const response = await fetch(`${gw.base}/v1/responses/compact?trace=zstd`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-encoding': 'zstd',
+      },
+      body: zlib.zstdCompressSync(payload),
+    });
+    assert.equal(response.status, 200, await response.text());
+    assert.equal(requests[0].url, '/v1/responses/compact?trace=zstd');
+    assert.equal(requests[0].body.model, 'same-upstream-model');
+    assert.equal(requests[0].headers['content-encoding'], undefined);
+    assert.equal(
+      Number(requests[0].headers['content-length']),
+      Buffer.byteLength(JSON.stringify(requests[0].body)),
+    );
+
+    const malformed = await fetch(`${gw.base}/v1/responses`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+      },
+      body: Buffer.from('invalid'),
+    });
+    assert.equal(malformed.status, 400);
+    assert.match(await malformed.text(), /invalid compressed request body/);
   } finally {
     await gw.stop();
     await new Promise(resolve => upstream.close(resolve));
@@ -933,6 +1011,8 @@ test('provider API masks secrets, persists atomically, and applies new aliases l
         id: 'gamma',
         name: 'Gamma',
         baseUrl: 'https://gamma.example/v1',
+        upstreamFormat: 'chat-completions',
+        supportsPromptCacheKey: true,
         enabled: true,
         models: [{ id: 'shared', name: 'Shared Gamma', upstreamModel: 'same-upstream-model' }],
         keys: [{ name: 'gamma-key', key: secret, weight: 2 }],
@@ -945,6 +1025,7 @@ test('provider API masks secrets, persists atomically, and applies new aliases l
     const gamma = publicConfig.providers.find(provider => provider.id === 'gamma');
     assert.match(gamma.keys[0].maskedKey, /^\*\*\*\*/);
     assert.equal(gamma.keys[0].key, undefined);
+    assert.equal(gamma.supportsPromptCacheKey, true);
 
     const routed = await gw.chat({ model: 'gamma--shared' });
     assert.equal(routed.status, 200);

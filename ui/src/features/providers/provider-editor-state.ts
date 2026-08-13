@@ -58,6 +58,7 @@ export type ProviderDraft = {
   upstreamFormat: "responses" | "chat-completions"
   apiProfile: "generic" | "deepseek"
   supportsEncryptedAgentMessages: boolean
+  supportsPromptCacheKey: boolean
   enabled: boolean
   models: ModelDraft[]
   keys: KeyDraft[]
@@ -137,6 +138,7 @@ export function createEmptyProviderDraft(): ProviderDraft {
     upstreamFormat: "responses",
     apiProfile: "generic",
     supportsEncryptedAgentMessages: false,
+    supportsPromptCacheKey: false,
     enabled: true,
     models: [
       {
@@ -175,6 +177,7 @@ export function providerToDraft(provider: Provider): ProviderDraft {
     apiProfile: provider.apiProfile,
     supportsEncryptedAgentMessages:
       provider.supportsEncryptedAgentMessages === true,
+    supportsPromptCacheKey: provider.supportsPromptCacheKey === true,
     enabled: provider.enabled,
     models: provider.models.map(
       ({
@@ -255,6 +258,7 @@ export function providerDraftPayload(
     upstreamFormat: draft.upstreamFormat,
     apiProfile: draft.apiProfile,
     supportsEncryptedAgentMessages: draft.supportsEncryptedAgentMessages,
+    supportsPromptCacheKey: draft.supportsPromptCacheKey,
     enabled: draft.enabled,
     models: draft.models,
     balanceQuery: draft.balanceQuery,
@@ -512,6 +516,10 @@ export function setProviderUpstreamFormat(
       upstreamFormat === "chat-completions"
         ? false
         : draft.supportsEncryptedAgentMessages,
+    supportsPromptCacheKey:
+      upstreamFormat === "chat-completions"
+        ? draft.supportsPromptCacheKey
+        : false,
     models: draft.models.map((model) => {
       if (upstreamFormat === "chat-completions") {
         return {

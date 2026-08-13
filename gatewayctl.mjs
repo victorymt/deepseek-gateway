@@ -14,6 +14,7 @@ import {
   readGatewayRuntime,
   releaseGatewayRuntime,
 } from './gateway-runtime.mjs';
+import { assertSupportedNodeVersion } from './node-version.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CONFIG = path.join(ROOT, 'keys.json');
@@ -293,8 +294,6 @@ function validate(args) {
 async function doctor(args) {
   assertConfigOnlyArgs(args);
   const configPath = configOption(args);
-  const major = Number(process.versions.node.split('.')[0]);
-  if (major < 18) throw new Error(`Node.js 18+ is required (current ${process.version})`);
   console.log(`OK: Node.js ${process.version}`);
 
   const config = readConfig(configPath);
@@ -321,6 +320,7 @@ async function main(argv = process.argv.slice(2)) {
     console.log(USAGE);
     return 0;
   }
+  assertSupportedNodeVersion();
   if (args.includes('--help') && ['validate', 'doctor', 'stop'].includes(command)) {
     console.log(USAGE);
     return 0;

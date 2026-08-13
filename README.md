@@ -16,7 +16,7 @@ gateway.mjs  -- 根据请求 model 解析 Provider.model（兼容 provider--mode
 
 ## 运行要求
 
-- Node.js 18 或更新版本，以及 npm；构建 shadcn 状态面板需要 Node.js 20.19+ 或 22.12+
+- Node.js 22.15 或更新版本，以及 npm；Codex 会发送 zstd 压缩请求，网关使用 Node.js 原生 zstd API 解压
 - Python 3.10 或更新版本，用于交互式配置和 Codex 配置合并；推荐 Python 3.11+
 - Codex CLI，仅在需要接入 Codex 时使用
 
@@ -222,6 +222,7 @@ cp keys.example.json keys.json
       "upstreamFormat": "responses",
       "apiProfile": "deepseek",
       "supportsEncryptedAgentMessages": false,
+      "supportsPromptCacheKey": false,
       "enabled": true,
       "balanceQuery": {
         "enabled": true,
@@ -411,9 +412,11 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 Provider 的 `upstreamFormat` 支持两个值：
 
 - `responses`：默认值，保持原有路径、请求体和响应透传行为。
-- `chat-completions`：客户端调用 `/v1/responses` 时，网关把请求转换后转发至上游 `/v1/chat/completions`，再将 JSON 或 SSE 转回 Responses 格式。客户端直接调用 `/v1/chat/completions` 时仍原样透传。
+- `chat-completions`：客户端调用 `/v1/responses` 或 `/v1/responses/compact` 时，网关把请求转换后转发至上游 `/v1/chat/completions`，保留查询参数，再将 JSON 或 SSE 转回 Responses 格式。客户端直接调用 `/v1/chat/completions` 时仍原样透传。
 
 转换支持文本、输入图片、function/custom/namespace 工具、工具结果、reasoning、结构化输出、流式 usage 和缺失 `[DONE]` 时的终止事件补全。与 cc-switch 的 ProxyChat 路径一致，Responses 的 `web_search` hosted tool 会在本地转换时过滤，并在没有其他可转换工具时同步删除 `tool_choice` 和 `parallel_tool_calls`，避免 Chat Completions 上游返回协议错误；这只是兼容过滤，不会在本地执行网页搜索。`previous_response_id`、`item_reference`、后台响应、`file_search`/computer 工具以及 `input_file` 无法无损映射，网关仍返回明确的 `400`。
+
+Codex 请求体支持 `gzip`、`x-gzip`、`deflate`、`br`、`zstd`/`zst` 以及堆叠 `Content-Encoding`。压缩体和每层解压结果均受 `maxBodyBytes` 限制。Chat Completions Provider 默认不转发 `prompt_cache_key`；只有确认上游接受该字段后，才应开启 `supportsPromptCacheKey`，以保持同一项目会话的缓存亲和。
 
 原生 Responses Provider 的图片内容会原样交给上游，不按本地 `inputModalities` 返回 `400`。DeepSeek 官方 Responses API 当前不支持真正的图片输入，但会把 `input_image` 替换为占位文本而不是报错；网关保留这一官方兼容行为。需要选择非默认 Provider 时应使用 `${providerId}--${modelId}` 或 Codex 点号别名，未带 Provider 前缀的模型名仍路由到 `defaultProvider`。
 
@@ -423,9 +426,9 @@ Codex MultiAgentV2 通过自定义 Provider 派发子代理时，会把任务放
 
 网关默认只在 `agent_message` 内将该项改写为 `input_text`，并把外层改写成 `message(role=user)`；这既适用于原生 Responses Provider，也适用于 Responses 到 Chat Completions 的本地转换。普通 message 内容和 reasoning item 的 `encrypted_content` 不会被全局改写。只有上游原生支持 OpenAI Responses Multi-agent 加密消息时，才应设置 `supportsEncryptedAgentMessages: true` 关闭兼容解包并原样透传。Chat Completions Provider 不允许开启该能力，Web UI 切换协议时也会自动关闭它。
 
-生成 Codex 模型目录时会按上游格式选择工具 profile。`chat-completions` 使用 ProxyChat profile，保留 Codex 的 freeform `apply_patch`，由本地网关把 Responses 请求和可转换工具调用转换成 Chat Completions，并过滤 hosted web search；`responses` 使用 NativeResponses profile，先删除模板中的 `apply_patch_tool_type`、`model_messages` 和自定义 `tools`，再仅对 `supportsCustomApplyPatch: true` 的模型恢复 freeform `apply_patch`。其他原生 Responses 模型继续通过 `shell_type = "shell_command"` 提供编辑能力。
+生成 Codex 模型目录时会按上游格式和 origin 选择工具 profile。`chat-completions` 使用 ProxyChat profile，保留 Codex 的 freeform `apply_patch`，由本地网关转换可支持的工具调用并过滤 hosted web search。官方 `api.deepseek.com` 的 DeepSeek Responses Provider 保留内置官方目录中的完整 `base_instructions`、`model_messages`、上下文、reasoning、Web Search 和 apply_patch 声明；第三方中转与未知模型继续使用保守的通用 Responses profile。
 
-两个 profile 的基础目录都不包含 `web_search_tool_type`；只有 Responses 模型配置 `supportsHostedWebSearch: true` 时才会按模型模板显式恢复。DeepSeek Profile 的两个 V4 模型默认同时恢复 web search 和 custom apply_patch。该目录字段只描述能力，Codex 仍可能从运行时默认配置生成 `web_search`，因此 Chat Completions 路径始终以请求时过滤为最终保障。Codex 配置固定使用 `wire_api = "responses"` 并请求本地网关，上游协议只在 Provider 路由中选择，不需要也不应按上游格式改动 Codex Provider。
+所有生成条目仍强制 `supports_search_tool: false`，避免 Codex 将 MCP 工具延迟隐藏。模型的 `supportsHostedWebSearch` 和 `supportsCustomApplyPatch` 仍可显式关闭官方模板能力。Codex 配置固定使用 `wire_api = "responses"` 并请求本地网关，上游协议只在 Provider 路由中选择。
 
 ## 调度策略
 
@@ -470,10 +473,11 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 | `setupPending` | - | - | `false` | `true` 表示等待通过 Web UI 配置首个 Provider |
 | `port` | `--port` | `DS_GATEWAY_PORT` | `8787` | 监听端口 |
 | `host` | `--host` | - | `127.0.0.1` | 监听地址 |
-| `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`upstreamFormat`、`apiProfile`、代理消息能力、`models`、`keys`、`balanceQuery` 和启用状态 |
+| `providers[]` | - | - | DeepSeek 兼容项 | Provider 的 `id`、`baseUrl`、`upstreamFormat`、`apiProfile`、协议能力、`models`、`keys`、`balanceQuery` 和启用状态 |
 | `providers[].upstreamFormat` | - | - | `responses` | 上游协议，可选 `responses` 或 `chat-completions` |
 | `providers[].apiProfile` | - | - | `generic` | Provider API 能力模板，可选 `generic` 或 `deepseek`；旧版官方 DeepSeek 配置会自动迁移 |
 | `providers[].supportsEncryptedAgentMessages` | - | - | `false` | 是否让原生 Responses 上游直接处理 Multi-agent `agent_message`；仅允许用于 `responses` Provider。默认关闭时，网关会兼容解包 Codex 自定义 Provider 发出的子代理任务 |
+| `providers[].supportsPromptCacheKey` | - | - | `false` | 是否向 Chat Completions 上游转发 Responses `prompt_cache_key`；仅允许用于 `chat-completions` Provider，并应在确认上游支持后开启 |
 | `providers[].models[].id` | - | - | - | Codex 路由模型 ID，支持 `.`, `_`, `/`, `:`、`+` 和单连字符；不能包含保留分隔符 `--` |
 | `providers[].models[].inputModalities` | - | - | 按 `model-capabilities.json` 推断 | 模型输入能力，可选 `text`、`image`，且必须包含 `text`；显式配置优先于自动识别 |
 | `providers[].models[].reasoning` | - | - | 按已知模型目录推断 | Codex 思考等级及上游参数映射；对象覆盖目录，`null` 显式关闭目录预设，未知模型不自动启用 |

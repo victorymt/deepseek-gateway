@@ -441,6 +441,9 @@ export function responsesRequestToChatCompletions(payload, options = {}) {
   for (const field of PASSTHROUGH_FIELDS) {
     if (payload[field] !== undefined) result[field] = payload[field];
   }
+  if (options.supportsPromptCacheKey && payload.prompt_cache_key !== undefined) {
+    result.prompt_cache_key = payload.prompt_cache_key;
+  }
   const responseFormat = responseFormatFromText(payload.text);
   if (payload.response_format !== undefined) result.response_format = payload.response_format;
   if (responseFormat) result.response_format = responseFormat;
@@ -639,24 +642,37 @@ export function chatCompletionToResponses(payload, context = createToolContext([
 }
 
 function extractError(payload, fallbackStatus = 502) {
-  const error = isObject(payload?.error) ? payload.error : payload;
-  const message = String(
-    error?.message
-    ?? error?.detail
-    ?? payload?.base_resp?.status_msg
-    ?? payload?.message
-    ?? `upstream Chat Completions request failed with HTTP ${fallbackStatus}`,
-  );
+  if (typeof payload === 'string') {
+    return {
+      message: payload || 'Upstream returned an empty error response',
+      type: 'upstream_error',
+      code: null,
+      param: null,
+    };
+  }
+  const value = isObject(payload) ? payload : {};
+  const error = isObject(value.error) ? value.error : value;
+  let message = error.message
+    ?? error.detail
+    ?? error.status_msg
+    ?? error.base_resp?.status_msg
+    ?? value.base_resp?.status_msg;
+  if (message === undefined && Object.keys(error).length) {
+    message = JSON.stringify(error);
+  }
+  if (message === undefined) {
+    message = 'Upstream returned an empty error response';
+  }
   return {
-    message,
+    message: String(message),
     type: String(error?.type ?? error?.error_type ?? 'upstream_error'),
-    code: error?.code ?? payload?.base_resp?.status_code ?? null,
+    code: error?.code ?? error?.base_resp?.status_code ?? value.base_resp?.status_code ?? null,
     param: error?.param ?? null,
   };
 }
 
 export function normalizeChatCompletionsError(payload, statusCode = 502) {
-  return { error: extractError(isObject(payload) ? payload : {}, statusCode) };
+  return { error: extractError(payload, statusCode) };
 }
 
 function sseFrame(type, value, sequenceNumber) {

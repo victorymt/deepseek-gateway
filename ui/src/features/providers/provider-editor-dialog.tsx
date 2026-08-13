@@ -220,6 +220,10 @@ export function ProviderEditorDialog({
                   <FieldContent><FieldTitle>{t.encryptedAgentMessages}</FieldTitle><FieldDescription>{draft.upstreamFormat === "chat-completions" ? t.encryptedAgentMessagesUnavailable : t.encryptedAgentMessagesDescription}</FieldDescription></FieldContent>
                   <Switch aria-label={t.encryptedAgentMessages} checked={draft.supportsEncryptedAgentMessages} disabled={draft.upstreamFormat === "chat-completions"} onCheckedChange={(checked) => setDraft((value) => ({ ...value, supportsEncryptedAgentMessages: checked }))} />
                 </Field>
+                <Field orientation="horizontal" data-disabled={draft.upstreamFormat !== "chat-completions" || undefined}>
+                  <FieldContent><FieldTitle>{t.promptCacheKey}</FieldTitle><FieldDescription>{draft.upstreamFormat === "chat-completions" ? t.promptCacheKeyDescription : t.promptCacheKeyUnavailable}</FieldDescription></FieldContent>
+                  <Switch aria-label={t.promptCacheKey} checked={draft.supportsPromptCacheKey} disabled={draft.upstreamFormat !== "chat-completions"} onCheckedChange={(checked) => setDraft((value) => ({ ...value, supportsPromptCacheKey: checked }))} />
+                </Field>
                 <ProviderBalanceQueryFields copy={t} draft={draft} editingId={editingId} error={balanceTestError} notice={balanceTestNotice} testing={testingBalance} setDraft={setDraft} onTest={onTestBalance} />
               </div>
             </details>

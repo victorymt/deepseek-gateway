@@ -48,6 +48,11 @@ export const providerCopy = {
       "Pass MultiAgentV2 agent_message items to the Responses upstream unchanged.",
     encryptedAgentMessagesUnavailable:
       "Native agent messages require a Responses upstream.",
+    promptCacheKey: "Forward prompt cache key",
+    promptCacheKeyDescription:
+      "Forward Responses prompt_cache_key to this Chat Completions upstream.",
+    promptCacheKeyUnavailable:
+      "Prompt cache keys apply only to Chat Completions upstreams.",
     modelId: "Model ID",
     modelName: "Model name",
     upstreamModel: "Upstream model",
@@ -154,6 +159,11 @@ export const providerCopy = {
       "将 MultiAgentV2 agent_message 项不经兼容转换直接发送给 Responses 上游。",
     encryptedAgentMessagesUnavailable:
       "原生代理消息透传要求上游使用 Responses 协议。",
+    promptCacheKey: "转发 prompt cache key",
+    promptCacheKeyDescription:
+      "将 Responses 的 prompt_cache_key 转发给此 Chat Completions 上游。",
+    promptCacheKeyUnavailable:
+      "prompt cache key 仅适用于 Chat Completions 上游。",
     modelId: "模型 ID",
     modelName: "模型名称",
     upstreamModel: "上游模型",

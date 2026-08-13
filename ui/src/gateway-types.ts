@@ -157,6 +157,7 @@ export type Provider = {
   upstreamFormat: "responses" | "chat-completions"
   apiProfile: "generic" | "deepseek"
   supportsEncryptedAgentMessages: boolean
+  supportsPromptCacheKey: boolean
   enabled: boolean
   models: ProviderModel[]
   keys: MaskedProviderKey[]

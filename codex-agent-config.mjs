@@ -423,6 +423,11 @@ export function restoreCodexAgentSnapshot(options = {}) {
 
 function loadAgentInputs(configPath, operationsPath) {
   const config = normalizeConfig(JSON.parse(fs.readFileSync(configPath, 'utf8')));
+  // Match the gateway runtime's ownership stamp: gateway.mjs attaches the
+  // resolved config path before reconcile, so the CLI must do the same or
+  // manifestOwner() would fall back to the Codex home hash and every sync
+  // would look like a foreign config.
+  config.configPath = path.resolve(configPath);
   let operations = {};
   try {
     operations = JSON.parse(fs.readFileSync(operationsPath, 'utf8'));

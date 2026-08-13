@@ -3,6 +3,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
@@ -38,6 +40,100 @@ function agent(overrides = {}) {
 function hashOf(content) {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
+
+const AGENT_CONFIG_CLI = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'codex-agent-config.mjs',
+);
+
+function cliSyncFixture() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-cli-sync-'));
+  const configPath = path.join(directory, 'keys.json');
+  const codexHome = path.join(directory, 'codex');
+  fs.writeFileSync(configPath, JSON.stringify({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      id: 'alpha',
+      name: 'Alpha',
+      baseUrl: 'https://alpha.example',
+      enabled: true,
+      models: [{ id: 'chat', name: 'Chat', upstreamModel: 'chat' }],
+      keys: [{ name: 'k', key: 'sk-ok', weight: 1 }],
+    }],
+  }));
+  fs.writeFileSync(path.join(directory, 'gateway-operations.json'), JSON.stringify({
+    schemaVersion: 2,
+    subagents: [{
+      id: 'reviewer-id',
+      name: 'reviewer',
+      description: 'Reviews.',
+      providerId: 'alpha',
+      model: 'alpha--chat',
+      developerInstructions: 'Review.',
+      enabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }],
+    logs: [],
+    usage: {},
+    integrations: [],
+    deleted: {},
+  }));
+  fs.mkdirSync(path.join(codexHome, 'agents'), { recursive: true });
+  fs.writeFileSync(path.join(codexHome, 'agents', 'reviewer.toml'), 'name = "reviewer"\n');
+  return { directory, configPath, codexHome };
+}
+
+test('CLI sync accepts a manifest owned by the same config path', () => {
+  const { directory, configPath, codexHome } = cliSyncFixture();
+  const owner = crypto.createHash('sha256').update(configPath).digest('hex').slice(0, 16);
+  fs.writeFileSync(path.join(codexHome, 'gateway-agents.json'), JSON.stringify({
+    schemaVersion: 2,
+    owner,
+    agents: { 'reviewer-id': { name: 'reviewer', hash: hashOf('name = "reviewer"\n'), backupPath: null } },
+  }));
+  try {
+    const result = spawnSync(process.execPath, [
+      AGENT_CONFIG_CLI,
+      '--config', configPath,
+      '--codex-home', codexHome,
+      '--sync',
+    ], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    // The sync rewrote the agent file from the stored definition.
+    assert.match(
+      fs.readFileSync(path.join(codexHome, 'agents', 'reviewer.toml'), 'utf8'),
+      /^name = "reviewer"$/m,
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CLI sync refuses a manifest owned by a different config path', () => {
+  const { directory, configPath, codexHome } = cliSyncFixture();
+  fs.writeFileSync(path.join(codexHome, 'gateway-agents.json'), JSON.stringify({
+    schemaVersion: 2,
+    owner: 'another-config-owner',
+    agents: { 'reviewer-id': { name: 'reviewer', hash: hashOf('name = "reviewer"\n'), backupPath: null } },
+  }));
+  try {
+    const result = spawnSync(process.execPath, [
+      AGENT_CONFIG_CLI,
+      '--config', configPath,
+      '--codex-home', codexHome,
+      '--sync',
+    ], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /owned by another gateway config/);
+    assert.equal(fs.existsSync(path.join(codexHome, 'agents', 'reviewer.toml')), true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('Codex agent TOML uses the native schema and gateway model alias', () => {
   const source = buildCodexAgentToml(config, agent());

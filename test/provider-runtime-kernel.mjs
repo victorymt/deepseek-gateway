@@ -86,6 +86,35 @@ test('KeyPool half-open probes revive invalid keys after the probe interval', ()
   assert.equal(pool.state(key), 'healthy');
 });
 
+test('KeyPool limits half-open probes to one concurrent request', () => {
+  const config = settings();
+  const pool = new KeyPool(config.providers[0].keys, config, 'alpha');
+  pool.keys[1].enabled = false; // single-key pool: every pick would flood
+  const key = pool.keys[0];
+  pool.recordResult(key, { status: 401 });
+  key.invalidatedAt = Date.now() - 61 * 1000;
+  // The first request starts the single allowed probe...
+  assert.equal(pool.pickKey()?.name, 'first');
+  assert.equal(key.invalidProbeInFlight, true);
+  // ...and concurrent requests must not receive the same invalid key.
+  assert.equal(pool.pickKey(), null);
+  assert.equal(pool.pickKey(), null);
+  // A failed probe restarts the window: no immediate re-probe.
+  pool.recordResult(key, { status: 500 });
+  assert.equal(key.invalid, true);
+  assert.equal(key.invalidProbeInFlight, false);
+  assert.ok(key.invalidatedAt > Date.now() - 1000);
+  assert.equal(pool.pickKey(), null);
+  // After a full window, exactly one new probe is allowed.
+  key.invalidatedAt = Date.now() - 61 * 1000;
+  assert.equal(pool.pickKey()?.name, 'first');
+  assert.equal(pool.pickKey(), null);
+  // The successful probe revives the key for normal scheduling.
+  pool.recordResult(key, { status: 200 });
+  assert.equal(key.invalid, false);
+  assert.equal(pool.pickKey()?.name, 'first');
+});
+
 test('KeyPool failure counts decay after the sliding window', () => {
   const config = settings();
   const pool = new KeyPool(config.providers[0].keys, config, 'alpha');

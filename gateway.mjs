@@ -521,7 +521,13 @@ async function testProviderConnection(runtime) {
     || runtime.pool.keys.find(item => item.enabled)
     || runtime.pool.keys[0];
   if (!key) throw Object.assign(new Error('provider has no available key'), { statusCode: 409 });
-  return testKeyConnection(runtime, key);
+  try {
+    return await testKeyConnection(runtime, key);
+  } finally {
+    // pickKey reserves half-open probes; this path never calls recordResult,
+    // so release the reservation explicitly.
+    if (key.invalid && !key.alwaysTry) key.invalidProbeInFlight = false;
+  }
 }
 
 function resolveModelFetchInput(cfg, registry, payload) {

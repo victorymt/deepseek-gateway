@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { normalizeStoredCodexAgent } from '../codex-agent-config.mjs';
+import { withFileLock } from '../file-lock.mjs';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LOG_RETENTION_DAYS = 7;
@@ -42,23 +43,6 @@ function safeRead(file, fallback, { quarantine = true } = {}) {
   }
 }
 
-function acquireLock(file) {
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  while (true) {
-    try {
-      return fs.openSync(file, 'wx', 0o600);
-    } catch (error) {
-      if (error?.code !== 'EEXIST' || Date.now() >= deadline) {
-        throw Object.assign(new Error(`cannot acquire operations storage lock: ${error.message}`), { statusCode: 503 });
-      }
-      try {
-        if (Date.now() - fs.statSync(file).mtimeMs > LOCK_STALE_MS) fs.unlinkSync(file);
-      } catch {}
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_WAIT_MS);
-    }
-  }
-}
-
 // Read the on-disk state for the read-modify-write merge inside writeAtomic.
 // Unlike the startup path (which quarantines with `quarantine: true`), a
 // corrupt file here used to be treated as `{}` and then overwritten, silently
@@ -91,25 +75,26 @@ function safeReadForMerge(file) {
 function writeAtomic(file, buildValue) {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const lock = `${file}.lock`;
-  const lockFd = acquireLock(lock);
   const temp = path.join(dir, `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(5).toString('hex')}.tmp`);
-  let value;
-  try {
-    value = typeof buildValue === 'function'
-      ? buildValue(safeReadForMerge(file))
-      : buildValue;
-    fs.writeFileSync(temp, `${JSON.stringify({ schemaVersion: STORAGE_SCHEMA_VERSION, ...value }, null, 2)}\n`, { mode: 0o600 });
-    fs.chmodSync(temp, 0o600);
-    fs.renameSync(temp, file);
-  } catch (error) {
-    try { fs.unlinkSync(temp); } catch {}
-    throw error;
-  } finally {
-    try { fs.closeSync(lockFd); } catch {}
-    try { fs.unlinkSync(lock); } catch {}
-  }
-  return value;
+  return withFileLock(`${file}.lock`, () => {
+    try {
+      const value = typeof buildValue === 'function'
+        ? buildValue(safeReadForMerge(file))
+        : buildValue;
+      fs.writeFileSync(temp, `${JSON.stringify({ schemaVersion: STORAGE_SCHEMA_VERSION, ...value }, null, 2)}\n`, { mode: 0o600 });
+      fs.chmodSync(temp, 0o600);
+      fs.renameSync(temp, file);
+      return value;
+    } catch (error) {
+      try { fs.unlinkSync(temp); } catch {}
+      throw error;
+    }
+  }, {
+    timeoutMs: LOCK_TIMEOUT_MS,
+    staleMs: LOCK_STALE_MS,
+    waitMs: LOCK_WAIT_MS,
+    label: 'operations storage',
+  });
 }
 
 const USAGE_GROUPS = ['providers', 'models'];

@@ -44,6 +44,7 @@ export class KeyPool {
       failureWindowStart: 0,
       invalid: false,
       invalidatedAt: 0,
+      invalidProbeInFlight: false,
       unhealthy: false,
       throttleUntil: 0,
       lastUsed: 0,
@@ -85,7 +86,9 @@ export class KeyPool {
     const avail = this.keys.filter(k => (
       k.enabled
       && !exclude.includes(k.name)
-      && (k.alwaysTry || !k.invalid || now >= (k.invalidatedAt || 0) + KEY_PROBE_INTERVAL_MS)
+      && (k.alwaysTry
+        || !k.invalid
+        || (now >= (k.invalidatedAt || 0) + KEY_PROBE_INTERVAL_MS && !k.invalidProbeInFlight))
       && now >= k.throttleUntil
       && (k.alwaysTry || k.balance?.isAvailable !== false)
     ));
@@ -106,12 +109,17 @@ export class KeyPool {
       }
     }
     this.cursor = (this.keys.indexOf(best) + 1) % n;
+    // Reserve the half-open probe synchronously so concurrent requests cannot
+    // all pick the same invalid key; the flag is cleared by recordResult on
+    // every completion path.
+    if (best.invalid && !best.alwaysTry) best.invalidProbeInFlight = true;
     return best;
   }
 
   markInvalid(key, reason) {
     key.invalid = true;
     key.invalidatedAt = Date.now();
+    key.invalidProbeInFlight = false;
     key.unhealthy = false;
     key.throttleUntil = 0;
     key.lastError = reason;
@@ -125,6 +133,10 @@ export class KeyPool {
     }
     key.failureCount++;
     key.lastError = reason;
+    key.invalidProbeInFlight = false;
+    // A failed probe restarts the probe window so the key waits a full
+    // interval before being probed again.
+    if (key.invalid && !key.alwaysTry) key.invalidatedAt = now;
     if (key.alwaysTry) {
       key.unhealthy = true;
       if (this.blacklistThreshold > 0 && key.failureCount >= this.blacklistThreshold) {
@@ -145,6 +157,7 @@ export class KeyPool {
       key.errors++;
       this.total.errors++;
       key.lastError = 'client aborted';
+      key.invalidProbeInFlight = false;
       return;
     }
     if (r.networkError) {
@@ -163,6 +176,7 @@ export class KeyPool {
       key.failureCount = 0;
       key.failureWindowStart = 0;
       key.invalidatedAt = 0;
+      key.invalidProbeInFlight = false;
       key.throttleUntil = 0;
       key.lastError = '';
       return;

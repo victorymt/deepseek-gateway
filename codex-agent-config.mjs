@@ -7,10 +7,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { codexModelAlias, normalizeConfig } from './config-core.mjs';
+import { withFileLock } from './file-lock.mjs';
 
 export const CODEX_AGENT_NAME_RE = /^[a-z][a-z0-9_]{0,63}$/;
 export const CODEX_AGENT_MANIFEST = 'gateway-agents.json';
-const MANIFEST_SCHEMA_VERSION = 1;
+const MANIFEST_SCHEMA_VERSION = 2;
 
 function httpError(message, statusCode = 400) {
   return Object.assign(new Error(message), { statusCode });
@@ -35,7 +36,9 @@ function readFile(file) {
 
 function readManifest(file, options = {}) {
   const source = readFile(file);
-  if (source === null) return { schemaVersion: MANIFEST_SCHEMA_VERSION, agents: {} };
+  if (source === null) {
+    return { schemaVersion: MANIFEST_SCHEMA_VERSION, owner: null, agents: {} };
+  }
   let parsed;
   try {
     parsed = JSON.parse(source);
@@ -75,8 +78,20 @@ function readManifest(file, options = {}) {
   }
   return {
     schemaVersion: MANIFEST_SCHEMA_VERSION,
+    owner: typeof parsed.owner === 'string' && parsed.owner ? parsed.owner : null,
     agents,
   };
+}
+
+/**
+ * Identity stamp for the agent manifest. In production the config file path is
+ * used so two gateway configs sharing one Codex home can never silently
+ * delete each other's agents; when no config path exists (unit tests, direct
+ * module use) the Codex home itself is the owner.
+ */
+function manifestOwner(config, codexHome) {
+  const source = config?.configPath ? path.resolve(config.configPath) : codexHome;
+  return crypto.createHash('sha256').update(source).digest('hex').slice(0, 16);
 }
 
 function writeAtomic(file, content, mode = 0o600) {
@@ -275,71 +290,86 @@ export function createCodexAgentProjector(options = {}) {
       names.set(name, id);
     }
 
-    if (!agents.length && readFile(manifestPath) === null) return [];
-    const manifest = readManifest(manifestPath);
-    const activeAgents = agents.filter(agent => agent.enabled && resolveCodexAgentTarget(config, agent));
-    const desiredById = new Map(activeAgents.map(agent => [String(agent.id), agent]));
-    const conflicts = [];
-
-    for (const [id, managed] of Object.entries(manifest.agents)) {
-      const desired = desiredById.get(id);
-      const oldFile = path.join(agentsDirectory, `${managed.name}.toml`);
-      const current = readFile(oldFile);
-      if (current !== null && hashContent(current) !== managed.hash && !force) {
-        conflicts.push(oldFile);
+    return withFileLock(`${manifestPath}.lock`, () => {
+      if (!agents.length && readFile(manifestPath) === null) return [];
+      const manifest = readManifest(manifestPath);
+      const owner = manifestOwner(config, codexHome);
+      if (manifest.owner !== null && manifest.owner !== owner) {
+        throw httpError(
+          `refusing to modify Codex agents under ${codexHome}: the agent manifest ${manifestPath} is owned by another gateway config (owner ${manifest.owner}). Set CODEX_HOME to a dedicated directory for this config, or remove the manifest to take over.`,
+          409,
+        );
       }
-    }
-    for (const agent of activeAgents) {
-      const file = path.join(agentsDirectory, `${agent.name}.toml`);
-      const owner = Object.entries(manifest.agents).find(([, item]) => item.name === agent.name);
-      if (owner && owner[0] !== String(agent.id)) {
-        conflicts.push(`${file} (managed by ${owner[0]})`);
+      if (manifest.owner === null && !agents.length) {
+        throw httpError(
+          `refusing to delete Codex agent file(s) under ${codexHome}: the agent manifest ${manifestPath} has no owner recorded and no agents are configured for this gateway config. Set CODEX_HOME explicitly to confirm ownership, or remove the manifest.`,
+          409,
+        );
       }
-    }
-    if (conflicts.length) {
-      throw httpError(`Codex agent file changed outside the gateway: ${conflicts.join(', ')}`, 409);
-    }
+      const activeAgents = agents.filter(agent => agent.enabled && resolveCodexAgentTarget(config, agent));
+      const desiredById = new Map(activeAgents.map(agent => [String(agent.id), agent]));
+      const conflicts = [];
 
-    const rendered = new Map(activeAgents.map(agent => [
-      String(agent.id),
-      buildCodexAgentToml(config, agent),
-    ]));
-
-    const nextEntries = Object.create(null);
-    for (const agent of activeAgents) {
-      const id = String(agent.id);
-      const previous = manifest.agents[id];
-      const file = path.join(agentsDirectory, `${agent.name}.toml`);
-      const content = rendered.get(id);
-      const current = readFile(file);
-      const fileOwnedByThisAgent = previous?.name === agent.name;
-      let backupPath = fileOwnedByThisAgent ? previous?.backupPath || null : null;
-      if (current !== null && !fileOwnedByThisAgent && !backupPath) {
-        backupPath = backupFile(file, codexHome);
+      for (const [id, managed] of Object.entries(manifest.agents)) {
+        const desired = desiredById.get(id);
+        const oldFile = path.join(agentsDirectory, `${managed.name}.toml`);
+        const current = readFile(oldFile);
+        if (current !== null && hashContent(current) !== managed.hash && !force) {
+          conflicts.push(oldFile);
+        }
       }
-      writeAtomic(file, content);
-      nextEntries[id] = { name: agent.name, hash: hashContent(content), backupPath };
-    }
-
-    for (const [id, managed] of Object.entries(manifest.agents)) {
-      const next = nextEntries[id];
-      if (next?.name === managed.name) continue;
-      const oldFile = path.join(agentsDirectory, `${managed.name}.toml`);
-      const current = readFile(oldFile);
-      if (managed.backupPath && fs.existsSync(managed.backupPath)) {
-        writeAtomic(oldFile, fs.readFileSync(managed.backupPath, 'utf8'));
-      } else if (current !== null && (force || hashContent(current) === managed.hash)) {
-        fs.unlinkSync(oldFile);
+      for (const agent of activeAgents) {
+        const file = path.join(agentsDirectory, `${agent.name}.toml`);
+        const ownerEntry = Object.entries(manifest.agents).find(([, item]) => item.name === agent.name);
+        if (ownerEntry && ownerEntry[0] !== String(agent.id)) {
+          conflicts.push(`${file} (managed by ${ownerEntry[0]})`);
+        }
       }
-    }
+      if (conflicts.length) {
+        throw httpError(`Codex agent file changed outside the gateway: ${conflicts.join(', ')}`, 409);
+      }
 
-    const nextManifest = { schemaVersion: MANIFEST_SCHEMA_VERSION, agents: nextEntries };
-    if (Object.keys(nextEntries).length) {
-      writeAtomic(manifestPath, `${JSON.stringify(nextManifest, null, 2)}\n`);
-    } else if (readFile(manifestPath) !== null) {
-      fs.unlinkSync(manifestPath);
-    }
-    return agents.map(agent => ({ ...agent, projection: inspect(agent, config) }));
+      const rendered = new Map(activeAgents.map(agent => [
+        String(agent.id),
+        buildCodexAgentToml(config, agent),
+      ]));
+
+      const nextEntries = Object.create(null);
+      for (const agent of activeAgents) {
+        const id = String(agent.id);
+        const previous = manifest.agents[id];
+        const file = path.join(agentsDirectory, `${agent.name}.toml`);
+        const content = rendered.get(id);
+        const current = readFile(file);
+        const fileOwnedByThisAgent = previous?.name === agent.name;
+        let backupPath = fileOwnedByThisAgent ? previous?.backupPath || null : null;
+        if (current !== null && !fileOwnedByThisAgent && !backupPath) {
+          backupPath = backupFile(file, codexHome);
+        }
+        writeAtomic(file, content);
+        nextEntries[id] = { name: agent.name, hash: hashContent(content), backupPath };
+      }
+
+      for (const [id, managed] of Object.entries(manifest.agents)) {
+        const next = nextEntries[id];
+        if (next?.name === managed.name) continue;
+        const oldFile = path.join(agentsDirectory, `${managed.name}.toml`);
+        const current = readFile(oldFile);
+        if (managed.backupPath && fs.existsSync(managed.backupPath)) {
+          writeAtomic(oldFile, fs.readFileSync(managed.backupPath, 'utf8'));
+        } else if (current !== null && (force || hashContent(current) === managed.hash)) {
+          fs.unlinkSync(oldFile);
+        }
+      }
+
+      const nextManifest = { schemaVersion: MANIFEST_SCHEMA_VERSION, owner, agents: nextEntries };
+      if (Object.keys(nextEntries).length) {
+        writeAtomic(manifestPath, `${JSON.stringify(nextManifest, null, 2)}\n`);
+      } else if (readFile(manifestPath) !== null) {
+        fs.unlinkSync(manifestPath);
+      }
+      return agents.map(agent => ({ ...agent, projection: inspect(agent, config) }));
+    }, { label: 'Codex agents' });
   }
 
   function managedFiles(agents = []) {

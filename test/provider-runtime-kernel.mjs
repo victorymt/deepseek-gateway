@@ -51,6 +51,64 @@ test('KeyPool selection and failure states retain their behavior', () => {
   assert.equal(pool.pickKey().name, 'second');
 });
 
+test('KeyPool clamps oversized and non-finite Retry-After values', () => {
+  const config = settings();
+  const pool = new KeyPool(config.providers[0].keys, config, 'alpha');
+  const key = pool.keys[0];
+  pool.recordResult(key, { status: 429, retryAfterSec: 999999999 });
+  assert.equal(pool.state(key), 'cooldown');
+  assert.ok(key.throttleUntil <= Date.now() + 3600 * 1000);
+  pool.recordResult(key, { status: 429, retryAfterSec: Number.NaN });
+  assert.equal(pool.state(key), 'cooldown');
+  assert.ok(key.throttleUntil >= Date.now() + config.cooldownMs - 1000);
+  pool.recordResult(key, { status: 429, retryAfterSec: -5 });
+  assert.equal(pool.state(key), 'cooldown');
+  assert.ok(key.throttleUntil >= Date.now() + config.cooldownMs - 1000);
+});
+
+test('KeyPool half-open probes revive invalid keys after the probe interval', () => {
+  const config = settings();
+  const pool = new KeyPool(config.providers[0].keys, config, 'alpha');
+  const key = pool.keys[0];
+  pool.recordResult(key, { status: 401 });
+  assert.equal(key.invalid, true);
+  assert.equal(key.invalidatedAt > 0, true);
+  // Within the probe window the invalid key is not schedulable.
+  assert.equal(pool.pickKey()?.name, 'second');
+  // Once the probe window opens, the key is eligible again.
+  key.invalidatedAt = Date.now() - 61 * 1000;
+  assert.equal(pool.pickKey()?.name, 'first');
+  // A successful probe fully revives the key.
+  pool.recordResult(key, { status: 200 });
+  assert.equal(key.invalid, false);
+  assert.equal(key.failureCount, 0);
+  assert.equal(key.invalidatedAt, 0);
+  assert.equal(pool.state(key), 'healthy');
+});
+
+test('KeyPool failure counts decay after the sliding window', () => {
+  const config = settings();
+  const pool = new KeyPool(config.providers[0].keys, config, 'alpha');
+  const key = pool.keys[0];
+  key.failureWindowStart = Date.now() - 6 * 60 * 1000;
+  key.failureCount = 3;
+  pool.recordFailure(key, 'http 500');
+  assert.equal(key.failureCount, 1);
+});
+
+test('KeyPool excludes keys with an explicitly unavailable balance unless alwaysTry', () => {
+  const config = settings();
+  const pool = new KeyPool(config.providers[0].keys, config, 'alpha');
+  const first = pool.keys[0];
+  const second = pool.keys[1];
+  first.balance = { isAvailable: false, items: [] };
+  assert.equal(pool.pickKey()?.name, 'second');
+  second.balance = { isAvailable: false, items: [] };
+  assert.equal(pool.pickKey(), null);
+  second.alwaysTry = true;
+  assert.equal(pool.pickKey()?.name, 'second');
+});
+
 test('retired runtimes drain retained requests before closing', () => {
   const config = settings();
   const registry = new ProviderRegistry(config, () => {});

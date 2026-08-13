@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,6 +33,10 @@ function agent(overrides = {}) {
     enabled: true,
     ...overrides,
   };
+}
+
+function hashOf(content) {
+  return crypto.createHash('sha256').update(content).digest('hex');
 }
 
 test('Codex agent TOML uses the native schema and gateway model alias', () => {
@@ -241,6 +246,95 @@ test('projector withdraws agents whose provider target is unavailable', () => {
     projector.reconcile(unavailable, [agent()]);
     assert.equal(fs.existsSync(path.join(codexHome, 'agents', 'reviewer.toml')), false);
     assert.equal(projector.inspect(agent(), unavailable).status, 'unavailable');
+  } finally {
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test('reconcile refuses to delete unowned manifest agents when none are configured', () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-agents-guard-'));
+  const projector = createCodexAgentProjector({ codexHome });
+  const file = path.join(codexHome, 'agents', 'reviewer.toml');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, 'name = "reviewer"\n');
+  // A manifest left behind by an older gateway version has no owner.
+  fs.writeFileSync(projector.manifestPath, JSON.stringify({
+    schemaVersion: 1,
+    agents: {
+      'reviewer-id': { name: 'reviewer', hash: hashOf('name = "reviewer"\n'), backupPath: null },
+    },
+  }));
+  try {
+    assert.throws(
+      () => projector.reconcile(config, []),
+      error => error.statusCode === 409 && /refusing to delete/.test(error.message),
+    );
+    assert.equal(fs.existsSync(file), true);
+    assert.equal(fs.existsSync(projector.manifestPath), true);
+  } finally {
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test('reconcile refuses to touch a manifest owned by another gateway config', () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-agents-foreign-'));
+  const projector = createCodexAgentProjector({ codexHome });
+  const file = path.join(codexHome, 'agents', 'reviewer.toml');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, 'name = "reviewer"\n');
+  fs.writeFileSync(projector.manifestPath, JSON.stringify({
+    schemaVersion: 2,
+    owner: 'another-config',
+    agents: {
+      'reviewer-id': { name: 'reviewer', hash: hashOf('name = "reviewer"\n'), backupPath: null },
+    },
+  }));
+  try {
+    assert.throws(
+      () => projector.reconcile(config, [agent()]),
+      error => error.statusCode === 409 && /owned by another gateway config/.test(error.message),
+    );
+    assert.equal(fs.existsSync(file), true);
+  } finally {
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test('reconcile stamps the manifest owner and allows cleanup for the same config', () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-agents-owner-'));
+  const projector = createCodexAgentProjector({ codexHome });
+  const file = path.join(codexHome, 'agents', 'reviewer.toml');
+  try {
+    projector.reconcile(config, [agent()]);
+    const manifest = JSON.parse(fs.readFileSync(projector.manifestPath, 'utf8'));
+    assert.equal(manifest.schemaVersion, 2);
+    assert.equal(typeof manifest.owner, 'string');
+    assert.ok(manifest.owner.length > 0);
+    // The owning config may clean up all agents later (legit UI delete flow).
+    projector.reconcile(config, []);
+    assert.equal(fs.existsSync(file), false);
+    assert.equal(fs.existsSync(projector.manifestPath), false);
+  } finally {
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test('reconcile leaves no lock file behind and steals stale locks', () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-agents-lock-'));
+  const projector = createCodexAgentProjector({ codexHome });
+  const lockPath = `${projector.manifestPath}.lock`;
+  try {
+    projector.reconcile(config, [agent()]);
+    assert.equal(fs.existsSync(lockPath), false);
+    fs.writeFileSync(lockPath, 'stale');
+    const old = new Date(Date.now() - 60 * 1000);
+    fs.utimesSync(lockPath, old, old);
+    projector.reconcile(config, [agent({ description: 'updated scope' })]);
+    assert.equal(fs.existsSync(lockPath), false);
+    assert.match(
+      fs.readFileSync(path.join(codexHome, 'agents', 'reviewer.toml'), 'utf8'),
+      /updated scope/,
+    );
   } finally {
     fs.rmSync(codexHome, { recursive: true, force: true });
   }

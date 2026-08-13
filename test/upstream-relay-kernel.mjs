@@ -60,6 +60,65 @@ test('route resolution maps a public alias to its provider and upstream model', 
   }
 });
 
+test('route resolution passes dotted bare model names through to the default provider', () => {
+  const config = Object.assign(normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    maxRetries: 0,
+    balanceRefreshMs: 0,
+    providers: [{
+      id: 'alpha',
+      name: 'Alpha',
+      baseUrl: 'https://api.example/v1',
+      enabled: true,
+      models: [
+        { id: 'chat', name: 'Chat', upstreamModel: 'upstream-chat' },
+        { id: 'Gpt-4.1', name: 'GPT 4.1', upstreamModel: 'gpt-4.1' },
+      ],
+      keys: [{ name: 'slow', key: 'sk-slow', weight: 1 }],
+    }],
+  }), { mock: true });
+  const providers = new ProviderRegistry(config, () => {});
+  try {
+    const route = relayKernel.resolveRequestRoute(
+      providers,
+      Buffer.from(JSON.stringify({ model: 'Gpt-4.1', input: 'hello' })),
+      '/v1/responses',
+    );
+    assert.equal(route.runtime.provider.id, 'alpha');
+    assert.equal(route.gatewayModel, 'Gpt-4.1');
+    // A non-alias request passes the model through unchanged.
+    assert.equal(route.upstreamModel, undefined);
+  } finally {
+    providers.close();
+  }
+});
+
+test('route resolution still rejects unresolved alias-shaped names', () => {
+  const providers = registry();
+  try {
+    assert.throws(
+      () => relayKernel.resolveRequestRoute(
+        providers,
+        Buffer.from(JSON.stringify({ model: 'alpha--missing', input: 'hello' })),
+        '/v1/responses',
+      ),
+      error => error.statusCode === 400 && /unknown or disabled model alias/.test(error.message),
+    );
+    assert.throws(
+      () => relayKernel.resolveRequestRoute(
+        providers,
+        Buffer.from(JSON.stringify({ model: 'Alpha.unknown', input: 'hello' })),
+        '/v1/responses',
+      ),
+      error => error.statusCode === 400 && /unknown or disabled model alias/.test(error.message),
+    );
+  } finally {
+    providers.close();
+  }
+});
+
 test('relay cancellation releases a retained runtime exactly once', async () => {
   const providers = registry();
   const runtime = providers.get('alpha');

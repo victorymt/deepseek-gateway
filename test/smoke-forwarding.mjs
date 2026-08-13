@@ -503,6 +503,34 @@ test('Codex dotted aliases route Responses requests to the matching provider mod
   }
 });
 
+test('dotted bare model names route to the default provider instead of 400', async () => {
+  const config = multiProviderConfig({
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--gpt-4.1',
+    providers: [{
+      id: 'alpha',
+      name: 'Alpha',
+      baseUrl: 'https://alpha.example',
+      enabled: true,
+      models: [
+        { id: 'shared', name: 'Shared Alpha', upstreamModel: 'same-upstream-model' },
+        { id: 'Gpt-4.1', name: 'GPT 4.1', upstreamModel: 'gpt-4.1' },
+      ],
+      keys: [{ name: 'alpha-key', key: 'sk-alpha-ok', weight: 1 }],
+    }],
+  });
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
+  try {
+    const mixed = await gw.chat({ model: 'Gpt-4.1' });
+    assert.equal(mixed.status, 200, mixed.text);
+    assert.equal(mixed.headers.get('x-gateway-provider'), 'alpha');
+    const lowercase = await gw.chat({ model: 'gpt-4.1' });
+    assert.equal(lowercase.status, 200, lowercase.text);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('model discovery proxies OpenAI-compatible endpoints and normalizes upstream model ids', async () => {
   const upstreamPort = await freePort();
   const requests = [];

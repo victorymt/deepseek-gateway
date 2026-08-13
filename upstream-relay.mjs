@@ -328,22 +328,27 @@ export function resolveRequestRoute(registry, body, requestUrl) {
   }
 
   const aliasRoute = requestedModel ? registry.resolveAlias(requestedModel) : null;
-  if (!aliasRoute && (
-    requestedModel.includes('--')
-    || /^[A-Z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9._\/:+-]*$/.test(requestedModel)
-  )) {
-    throw Object.assign(new Error(`unknown or disabled model alias: ${requestedModel}`), { statusCode: 400 });
-  }
   const runtime = aliasRoute?.runtime || registry.getDefault();
   if (!runtime || !runtime.provider.enabled) {
     throw Object.assign(new Error('default provider is unavailable'), { statusCode: 503 });
   }
+  const requestedKey = requestedModel.toLowerCase();
   const configuredModel = aliasRoute?.model
     || runtime.provider.models.find(model => (
-      model.upstreamModel === requestedModel || model.id === requestedModel
+      String(model.upstreamModel).toLowerCase() === requestedKey
+      || String(model.id).toLowerCase() === requestedKey
     ))
     || registry.resolveAlias(registry.settings.defaultModel)?.model
     || runtime.provider.models[0];
+  const aliasShaped = requestedModel.includes('--')
+    || /^[A-Z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9._\/:+-]*$/.test(requestedModel);
+  const matchesConfiguredModel = runtime.provider.models.some(model => (
+    String(model.upstreamModel).toLowerCase() === requestedKey
+    || String(model.id).toLowerCase() === requestedKey
+  ));
+  if (!aliasRoute && aliasShaped && !matchesConfiguredModel) {
+    throw Object.assign(new Error(`unknown or disabled model alias: ${requestedModel}`), { statusCode: 400 });
+  }
   if (
     parsed
     && runtime.provider.upstreamFormat === 'chat-completions'

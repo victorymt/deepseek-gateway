@@ -11,6 +11,16 @@ import {
   validateProviderConfig,
 } from './config-core.mjs';
 
+// How long an invalid (blacklisted/401/402) key waits before being probed
+// again with one request; a successful probe revives the key.
+const KEY_PROBE_INTERVAL_MS = 60 * 1000;
+// Upper bound for an upstream Retry-After so a hostile or broken header can
+// never take a key out of rotation for longer than an hour.
+const MAX_RETRY_AFTER_MS = 60 * 60 * 1000;
+// Failure counts accumulate inside this sliding window; a longer gap between
+// failures resets the counter so sporadic hiccups cannot blacklist a key.
+const FAILURE_DECAY_MS = 5 * 60 * 1000;
+
 export class KeyPool {
   constructor(keys, cfg, providerId, operations = null) {
     this.keys = keys.map(key => this.createKeyState(key));
@@ -31,7 +41,9 @@ export class KeyPool {
       errors: 0,
       ratelimited: 0,
       failureCount: 0,
+      failureWindowStart: 0,
       invalid: false,
+      invalidatedAt: 0,
       unhealthy: false,
       throttleUntil: 0,
       lastUsed: 0,
@@ -73,8 +85,9 @@ export class KeyPool {
     const avail = this.keys.filter(k => (
       k.enabled
       && !exclude.includes(k.name)
-      && (k.alwaysTry || !k.invalid)
+      && (k.alwaysTry || !k.invalid || now >= (k.invalidatedAt || 0) + KEY_PROBE_INTERVAL_MS)
       && now >= k.throttleUntil
+      && (k.alwaysTry || k.balance?.isAvailable !== false)
     ));
     if (!avail.length) return null;
     let best = null;
@@ -98,12 +111,18 @@ export class KeyPool {
 
   markInvalid(key, reason) {
     key.invalid = true;
+    key.invalidatedAt = Date.now();
     key.unhealthy = false;
     key.throttleUntil = 0;
     key.lastError = reason;
   }
 
   recordFailure(key, reason) {
+    const now = Date.now();
+    if (now - (key.failureWindowStart || 0) > FAILURE_DECAY_MS) {
+      key.failureCount = 0;
+      key.failureWindowStart = now;
+    }
     key.failureCount++;
     key.lastError = reason;
     if (key.alwaysTry) {
@@ -138,14 +157,14 @@ export class KeyPool {
     if (s < 400) {
       key.success++;
       this.total.success++;
-      if (key.alwaysTry) {
-        key.invalid = false;
-        key.unhealthy = false;
-      }
-      if (!key.invalid) {
-        key.throttleUntil = 0;
-        key.lastError = '';
-      }
+      // A successful probe (or any success) fully revives the key.
+      key.invalid = false;
+      key.unhealthy = false;
+      key.failureCount = 0;
+      key.failureWindowStart = 0;
+      key.invalidatedAt = 0;
+      key.throttleUntil = 0;
+      key.lastError = '';
       return;
     }
     key.errors++;
@@ -153,7 +172,11 @@ export class KeyPool {
     if (s === 429) {
       key.ratelimited++;
       this.total.ratelimited++;
-      key.throttleUntil = Date.now() + (r.retryAfterSec ? r.retryAfterSec * 1000 : this.cooldownMs);
+      let retryMs = this.cooldownMs;
+      if (Number.isFinite(r.retryAfterSec) && r.retryAfterSec > 0) {
+        retryMs = Math.min(r.retryAfterSec * 1000, MAX_RETRY_AFTER_MS);
+      }
+      key.throttleUntil = Date.now() + retryMs;
       key.lastError = '429 rate limited';
     } else if (s === 401 || s === 402) {
       key.failureCount++;

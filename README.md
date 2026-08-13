@@ -138,6 +138,8 @@ JSON 可以使用字符串数组，也可以为单个 Key 覆盖名称、权重�
 
 同名但不受网关管理的 agent 文件会在首次接管时备份到 `$CODEX_HOME/backup-gateway/agents/`，停用或删除后恢复。受管理文件被外部修改时，管理 API 返回 `409`，不会静默覆盖。目标 Provider 暂时不可用时 agent TOML 会撤下并显示 `unavailable`，目标恢复后重新投影。
 
+Agent 投影受所有权护栏保护：manifest（`$CODEX_HOME/gateway-agents.json`）会记录归属该配置文件的指纹。启动或保存配置时，如果 manifest 属于其他配置文件（例如两个配置文件共享同一 `~/.codex`），或 manifest 无归属记录且当前配置没有任何子代理，网关会返回 `409` 并拒绝删除任何 agent 文件，而不是静默清掉另一个配置管理的文件。需要切换归属时，显式设置 `CODEX_HOME` 指向专用目录，或删除旧的 manifest 后重新接管；同一配置删除全部子代理后的清理不受影响。投影写入（含 manifest 与 agent 文件）使用跨实例文件锁串行化，多个网关共享同一 Codex home 时不会互相覆盖或互删。
+
 例如创建 `code_reviewer` 后，在 Codex 中输入：`让 code_reviewer 检查当前改动，并在完成后汇总风险。` 真实子会话由 Codex 创建，不是一次特殊模型请求。
 
 ## 交互式配置
@@ -451,14 +453,14 @@ Codex MultiAgentV2 通过自定义 Provider 派发子代理时，会把任务放
 
 | 事件 | 处理 |
 | --- | --- |
-| 正常响应 | 记录成功并清除冷却状态，不清零累计失败数 |
-| `429` | 优先使用 `Retry-After`，否则按 `cooldownMs` 冷却，并切换 Key 重试 |
-| `5xx` / 网络错误 | 增加累计失败数；达到 `blacklistThreshold` 后标记为 `invalid`；`alwaysTry` Key 只记录异常，仍保留在调度池 |
-| `401` / `402` | 立即标记为 `invalid`，永久移出当前进程的调度池；`alwaysTry` Key 只记录异常，后续请求仍会尝试 |
+| 正常响应 | 记录成功，清除冷却、失效与失败计数，Key 完全恢复健康 |
+| `429` | 优先使用 `Retry-After`（上限 1 小时，非法值回退 `cooldownMs`），否则按 `cooldownMs` 冷却，并切换 Key 重试 |
+| `5xx` / 网络错误 | 增加累计失败数（5 分钟内滑动累积，间隔超过 5 分钟自动清零）；达到 `blacklistThreshold` 后标记为 `invalid`；`alwaysTry` Key 只记录异常，仍保留在调度池 |
+| `401` / `402` | 立即标记为 `invalid` 并移出调度池，60 秒后允许单次探测请求重新尝试，成功即复活；`alwaysTry` Key 只记录异常，后续请求仍会尝试 |
 | `403` | 作为当前请求的权限错误直接返回；不切换 Key，也不污染 Key 健康状态 |
-| 全部 Key 冷却或失效 | 返回 `502 no keys available`，不再强行调度不可用 Key |
+| 全部 Key 冷却、失效或余额不可用 | 返回 `502 no keys available`，不再强行调度不可用 Key |
 
-正常情况下，调度器先排除停用、冷却和失效 Key，再选择 `inFlight / weight` 最小的 Key，平分时使用轮询游标。`inFlight` 会保持到响应体完整结束，因此长时间 SSE 请求也参与并发均衡。每个 Provider 至少需要保留一个 `enabled: true` 的 Key。
+正常情况下，调度器先排除停用、冷却、失效以及余额明确不可用（`isAvailable: false`）的 Key，再选择 `inFlight / weight` 最小的 Key，平分时使用轮询游标；`alwaysTry` Key 不受失效和余额排除影响。`inFlight` 会保持到响应体完整结束，因此长时间 SSE 请求也参与并发均衡。每个 Provider 至少需要保留一个 `enabled: true` 的 Key。
 
 Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会将它自动移出调度池。失败 Key 仍会从当前请求的后续重试中排除，避免同一请求重复调用；新的请求可以再次选择它。`429` 是例外：无论是否启用 `alwaysTry`，网关都会尊重 `Retry-After` 或 `cooldownMs`。因此只有一个 `alwaysTry` Key 时，普通失败后的每个新请求仍会调用该 Key，限流冷却期间则返回 `502 no keys available`。Web UI 会将这种状态显示为“异常但继续尝试”。
 

@@ -36,6 +36,7 @@ import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import type { GatewaySettingField, GatewaySettings } from "@/gateway-types"
 import { apiRequest } from "@/lib/api-request"
+import { notifyConfigChanged } from "@/lib/setup-actions"
 
 type Draft = Record<GatewaySettingField, string> & {
   token: string
@@ -247,6 +248,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
       setDraft(draftFromSettings(next))
       setDirty(false)
       setNotice(true)
+      notifyConfigChanged()
     } catch (cause) {
       if (!controller.signal.aborted && sequence === requestSequence.current) {
         setError(cause instanceof Error ? cause.message : t.failed)
@@ -277,6 +279,7 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
       setDirty(false)
       setNotice(true)
       setClearDialogOpen(false)
+      notifyConfigChanged()
     } catch (cause) {
       if (!controller.signal.aborted && sequence === requestSequence.current) {
         setError(cause instanceof Error ? cause.message : t.failed)

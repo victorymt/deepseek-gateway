@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import {
+  CheckCircle2Icon,
   CheckIcon,
   CopyIcon,
   DownloadIcon,
@@ -7,6 +8,7 @@ import {
   RefreshCwIcon,
   ShieldCheckIcon,
   ShieldOffIcon,
+  TerminalIcon,
 } from "lucide-react"
 
 import type { Locale } from "@/components/language-provider"
@@ -26,11 +28,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import type { CodexArtifacts } from "@/gateway-types"
 import { apiRequest } from "@/lib/api-request"
+import {
+  appliedCodexRevision,
+  markCodexRevisionApplied,
+} from "@/lib/setup-actions"
 
 const copy = {
   en: {
-    title: "Codex setup",
-    description: "multi-provider-gateway / responses",
+    title: "Codex configuration",
+    description: "Apply the current gateway models to Codex.",
     refresh: "Refresh artifacts",
     failed: "Generation failed",
     copied: "Copied",
@@ -48,10 +54,17 @@ const copy = {
     provider: "Provider",
     defaultModel: "Default model",
     catalogPath: "Catalog path",
+    applyTitle: "Apply in your terminal",
+    applyDescription:
+      "Run this command from the gateway directory, then restart Codex.",
+    applied: "Marked as applied",
+    markApplied: "Mark current version as applied",
+    current: "Current configuration is marked as applied",
+    manual: "Manual configuration",
   },
   "zh-CN": {
     title: "Codex 配置",
-    description: "multi-provider-gateway / responses",
+    description: "将当前 Gateway 模型配置应用到 Codex。",
     refresh: "刷新配置",
     failed: "生成失败",
     copied: "已复制",
@@ -67,6 +80,12 @@ const copy = {
     provider: "Provider",
     defaultModel: "默认模型",
     catalogPath: "模型目录路径",
+    applyTitle: "在终端中应用",
+    applyDescription: "在 Gateway 目录执行以下命令，然后重启 Codex。",
+    applied: "已标记为应用",
+    markApplied: "标记当前版本为已应用",
+    current: "当前配置已标记为应用",
+    manual: "手动配置",
   },
 } as const
 
@@ -89,6 +108,7 @@ export function CodexSetup({ locale }: { locale: Locale }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
+  const [appliedRevision, setAppliedRevision] = useState(appliedCodexRevision)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -117,6 +137,14 @@ export function CodexSetup({ locale }: { locale: Locale }) {
       setNotice("")
       setError(t.copyFailed)
     }
+  }
+
+  function markApplied() {
+    if (!artifacts) return
+    markCodexRevisionApplied(artifacts.revision)
+    setAppliedRevision(artifacts.revision)
+    setNotice(t.applied)
+    window.setTimeout(() => setNotice(""), 1600)
   }
 
   const environmentLine =
@@ -158,6 +186,43 @@ export function CodexSetup({ locale }: { locale: Locale }) {
         <Skeleton className="h-[34rem] w-full" />
       ) : artifacts ? (
         <>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <TerminalIcon />
+                {t.applyTitle}
+              </CardTitle>
+              <CardDescription>{t.applyDescription}</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4 border-t pt-4">
+              <div className="flex min-w-0 items-center gap-3 rounded-md bg-muted px-4 py-3">
+                <code className="min-w-0 flex-1 break-all text-sm">
+                  ./gatewayctl codex
+                </code>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={t.copy}
+                  title={t.copy}
+                  onClick={() => void copyText("./gatewayctl codex")}
+                >
+                  <CopyIcon />
+                </Button>
+              </div>
+              {appliedRevision === artifacts.revision ? (
+                <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <CheckCircle2Icon className="size-4 text-primary" />
+                  {t.current}
+                </p>
+              ) : (
+                <Button className="self-start" onClick={markApplied}>
+                  <CheckIcon data-icon="inline-start" />
+                  {t.markApplied}
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="flex flex-col gap-1 border-l-2 border-primary pl-3">
               <span className="text-xs text-muted-foreground">
@@ -215,7 +280,9 @@ export function CodexSetup({ locale }: { locale: Locale }) {
             </Alert>
           )}
 
-          <Tabs defaultValue="config" className="min-w-0">
+          <details className="codex-manual-config">
+            <summary>{t.manual}</summary>
+          <Tabs defaultValue="config" className="min-w-0 pt-4">
             <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
               <div className="max-w-full overflow-x-auto">
                 <TabsList className="codex-artifact-tabs">
@@ -311,6 +378,7 @@ export function CodexSetup({ locale }: { locale: Locale }) {
               </Card>
             </TabsContent>
           </Tabs>
+          </details>
         </>
       ) : null}
     </section>

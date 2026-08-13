@@ -225,7 +225,7 @@ export function ProviderModelFields({
       {draft.models.map((model, index) => (
         <div
           key={`model-${index}`}
-          className="grid items-end gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(160px,280px)_auto]"
+          className="grid items-end gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto]"
         >
           <Field className="min-w-0">
             <FieldLabel htmlFor={`model-id-${index}`}>{t.modelId}</FieldLabel>
@@ -290,7 +290,29 @@ export function ProviderModelFields({
               }
             />
           </Field>
-          <div className="flex min-w-0 flex-col gap-3">
+          {draft.models.length > 1 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="justify-self-end sm:col-start-4 sm:row-start-1"
+              aria-label={t.remove}
+              title={t.remove}
+              onClick={() =>
+                setDraft((value) => ({
+                  ...value,
+                  models: value.models.filter(
+                    (_, itemIndex) => itemIndex !== index
+                  ),
+                }))
+              }
+            >
+              <XIcon />
+            </Button>
+          )}
+          <details className="model-advanced sm:col-span-4">
+            <summary>{t.advancedSettings}</summary>
+          <div className="flex min-w-0 flex-col gap-3 pt-4">
             <Field orientation="horizontal">
               <FieldContent className="min-w-0">
                 <FieldTitle>{t.imageInput}</FieldTitle>
@@ -411,7 +433,7 @@ export function ProviderModelFields({
             </Field>
           </div>
           {model.reasoning && (
-            <div className="grid min-w-0 gap-3 rounded-md border p-3 sm:col-span-4 sm:grid-cols-4">
+            <div className="mt-4 grid min-w-0 gap-3 rounded-md border p-3 sm:grid-cols-4">
               <Field>
                 <FieldLabel htmlFor={`reasoning-levels-${index}`}>
                   {t.reasoningLevels}
@@ -564,24 +586,7 @@ export function ProviderModelFields({
               </Field>
             </div>
           )}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label={t.remove}
-            title={t.remove}
-            disabled={draft.models.length === 1}
-            onClick={() =>
-              setDraft((value) => ({
-                ...value,
-                models: value.models.filter(
-                  (_, itemIndex) => itemIndex !== index
-                ),
-              }))
-            }
-          >
-            <XIcon />
-          </Button>
+          </details>
         </div>
       ))}
     </FieldSet>

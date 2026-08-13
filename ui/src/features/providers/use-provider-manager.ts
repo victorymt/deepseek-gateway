@@ -35,6 +35,50 @@ type UseProviderManagerOptions = {
   messages: ProviderManagerMessages
   setupMode: boolean
   onConfigured?: () => Promise<void>
+  onChanged?: () => Promise<void> | void
+}
+
+export type ProviderConnectionResult = {
+  state: "available" | "failed"
+  testedAt: number
+  status?: number
+  latencyMs?: number
+  message?: string
+}
+
+const CONNECTION_RESULTS_KEY = "deepseek-gateway.provider-connection-results"
+
+function storedConnectionResults(): Record<string, ProviderConnectionResult> {
+  try {
+    return JSON.parse(
+      window.sessionStorage.getItem(CONNECTION_RESULTS_KEY) || "{}"
+    )
+  } catch {
+    return {}
+  }
+}
+
+function storeConnectionResults(
+  results: Record<string, ProviderConnectionResult>
+) {
+  try {
+    window.sessionStorage.setItem(
+      CONNECTION_RESULTS_KEY,
+      JSON.stringify(results)
+    )
+  } catch {
+    // Connection tests still remain visible until this page is reloaded.
+  }
+  return results
+}
+
+function withoutConnectionResult(
+  results: Record<string, ProviderConnectionResult>,
+  providerId: string
+) {
+  const nextResults = { ...results }
+  delete nextResults[providerId]
+  return storeConnectionResults(nextResults)
 }
 
 export function useProviderManager({
@@ -42,6 +86,7 @@ export function useProviderManager({
   messages,
   setupMode,
   onConfigured,
+  onChanged,
 }: UseProviderManagerOptions) {
   const [config, setConfig] = useState<ProviderConfig | null>(null)
   const [loading, setLoading] = useState(true)
@@ -52,6 +97,9 @@ export function useProviderManager({
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const [testingId, setTestingId] = useState("")
+  const [connectionResults, setConnectionResults] = useState<
+    Record<string, ProviderConnectionResult>
+  >(storedConnectionResults)
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([])
   const [fetchingModels, setFetchingModels] = useState(false)
   const [modelFetchError, setModelFetchError] = useState("")
@@ -180,6 +228,11 @@ export function useProviderManager({
       )
       if (!requestIsCurrent(session, controller)) return
       setConfig(next)
+      if (editingId) {
+        setConnectionResults((current) =>
+          withoutConnectionResult(current, editingId)
+        )
+      }
       baselineDraft.current = draft
       baselineRevision.current = next.revision
       initialDraft.current = JSON.stringify(draft)
@@ -187,6 +240,7 @@ export function useProviderManager({
       setSaving(false)
       dialogSession.current += 1
       setDialogOpen(false)
+      await onChanged?.()
       if (setupMode && !next.setupPending) await onConfigured?.()
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : messages.failed
@@ -223,6 +277,7 @@ export function useProviderManager({
         }
       )
       setConfig(next)
+      await onChanged?.()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : messages.failed)
     }
@@ -236,6 +291,10 @@ export function useProviderManager({
         { method: "DELETE" }
       )
       setConfig(next)
+      setConnectionResults((current) => {
+        return withoutConnectionResult(current, id)
+      })
+      await onChanged?.()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : messages.failed)
     }
@@ -246,13 +305,34 @@ export function useProviderManager({
     setNotice("")
     setError("")
     try {
-      await apiRequest(`/api/providers/${encodeURIComponent(id)}/test`, {
-        method: "POST",
-        body: "{}",
-      })
+      const result = await apiRequest<{ status: number; latencyMs: number }>(
+        `/api/providers/${encodeURIComponent(id)}/test`,
+        {
+          method: "POST",
+          body: "{}",
+        }
+      )
+      setConnectionResults((current) =>
+        storeConnectionResults({
+          ...current,
+          [id]: {
+            state: "available",
+            testedAt: Date.now(),
+            status: result.status,
+            latencyMs: result.latencyMs,
+          },
+        })
+      )
       setNotice(`${messages.connected}: ${id}`)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : messages.failed)
+      const message = cause instanceof Error ? cause.message : messages.failed
+      setConnectionResults((current) =>
+        storeConnectionResults({
+          ...current,
+          [id]: { state: "failed", testedAt: Date.now(), message },
+        })
+      )
+      setError(message)
     } finally {
       setTestingId("")
     }
@@ -330,6 +410,10 @@ export function useProviderManager({
     setDraft((value) => addFetchedModelToDraft(value, model, modelCapabilities))
   }
 
+  function clearConnectionResult(id: string) {
+    setConnectionResults((current) => withoutConnectionResult(current, id))
+  }
+
   function changeDialogOpen(open: boolean) {
     if (open) {
       setDialogOpen(true)
@@ -350,7 +434,9 @@ export function useProviderManager({
     addFetchedModel,
     balanceTestError,
     balanceTestNotice,
+    clearConnectionResult,
     config,
+    connectionResults,
     deleteProvider,
     dialogError,
     dialogOpen,
@@ -368,6 +454,7 @@ export function useProviderManager({
     openCreate,
     openEdit,
     patchProvider,
+    refresh,
     saveProvider,
     saving,
     setDialogOpen: changeDialogOpen,

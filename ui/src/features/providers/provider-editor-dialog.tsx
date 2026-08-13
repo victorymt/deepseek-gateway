@@ -35,6 +35,7 @@ import { ProviderBalanceQueryFields } from "./provider-balance-query-fields"
 import type { ProviderCopy } from "./provider-copy"
 import {
   providerOriginsDiffer,
+  providerIdFromName,
   setProviderApiProfile,
   setProviderUpstreamFormat,
   type FetchedModel,
@@ -105,153 +106,61 @@ export function ProviderEditorDialog({
           <FieldGroup>
             <div className="grid gap-4 sm:grid-cols-2">
               <Field>
-                <FieldLabel htmlFor="provider-id">{t.providerId}</FieldLabel>
-                <Input
-                  id="provider-id"
-                  value={draft.id}
-                  disabled={Boolean(editingId)}
-                  required
-                  pattern="[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
-                  onChange={(event) =>
-                    setDraft((value) => ({
-                      ...value,
-                      id: event.target.value,
-                    }))
-                  }
-                />
-                <FieldDescription>{t.providerIdHint}</FieldDescription>
-              </Field>
-              <Field>
                 <FieldLabel htmlFor="provider-name">{t.name}</FieldLabel>
                 <Input
                   id="provider-name"
                   value={draft.name}
                   required
                   onChange={(event) =>
-                    setDraft((value) => ({
-                      ...value,
-                      name: event.target.value,
-                    }))
+                    setDraft((value) => {
+                      const name = event.target.value
+                      const generatedId = providerIdFromName(value.name)
+                      return {
+                        ...value,
+                        name,
+                        id:
+                          !editingId && (!value.id || value.id === generatedId)
+                            ? providerIdFromName(name)
+                            : value.id,
+                      }
+                    })
                   }
                 />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="provider-api-profile">{t.apiProfile}</FieldLabel>
+                <Select
+                  items={[
+                    { value: "generic", label: t.genericApiProfile },
+                    { value: "deepseek", label: t.deepSeekApiProfile },
+                  ]}
+                  value={draft.apiProfile}
+                  onValueChange={(value) =>
+                    setDraft((current) =>
+                      setProviderApiProfile(
+                        current,
+                        value === "deepseek" ? "deepseek" : "generic",
+                        modelCapabilities
+                      )
+                    )
+                  }
+                >
+                  <SelectTrigger id="provider-api-profile" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="generic">{t.genericApiProfile}</SelectItem>
+                      <SelectItem value="deepseek">{t.deepSeekApiProfile}</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <FieldDescription>{t.apiProfileDescription}</FieldDescription>
               </Field>
             </div>
             <Field>
               <FieldLabel htmlFor="provider-url">{t.baseUrl}</FieldLabel>
-              <Input
-                id="provider-url"
-                type="url"
-                value={draft.baseUrl}
-                required
-                onChange={(event) =>
-                  setDraft((value) => ({
-                    ...value,
-                    baseUrl: event.target.value,
-                  }))
-                }
-              />
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="provider-api-profile">
-                {t.apiProfile}
-              </FieldLabel>
-              <Select
-                items={[
-                  { value: "generic", label: t.genericApiProfile },
-                  { value: "deepseek", label: t.deepSeekApiProfile },
-                ]}
-                value={draft.apiProfile}
-                onValueChange={(value) =>
-                  setDraft((current) =>
-                    setProviderApiProfile(
-                      current,
-                      value === "deepseek" ? "deepseek" : "generic",
-                      modelCapabilities
-                    )
-                  )
-                }
-              >
-                <SelectTrigger id="provider-api-profile" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    <SelectItem value="generic">
-                      {t.genericApiProfile}
-                    </SelectItem>
-                    <SelectItem value="deepseek">
-                      {t.deepSeekApiProfile}
-                    </SelectItem>
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <FieldDescription>{t.apiProfileDescription}</FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="provider-upstream-format">
-                {t.upstreamFormat}
-              </FieldLabel>
-              <Select
-                items={[
-                  { value: "responses", label: t.responsesFormat },
-                  {
-                    value: "chat-completions",
-                    label: t.chatCompletionsFormat,
-                  },
-                ]}
-                value={draft.upstreamFormat}
-                onValueChange={(value) =>
-                  setDraft((current) =>
-                    setProviderUpstreamFormat(
-                      current,
-                      value === "chat-completions"
-                        ? "chat-completions"
-                        : "responses",
-                      modelCapabilities
-                    )
-                  )
-                }
-              >
-                <SelectTrigger id="provider-upstream-format" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    <SelectItem value="responses">
-                      {t.responsesFormat}
-                    </SelectItem>
-                    <SelectItem value="chat-completions">
-                      {t.chatCompletionsFormat}
-                    </SelectItem>
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-            </Field>
-            <Field
-              orientation="horizontal"
-              data-disabled={
-                draft.upstreamFormat === "chat-completions" || undefined
-              }
-            >
-              <FieldContent>
-                <FieldTitle>{t.encryptedAgentMessages}</FieldTitle>
-                <FieldDescription>
-                  {draft.upstreamFormat === "chat-completions"
-                    ? t.encryptedAgentMessagesUnavailable
-                    : t.encryptedAgentMessagesDescription}
-                </FieldDescription>
-              </FieldContent>
-              <Switch
-                aria-label={t.encryptedAgentMessages}
-                checked={draft.supportsEncryptedAgentMessages}
-                disabled={draft.upstreamFormat === "chat-completions"}
-                onCheckedChange={(checked) =>
-                  setDraft((value) => ({
-                    ...value,
-                    supportsEncryptedAgentMessages: checked,
-                  }))
-                }
-              />
+              <Input id="provider-url" type="url" value={draft.baseUrl} required onChange={(event) => setDraft((value) => ({ ...value, baseUrl: event.target.value }))} />
             </Field>
             <Field orientation="horizontal">
               <FieldContent>
@@ -268,17 +177,6 @@ export function ProviderEditorDialog({
                 }
               />
             </Field>
-
-            <ProviderBalanceQueryFields
-              copy={t}
-              draft={draft}
-              editingId={editingId}
-              error={balanceTestError}
-              notice={balanceTestNotice}
-              testing={testingBalance}
-              setDraft={setDraft}
-              onTest={onTestBalance}
-            />
 
             <ProviderModelFields
               copy={t}
@@ -302,6 +200,29 @@ export function ProviderEditorDialog({
               )}
               setDraft={setDraft}
             />
+
+            <details className="advanced-settings">
+              <summary>{t.advancedSettings}</summary>
+              <div className="flex flex-col gap-5 pt-5">
+                <Field>
+                  <FieldLabel htmlFor="provider-id">{t.providerId}</FieldLabel>
+                  <Input id="provider-id" value={draft.id} disabled={Boolean(editingId)} required pattern="[a-z0-9](?:[a-z0-9-]*[a-z0-9])?" onChange={(event) => setDraft((value) => ({ ...value, id: event.target.value }))} />
+                  <FieldDescription>{t.providerIdHint}</FieldDescription>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="provider-upstream-format">{t.upstreamFormat}</FieldLabel>
+                  <Select items={[{ value: "responses", label: t.responsesFormat }, { value: "chat-completions", label: t.chatCompletionsFormat }]} value={draft.upstreamFormat} onValueChange={(value) => setDraft((current) => setProviderUpstreamFormat(current, value === "chat-completions" ? "chat-completions" : "responses", modelCapabilities))}>
+                    <SelectTrigger id="provider-upstream-format" className="w-full"><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectGroup><SelectItem value="responses">{t.responsesFormat}</SelectItem><SelectItem value="chat-completions">{t.chatCompletionsFormat}</SelectItem></SelectGroup></SelectContent>
+                  </Select>
+                </Field>
+                <Field orientation="horizontal" data-disabled={draft.upstreamFormat === "chat-completions" || undefined}>
+                  <FieldContent><FieldTitle>{t.encryptedAgentMessages}</FieldTitle><FieldDescription>{draft.upstreamFormat === "chat-completions" ? t.encryptedAgentMessagesUnavailable : t.encryptedAgentMessagesDescription}</FieldDescription></FieldContent>
+                  <Switch aria-label={t.encryptedAgentMessages} checked={draft.supportsEncryptedAgentMessages} disabled={draft.upstreamFormat === "chat-completions"} onCheckedChange={(checked) => setDraft((value) => ({ ...value, supportsEncryptedAgentMessages: checked }))} />
+                </Field>
+                <ProviderBalanceQueryFields copy={t} draft={draft} editingId={editingId} error={balanceTestError} notice={balanceTestNotice} testing={testingBalance} setDraft={setDraft} onTest={onTestBalance} />
+              </div>
+            </details>
           </FieldGroup>
           <DialogFooter>
             <Button

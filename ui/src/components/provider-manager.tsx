@@ -20,10 +20,12 @@ export function ProviderManager({
   locale,
   setupMode = false,
   onConfigured,
+  onChanged,
 }: {
   locale: Locale
   setupMode?: boolean
   onConfigured?: () => Promise<void>
+  onChanged?: () => Promise<void> | void
 }) {
   const t = providerCopy[locale]
   const {
@@ -61,6 +63,7 @@ export function ProviderManager({
     messages: t,
     setupMode,
     onConfigured,
+    onChanged,
   })
 
   return (

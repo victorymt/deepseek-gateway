@@ -11,6 +11,7 @@ import {
   modelDraftForUpstreamModel,
   modelDraftWithReasoningEnabled,
   providerDraftPayload,
+  providerIdFromName,
   providerOriginsDiffer,
   providerToDraft,
   providerUpdatePayload,
@@ -90,6 +91,14 @@ const modelCapabilities: ModelCapabilityCatalog = {
 }
 
 describe("provider editor state", () => {
+  test("generates stable provider ids from display names", () => {
+    expect(providerIdFromName(" DeepSeek API ")).toBe("deepseek-api")
+    expect(providerIdFromName("OpenRouter / Team 2")).toBe(
+      "openrouter-team-2"
+    )
+    expect(providerIdFromName("中文 Provider")).toBe("provider")
+  })
+
   test("creates independent empty drafts", () => {
     const first = createEmptyProviderDraft()
     const second = createEmptyProviderDraft()

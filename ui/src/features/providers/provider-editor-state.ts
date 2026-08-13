@@ -64,6 +64,15 @@ export type ProviderDraft = {
   balanceQuery: BalanceQuery
 }
 
+export function providerIdFromName(name: string) {
+  const identifier = name
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+  return identifier || "provider"
+}
+
 type ProviderDraftPayloadOptions = {
   baseline?: ProviderDraft | null
   originalBaseUrl?: string

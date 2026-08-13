@@ -2,6 +2,7 @@
 'use strict';
 
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -271,16 +272,29 @@ export function buildCodexArtifacts(config, options = {}) {
   if (!catalog.models.some(model => model.slug === defaultModel)) {
     throw new Error(`defaultModel is not present in the generated catalog: ${config.defaultModel}`);
   }
+  const configToml = buildCodexToml({
+    config,
+    gatewayUrl,
+    modelsPath,
+    authRequired: requireAuth,
+  });
+  const catalogJson = `${JSON.stringify(catalog, null, 2)}\n`;
+  const revision = createHash('sha256')
+    .update(configToml)
+    .update('\0')
+    .update(catalogJson)
+    .digest('hex');
   return {
     providerId: CODEX_PROVIDER_ID,
+    revision,
     authRequired: requireAuth,
     envKey: requireAuth ? CODEX_ENV_KEY : null,
     defaultModel,
     gatewayUrl: gatewayApiUrl(gatewayUrl),
     modelsPath,
-    configToml: buildCodexToml({ config, gatewayUrl, modelsPath, authRequired: requireAuth }),
+    configToml,
     catalog,
-    catalogJson: `${JSON.stringify(catalog, null, 2)}\n`,
+    catalogJson,
   };
 }
 

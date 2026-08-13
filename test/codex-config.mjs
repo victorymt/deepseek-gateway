@@ -160,6 +160,28 @@ test('both upstream formats keep Codex on the local Responses route', () => {
   assert.equal(nativeResponses.catalog.models[0].apply_patch_tool_type, undefined);
 });
 
+test('Codex artifact revision is stable and changes with generated content', () => {
+  const base = config('responses');
+  const first = buildCodexArtifacts(base, {
+    gatewayUrl: 'http://127.0.0.1:8787',
+    modelsPath: '/tmp/gateway-models.json',
+  });
+  const repeated = buildCodexArtifacts(structuredClone(base), {
+    gatewayUrl: 'http://127.0.0.1:8787',
+    modelsPath: '/tmp/gateway-models.json',
+  });
+  const changed = buildCodexArtifacts(base, {
+    gatewayUrl: 'http://127.0.0.1:9999',
+    modelsPath: '/tmp/gateway-models.json',
+  });
+
+  assert.match(first.revision, /^[a-f0-9]{64}$/);
+  assert.equal(first.revision, repeated.revision);
+  assert.notEqual(first.revision, changed.revision);
+  assert.equal(first.configToml, repeated.configToml);
+  assert.equal(first.catalogJson, repeated.catalogJson);
+});
+
 test('native subagents are not exposed as model catalog aliases', () => {
   const base = config('chat-completions');
   const artifacts = buildCodexArtifacts(base, {

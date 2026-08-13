@@ -1891,6 +1891,7 @@ test('generated Codex artifacts omit env auth when the gateway has no token', as
     assert.ok(!text.includes('sk-beta-ok'));
     const artifacts = JSON.parse(text);
     assert.equal(artifacts.providerId, 'multi-provider-gateway');
+    assert.match(artifacts.revision, /^[a-f0-9]{64}$/);
     assert.equal(artifacts.authRequired, false);
     assert.equal(artifacts.envKey, null);
     assert.equal(artifacts.defaultModel, 'Alpha.shared');

@@ -14,6 +14,7 @@ import {
   providerOriginsDiffer,
   providerToDraft,
   providerUpdatePayload,
+  setProviderApiProfile,
   setProviderUpstreamFormat,
   type FetchedModel,
 } from "./provider-editor-state"
@@ -23,6 +24,7 @@ const provider: Provider = {
   name: "DeepSeek",
   baseUrl: "https://api.deepseek.com",
   upstreamFormat: "responses",
+  apiProfile: "deepseek",
   supportsEncryptedAgentMessages: true,
   enabled: true,
   models: [
@@ -32,6 +34,7 @@ const provider: Provider = {
       upstreamModel: "deepseek-chat",
       inputModalities: ["text"],
       supportsHostedWebSearch: true,
+      supportsCustomApplyPatch: true,
       reasoning: {
         parameter: "reasoning_effort",
         default: "high",
@@ -63,6 +66,8 @@ const modelCapabilities: ModelCapabilityCatalog = {
     {
       id: "deepseek-v4-flash",
       inputModalities: ["text"],
+      supportsHostedWebSearch: true,
+      supportsCustomApplyPatch: true,
       reasoning: {
         parameter: "reasoning_effort",
         default: "high",
@@ -72,6 +77,8 @@ const modelCapabilities: ModelCapabilityCatalog = {
     {
       id: "deepseek-v4-pro",
       inputModalities: ["text"],
+      supportsHostedWebSearch: true,
+      supportsCustomApplyPatch: true,
       reasoning: {
         parameter: "reasoning_effort",
         default: "high",
@@ -119,12 +126,16 @@ describe("provider editor state", () => {
 
     expect(first).toEqual({
       inputModalities: ["text"],
+      supportsHostedWebSearch: true,
+      supportsCustomApplyPatch: true,
       reasoning: modelCapabilities.models[1].reasoning,
     })
     first.inputModalities.push("image")
     first.reasoning!.levels[0].effort = "changed"
     expect(second).toEqual({
       inputModalities: ["text"],
+      supportsHostedWebSearch: true,
+      supportsCustomApplyPatch: true,
       reasoning: modelCapabilities.models[1].reasoning,
     })
   })
@@ -208,6 +219,7 @@ describe("provider editor state", () => {
       timeoutMs: 10000,
     })
     expect(draft.models[0].supportsHostedWebSearch).toBe(true)
+    expect(draft.models[0].supportsCustomApplyPatch).toBe(true)
     expect(draft.models[0].reasoning).toEqual(provider.models[0].reasoning)
     expect(draft.supportsEncryptedAgentMessages).toBe(true)
 
@@ -235,6 +247,8 @@ describe("provider editor state", () => {
     expect(keys[0]).not.toHaveProperty("maskedKey")
     expect(keys[0]).not.toHaveProperty("fingerprint")
     expect(payload.supportsEncryptedAgentMessages).toBe(true)
+    expect(payload.apiProfile).toBe("deepseek")
+    expect(payload.models![0].supportsCustomApplyPatch).toBe(true)
     expect(payload.models![0].reasoning).toEqual(provider.models[0].reasoning)
   })
 
@@ -335,6 +349,7 @@ describe("provider editor state", () => {
         upstreamModel: "deepseek-chat",
         inputModalities: ["text"],
         supportsHostedWebSearch: false,
+        supportsCustomApplyPatch: false,
         reasoning: fetched.reasoning,
       },
     ])
@@ -365,16 +380,55 @@ describe("provider editor state", () => {
     expect(visual.models[2].inputModalities).toEqual(["text", "image"])
   })
 
-  test("clears hosted web search when switching to Chat Completions", () => {
+  test("applies DeepSeek profile tool defaults without leaking them to generic providers", () => {
+    const generic = createEmptyProviderDraft()
+    generic.models[0] = modelDraftForUpstreamModel(
+      generic.models[0],
+      "deepseek-v4-flash",
+      modelCapabilities,
+      generic
+    )
+    expect(generic.models[0].supportsHostedWebSearch).toBe(false)
+    expect(generic.models[0].supportsCustomApplyPatch).toBe(false)
+
+    const deepseek = setProviderApiProfile(
+      generic,
+      "deepseek",
+      modelCapabilities
+    )
+    expect(deepseek.models[0].supportsHostedWebSearch).toBe(true)
+    expect(deepseek.models[0].supportsCustomApplyPatch).toBe(true)
+
+    deepseek.models[0].supportsHostedWebSearch = false
+    deepseek.models[0].supportsCustomApplyPatch = false
+    const payload = providerDraftPayload(deepseek)
+    expect(payload.models![0].supportsHostedWebSearch).toBe(false)
+    expect(payload.models![0].supportsCustomApplyPatch).toBe(false)
+  })
+
+  test("clears native tool capabilities when switching to Chat Completions", () => {
     const draft = providerToDraft(provider)
-    const chatDraft = setProviderUpstreamFormat(draft, "chat-completions")
+    const chatDraft = setProviderUpstreamFormat(
+      draft,
+      "chat-completions",
+      modelCapabilities
+    )
 
     expect(chatDraft.upstreamFormat).toBe("chat-completions")
     expect(chatDraft.supportsEncryptedAgentMessages).toBe(false)
     expect(chatDraft.models[0].supportsHostedWebSearch).toBe(false)
+    expect(chatDraft.models[0].supportsCustomApplyPatch).toBe(false)
     expect(setProviderUpstreamFormat(chatDraft, "chat-completions")).toBe(
       chatDraft
     )
+
+    const responsesDraft = setProviderUpstreamFormat(
+      chatDraft,
+      "responses",
+      modelCapabilities
+    )
+    expect(responsesDraft.models[0].supportsHostedWebSearch).toBe(false)
+    expect(responsesDraft.models[0].supportsCustomApplyPatch).toBe(false)
   })
 
   test("formats remaining balance and derives it from total minus used", () => {

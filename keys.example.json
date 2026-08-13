@@ -18,6 +18,7 @@
       "name": "DeepSeek",
       "baseUrl": "https://api.deepseek.com",
       "upstreamFormat": "responses",
+      "apiProfile": "deepseek",
       "supportsEncryptedAgentMessages": false,
       "enabled": true,
       "balanceQuery": {
@@ -33,7 +34,8 @@
           "name": "V4 Flash",
           "upstreamModel": "deepseek-v4-flash",
           "inputModalities": ["text"],
-          "supportsHostedWebSearch": false,
+          "supportsHostedWebSearch": true,
+          "supportsCustomApplyPatch": true,
           "reasoning": {
             "parameter": "reasoning_effort",
             "default": "high",
@@ -44,7 +46,7 @@
             ]
           }
         },
-        { "id": "v4-pro", "name": "V4 Pro", "upstreamModel": "deepseek-v4-pro", "inputModalities": ["text"], "supportsHostedWebSearch": false }
+        { "id": "v4-pro", "name": "V4 Pro", "upstreamModel": "deepseek-v4-pro", "inputModalities": ["text"], "supportsHostedWebSearch": true, "supportsCustomApplyPatch": true }
       ],
       "keys": [
         { "name": "primary", "key": "sk-REPLACE-WITH-YOUR-KEY-1", "weight": 1, "enabled": true, "alwaysTry": true },

@@ -1133,6 +1133,7 @@ function resolveRequestRoute(registry, body, requestUrl) {
     || runtime.provider.models[0];
   if (
     parsed
+    && runtime.provider.upstreamFormat === 'chat-completions'
     && requestHasImageInput(parsed)
     && !configuredModel.inputModalities.includes('image')
   ) {
@@ -1855,6 +1856,7 @@ function publicProvider(provider) {
     name: provider.name,
     baseUrl: provider.baseUrl,
     upstreamFormat: provider.upstreamFormat,
+    apiProfile: provider.apiProfile,
     supportsEncryptedAgentMessages: provider.supportsEncryptedAgentMessages === true,
     enabled: provider.enabled,
     models: provider.models.map(model => ({

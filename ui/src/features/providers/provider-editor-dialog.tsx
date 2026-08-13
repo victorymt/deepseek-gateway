@@ -35,6 +35,7 @@ import { ProviderBalanceQueryFields } from "./provider-balance-query-fields"
 import type { ProviderCopy } from "./provider-copy"
 import {
   providerOriginsDiffer,
+  setProviderApiProfile,
   setProviderUpstreamFormat,
   type FetchedModel,
   type ProviderDraft,
@@ -151,6 +152,42 @@ export function ProviderEditorDialog({
               />
             </Field>
             <Field>
+              <FieldLabel htmlFor="provider-api-profile">
+                {t.apiProfile}
+              </FieldLabel>
+              <Select
+                items={[
+                  { value: "generic", label: t.genericApiProfile },
+                  { value: "deepseek", label: t.deepSeekApiProfile },
+                ]}
+                value={draft.apiProfile}
+                onValueChange={(value) =>
+                  setDraft((current) =>
+                    setProviderApiProfile(
+                      current,
+                      value === "deepseek" ? "deepseek" : "generic",
+                      modelCapabilities
+                    )
+                  )
+                }
+              >
+                <SelectTrigger id="provider-api-profile" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value="generic">
+                      {t.genericApiProfile}
+                    </SelectItem>
+                    <SelectItem value="deepseek">
+                      {t.deepSeekApiProfile}
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <FieldDescription>{t.apiProfileDescription}</FieldDescription>
+            </Field>
+            <Field>
               <FieldLabel htmlFor="provider-upstream-format">
                 {t.upstreamFormat}
               </FieldLabel>
@@ -169,7 +206,8 @@ export function ProviderEditorDialog({
                       current,
                       value === "chat-completions"
                         ? "chat-completions"
-                        : "responses"
+                        : "responses",
+                      modelCapabilities
                     )
                   )
                 }

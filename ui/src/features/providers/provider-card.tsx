@@ -5,6 +5,7 @@ import {
   SearchIcon,
   StarIcon,
   Trash2Icon,
+  WrenchIcon,
 } from "lucide-react"
 
 import {
@@ -82,6 +83,9 @@ export function ProviderCard({
               ? t.chatCompletionsFormat
               : t.responsesFormat}
           </Badge>
+          {provider.apiProfile === "deepseek" && (
+            <Badge variant="secondary">{t.deepSeekApiProfile}</Badge>
+          )}
           {isDefault && <Badge>{t.default}</Badge>}
           <Badge
             variant={
@@ -203,6 +207,12 @@ export function ProviderCard({
                     <Badge variant="secondary">
                       <SearchIcon data-icon="inline-start" />
                       {t.hostedWebSearch}
+                    </Badge>
+                  )}
+                  {model.supportsCustomApplyPatch && (
+                    <Badge variant="secondary">
+                      <WrenchIcon data-icon="inline-start" />
+                      {t.customApplyPatch}
                     </Badge>
                   )}
                 </div>

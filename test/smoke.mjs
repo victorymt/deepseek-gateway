@@ -157,7 +157,7 @@ function multiProviderConfig(overrides = {}) {
   return config;
 }
 
-test('text-only model rejects image input while image-enabled models accept it', async () => {
+test('native Responses forwards image input while Chat Completions validates it', async () => {
   const textOnlyConfig = multiProviderConfig({
     providers: [{
       id: 'alpha',
@@ -177,48 +177,16 @@ test('text-only model rejects image input while image-enabled models accept it',
   });
   const textOnly = await startGateway('', [], {}, textOnlyConfig, { keysArg: false });
   try {
-    const rejected = await textOnly.responses({
+    const forwarded = await textOnly.responses({
       model: 'alpha--text-only',
       input: [{
         role: 'user',
         content: [{ type: 'input_image', image_url: 'data:image/png;base64,AA==' }],
       }],
     });
-    assert.equal(rejected.status, 400);
-    assert.match(rejected.text, /does not support image input/);
+    assert.equal(forwarded.status, 200, forwarded.text);
   } finally {
     await textOnly.stop();
-  }
-
-  const imageConfig = multiProviderConfig({
-    providers: [{
-      id: 'alpha',
-      name: 'Alpha',
-      baseUrl: 'https://alpha.example',
-      enabled: true,
-      models: [{
-        id: 'vision',
-        name: 'Vision',
-        upstreamModel: 'vision-upstream',
-        inputModalities: ['text', 'image'],
-      }],
-      keys: [{ name: 'alpha-key', key: 'sk-alpha-ok', weight: 1 }],
-    }],
-    defaultProvider: 'alpha',
-    defaultModel: 'alpha--vision',
-  });
-  const responsesGateway = await startGateway('', [], {}, imageConfig, { keysArg: false });
-  try {
-    const accepted = await responsesGateway.responses({
-      model: 'alpha--vision',
-      input: [{
-        role: 'user',
-        content: [{ type: 'input_image', image_url: 'data:image/png;base64,AA==' }],
-      }],
-    });
-    assert.equal(accepted.status, 200, accepted.text);
-  } finally {
-    await responsesGateway.stop();
   }
 
   const chatConfig = multiProviderConfig({
@@ -229,26 +197,27 @@ test('text-only model rejects image input while image-enabled models accept it',
       upstreamFormat: 'chat-completions',
       enabled: true,
       models: [{
-        id: 'vision',
-        name: 'Vision',
-        upstreamModel: 'vision-upstream',
-        inputModalities: ['text', 'image'],
+        id: 'text-only',
+        name: 'Text Only',
+        upstreamModel: 'text-only-upstream',
+        inputModalities: ['text'],
       }],
       keys: [{ name: 'alpha-key', key: 'sk-alpha-ok', weight: 1 }],
     }],
     defaultProvider: 'alpha',
-    defaultModel: 'alpha--vision',
+    defaultModel: 'alpha--text-only',
   });
   const chatGateway = await startGateway('', [], {}, chatConfig, { keysArg: false });
   try {
-    const accepted = await chatGateway.chat({
-      model: 'alpha--vision',
+    const rejected = await chatGateway.chat({
+      model: 'alpha--text-only',
       messages: [{
         role: 'user',
         content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }],
       }],
     });
-    assert.equal(accepted.status, 200, accepted.text);
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.text, /does not support image input/);
   } finally {
     await chatGateway.stop();
   }

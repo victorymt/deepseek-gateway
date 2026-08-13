@@ -32,6 +32,14 @@ const GPT_5_6_SOL_REASONING = {
 };
 
 test('model capability registry uses exact normalized model ids', () => {
+  assert.equal(
+    inferModelCapabilities('deepseek-v4-flash').supportsHostedWebSearch,
+    true,
+  );
+  assert.equal(
+    inferModelCapabilities('deepseek-v4-flash').supportsCustomApplyPatch,
+    true,
+  );
   assert.deepEqual(
     inferModelCapabilities('deepseek/deepseek-v4-pro').inputModalities,
     ['text'],
@@ -85,14 +93,23 @@ test('upstream capability declarations override the registry', () => {
 test('public capability catalog returns detached JSON data', () => {
   const first = modelCapabilityCatalog();
   const firstReasoning = first.models.find(model => model.id === 'deepseek-v4-pro').reasoning;
+  const firstDeepSeek = first.models.find(model => model.id === 'deepseek-v4-pro');
+  assert.equal(firstDeepSeek.supportsHostedWebSearch, true);
+  assert.equal(firstDeepSeek.supportsCustomApplyPatch, true);
   first.models[0].inputModalities.push('image');
   firstReasoning.default = 'low';
   firstReasoning.levels[0].description = 'mutated';
+  firstDeepSeek.supportsCustomApplyPatch = false;
   const second = modelCapabilityCatalog();
   assert.notDeepEqual(first.models[0].inputModalities, second.models[0].inputModalities);
   assert.deepEqual(
     second.models.find(model => model.id === 'deepseek-v4-pro').reasoning,
     DEEPSEEK_V4_REASONING,
+  );
+  assert.equal(
+    second.models.find(model => model.id === 'deepseek-v4-pro')
+      .supportsCustomApplyPatch,
+    true,
   );
 
   const found = findModelCapability('deepseek-v4-pro');

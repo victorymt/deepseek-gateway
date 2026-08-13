@@ -12,6 +12,7 @@ export { CHAT_REASONING_PARAMETERS, normalizeReasoningConfig } from './reasoning
 
 export const DEFAULT_UPSTREAM = 'https://api.deepseek.com';
 export const UPSTREAM_FORMATS = ['responses', 'chat-completions'];
+export const API_PROFILES = ['generic', 'deepseek'];
 export const MODEL_INPUT_MODALITIES = ['text', 'image'];
 export const DEFAULT_MODELS = [
   {
@@ -90,6 +91,14 @@ export function normalizeUpstreamFormat(value, field = 'upstreamFormat') {
   return format;
 }
 
+export function normalizeApiProfile(value, field = 'apiProfile') {
+  const profile = String(value || 'generic').trim().toLowerCase();
+  if (!API_PROFILES.includes(profile)) {
+    throw new Error(`${field} must be one of: ${API_PROFILES.join(', ')}`);
+  }
+  return profile;
+}
+
 export function normalizeInputModalities(value, field = 'inputModalities') {
   const source = value === undefined ? ['text'] : value;
   if (!Array.isArray(source) || !source.length) {
@@ -112,6 +121,13 @@ export function normalizeHostedWebSearch(value, field = 'supportsHostedWebSearch
   return value === true;
 }
 
+export function normalizeCustomApplyPatch(value, field = 'supportsCustomApplyPatch') {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value === true;
+}
+
 export function normalizeEncryptedAgentMessages(value, field = 'supportsEncryptedAgentMessages') {
   if (value !== undefined && typeof value !== 'boolean') {
     throw new Error(`${field} must be a boolean`);
@@ -122,6 +138,11 @@ export function normalizeEncryptedAgentMessages(value, field = 'supportsEncrypte
 export function canExposeHostedWebSearch(provider, model) {
   return provider?.upstreamFormat === 'responses'
     && model?.supportsHostedWebSearch === true;
+}
+
+export function canExposeCustomApplyPatch(provider, model) {
+  return provider?.upstreamFormat === 'responses'
+    && model?.supportsCustomApplyPatch === true;
 }
 
 export function normalizeNumber(value, field, { min = 0, max = Infinity, integer = false } = {}) {
@@ -178,6 +199,16 @@ export function normalizeProvider(input, existing = null) {
     input.upstreamFormat ?? existing?.upstreamFormat,
     `provider ${id} upstreamFormat`,
   );
+  const inferredApiProfile = id === 'deepseek'
+    && new URL(baseUrl).origin === new URL(DEFAULT_UPSTREAM).origin
+    ? 'deepseek'
+    : 'generic';
+  const apiProfile = normalizeApiProfile(
+    input.apiProfile ?? existing?.apiProfile ?? inferredApiProfile,
+    `provider ${id} apiProfile`,
+  );
+  const useProfileDefaults = apiProfile === 'deepseek'
+    && upstreamFormat === 'responses';
   const supportsEncryptedAgentMessages = normalizeEncryptedAgentMessages(
     input.supportsEncryptedAgentMessages === undefined
       ? existing?.supportsEncryptedAgentMessages
@@ -216,8 +247,16 @@ export function normalizeProvider(input, existing = null) {
       `provider ${id} model ${modelId} inputModalities`,
     );
     const supportsHostedWebSearch = normalizeHostedWebSearch(
-      model.supportsHostedWebSearch,
+      model.supportsHostedWebSearch === undefined && useProfileDefaults
+        ? inferredCapabilities.supportsHostedWebSearch
+        : model.supportsHostedWebSearch,
       `provider ${id} model ${modelId} supportsHostedWebSearch`,
+    );
+    const supportsCustomApplyPatch = normalizeCustomApplyPatch(
+      model.supportsCustomApplyPatch === undefined && useProfileDefaults
+        ? inferredCapabilities.supportsCustomApplyPatch
+        : model.supportsCustomApplyPatch,
+      `provider ${id} model ${modelId} supportsCustomApplyPatch`,
     );
     const reasoning = normalizeReasoningConfig(
       model.reasoning === undefined
@@ -241,12 +280,18 @@ export function normalizeProvider(input, existing = null) {
         `provider ${id} model ${modelId} supportsHostedWebSearch requires responses upstreamFormat`,
       );
     }
+    if (supportsCustomApplyPatch && upstreamFormat !== 'responses') {
+      throw new Error(
+        `provider ${id} model ${modelId} supportsCustomApplyPatch requires responses upstreamFormat`,
+      );
+    }
     return {
       id: modelId,
       name: modelName,
       upstreamModel,
       inputModalities,
       supportsHostedWebSearch,
+      supportsCustomApplyPatch,
       ...(reasoning
         ? { reasoning }
         : model.reasoning === null
@@ -286,6 +331,7 @@ export function normalizeProvider(input, existing = null) {
     name,
     baseUrl,
     upstreamFormat,
+    apiProfile,
     supportsEncryptedAgentMessages,
     enabled,
     models,
@@ -464,12 +510,12 @@ export function serializableConfig(config) {
         : {}),
       models: provider.models.map(({
         supportsHostedWebSearch,
+        supportsCustomApplyPatch,
         ...model
       }) => ({
         ...model,
-        ...(supportsHostedWebSearch
-          ? { supportsHostedWebSearch: true }
-          : {}),
+        supportsHostedWebSearch: supportsHostedWebSearch === true,
+        supportsCustomApplyPatch: supportsCustomApplyPatch === true,
       })),
       keys: provider.keys.map(key => ({
         name: key.name,

@@ -35,6 +35,11 @@ export const providerCopy = {
     name: "Display name",
     baseUrl: "Base URL",
     upstreamFormat: "Upstream API format",
+    apiProfile: "API profile",
+    apiProfileDescription:
+      "Select provider-specific Responses capabilities and defaults.",
+    genericApiProfile: "Generic",
+    deepSeekApiProfile: "DeepSeek",
     responsesFormat: "Responses",
     chatCompletionsFormat: "Chat Completions",
     encryptedAgentMessages: "Native agent messages",
@@ -52,6 +57,11 @@ export const providerCopy = {
       "Allow Codex to send the Responses web_search hosted tool.",
     hostedWebSearchUnavailable:
       "Hosted Web Search requires a Responses upstream.",
+    customApplyPatch: "Custom apply_patch",
+    customApplyPatchDescription:
+      "Allow Codex to send the Responses custom apply_patch tool.",
+    customApplyPatchUnavailable:
+      "Custom apply_patch requires a Responses upstream.",
     reasoning: "Reasoning effort",
     reasoningDescription:
       "Expose model-supported thinking levels to Codex and map them upstream.",
@@ -131,6 +141,10 @@ export const providerCopy = {
     name: "显示名称",
     baseUrl: "Base URL",
     upstreamFormat: "上游 API 格式",
+    apiProfile: "API Profile",
+    apiProfileDescription: "选择 Provider 专用的 Responses 能力和默认值。",
+    genericApiProfile: "通用",
+    deepSeekApiProfile: "DeepSeek",
     responsesFormat: "Responses",
     chatCompletionsFormat: "Chat Completions",
     encryptedAgentMessages: "原生代理消息透传",
@@ -147,6 +161,11 @@ export const providerCopy = {
     hostedWebSearchDescription:
       "允许 Codex 发送 Responses web_search 托管工具。",
     hostedWebSearchUnavailable: "托管网页搜索要求上游使用 Responses 协议。",
+    customApplyPatch: "自定义 apply_patch",
+    customApplyPatchDescription:
+      "允许 Codex 发送 Responses custom apply_patch 工具。",
+    customApplyPatchUnavailable:
+      "自定义 apply_patch 要求上游使用 Responses 协议。",
     reasoning: "思考强度",
     reasoningDescription:
       "向 Codex 声明模型支持的思考级别，并映射到上游参数。",

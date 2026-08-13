@@ -157,6 +157,7 @@ export function ProviderModelFields({
                   upstreamModel: "",
                   inputModalities: ["text"],
                   supportsHostedWebSearch: false,
+                  supportsCustomApplyPatch: false,
                 },
               ],
             }))
@@ -280,7 +281,8 @@ export function ProviderModelFields({
                       ? modelDraftForUpstreamModel(
                           item,
                           event.target.value,
-                          modelCapabilities
+                          modelCapabilities,
+                          value
                         )
                       : item
                   ),
@@ -341,6 +343,40 @@ export function ProviderModelFields({
                         ? {
                             ...item,
                             supportsHostedWebSearch: checked,
+                          }
+                        : item
+                    ),
+                  }))
+                }
+              />
+            </Field>
+            <Field
+              orientation="horizontal"
+              data-disabled={
+                draft.upstreamFormat === "chat-completions" || undefined
+              }
+            >
+              <FieldContent className="min-w-0">
+                <FieldTitle>{t.customApplyPatch}</FieldTitle>
+                <FieldDescription>
+                  {draft.upstreamFormat === "chat-completions"
+                    ? t.customApplyPatchUnavailable
+                    : t.customApplyPatchDescription}
+                </FieldDescription>
+              </FieldContent>
+              <Switch
+                size="sm"
+                aria-label={t.customApplyPatch}
+                checked={model.supportsCustomApplyPatch}
+                disabled={draft.upstreamFormat === "chat-completions"}
+                onCheckedChange={(checked) =>
+                  setDraft((value) => ({
+                    ...value,
+                    models: value.models.map((item, itemIndex) =>
+                      itemIndex === index
+                        ? {
+                            ...item,
+                            supportsCustomApplyPatch: checked,
                           }
                         : item
                     ),

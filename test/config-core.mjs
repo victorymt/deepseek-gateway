@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import {
   codexModelAlias,
+  normalizeApiProfile,
   normalizeBalanceQuery,
   normalizeConfig,
   normalizeInputModalities,
@@ -137,6 +138,78 @@ test('provider upstream format defaults to Responses and accepts Chat Completion
     }],
   });
   assert.equal(serializableConfig(normalized).providers[0].upstreamFormat, 'chat-completions');
+});
+
+test('provider API profile validates and legacy official DeepSeek configs are inferred once', () => {
+  assert.equal(normalizeApiProfile(undefined), 'generic');
+  assert.equal(normalizeApiProfile('DeepSeek'), 'deepseek');
+  assert.throws(() => normalizeApiProfile('openai'), /must be one of/);
+
+  const normalized = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'deepseek',
+    defaultModel: 'deepseek--flash',
+    providers: [{
+      id: 'deepseek',
+      baseUrl: 'https://api.deepseek.com/v1',
+      upstreamFormat: 'responses',
+      models: [{ id: 'flash', upstreamModel: 'deepseek-v4-flash' }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+    }],
+  });
+  const provider = normalized.providers[0];
+  const stored = serializableConfig(normalized).providers[0];
+
+  assert.equal(provider.apiProfile, 'deepseek');
+  assert.equal(provider.models[0].supportsHostedWebSearch, true);
+  assert.equal(provider.models[0].supportsCustomApplyPatch, true);
+  assert.equal(stored.apiProfile, 'deepseek');
+  assert.equal(stored.models[0].supportsHostedWebSearch, true);
+  assert.equal(stored.models[0].supportsCustomApplyPatch, true);
+});
+
+test('DeepSeek tool defaults require the profile and explicit false remains an opt-out', () => {
+  const provider = ({ id, baseUrl, apiProfile, model = {} }) => ({
+    id,
+    baseUrl,
+    ...(apiProfile ? { apiProfile } : {}),
+    models: [{ id: 'flash', upstreamModel: 'deepseek-v4-flash', ...model }],
+    keys: [{ name: 'one', key: `sk-${id}` }],
+  });
+  const generic = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--flash',
+    providers: [provider({
+      id: 'alpha',
+      baseUrl: 'https://relay.example/v1',
+    })],
+  }).providers[0];
+  assert.equal(generic.apiProfile, 'generic');
+  assert.equal(generic.models[0].supportsHostedWebSearch, false);
+  assert.equal(generic.models[0].supportsCustomApplyPatch, false);
+
+  const optedOut = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'deepseek',
+    defaultModel: 'deepseek--flash',
+    providers: [provider({
+      id: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      apiProfile: 'deepseek',
+      model: {
+        supportsHostedWebSearch: false,
+        supportsCustomApplyPatch: false,
+      },
+    })],
+  });
+  const stored = serializableConfig(optedOut);
+  assert.equal(stored.providers[0].models[0].supportsHostedWebSearch, false);
+  assert.equal(stored.providers[0].models[0].supportsCustomApplyPatch, false);
+  assert.equal(
+    normalizeConfig(stored).providers[0].models[0].supportsCustomApplyPatch,
+    false,
+  );
 });
 
 test('encrypted agent message passthrough is explicit and limited to Responses providers', () => {
@@ -398,7 +471,7 @@ test('hosted web search is explicit, persisted, and limited to Responses provide
       .providers[0]
       .models[0]
       .supportsHostedWebSearch,
-    undefined,
+    false,
   );
 
   const enabled = normalizeConfig({
@@ -450,6 +523,35 @@ test('hosted web search is explicit, persisted, and limited to Responses provide
       }],
     }],
   }), /must be a boolean/);
+
+  assert.throws(() => normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      ...baseProvider,
+      upstreamFormat: 'chat-completions',
+      models: [{
+        id: 'chat',
+        upstreamModel: 'chat',
+        supportsCustomApplyPatch: true,
+      }],
+    }],
+  }), /supportsCustomApplyPatch requires responses upstreamFormat/);
+
+  assert.throws(() => normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      ...baseProvider,
+      models: [{
+        id: 'chat',
+        upstreamModel: 'chat',
+        supportsCustomApplyPatch: 'true',
+      }],
+    }],
+  }), /supportsCustomApplyPatch must be a boolean/);
 });
 
 test('model identifiers preserve common upstream punctuation without weakening provider ids', () => {

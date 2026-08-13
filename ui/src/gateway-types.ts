@@ -85,6 +85,7 @@ export type ProviderModel = {
   upstreamModel: string
   inputModalities: Array<"text" | "image">
   supportsHostedWebSearch: boolean
+  supportsCustomApplyPatch: boolean
   reasoning?: ReasoningConfig | null
   alias: string
 }
@@ -97,6 +98,8 @@ export type ModelCapabilityCatalog = {
   models: Array<{
     id: string
     inputModalities: Array<"text" | "image">
+    supportsHostedWebSearch?: boolean
+    supportsCustomApplyPatch?: boolean
     reasoning?: ModelCapabilityReasoningConfig
   }>
 }
@@ -152,6 +155,7 @@ export type Provider = {
   name: string
   baseUrl: string
   upstreamFormat: "responses" | "chat-completions"
+  apiProfile: "generic" | "deepseek"
   supportsEncryptedAgentMessages: boolean
   enabled: boolean
   models: ProviderModel[]

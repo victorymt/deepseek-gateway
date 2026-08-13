@@ -10,6 +10,8 @@
     {
       "id": "deepseek-v4-flash",
       "inputModalities": ["text"],
+      "supportsHostedWebSearch": true,
+      "supportsCustomApplyPatch": true,
       "reasoning": {
         "parameter": "reasoning_effort",
         "default": "high",
@@ -23,6 +25,8 @@
     {
       "id": "deepseek-v4-pro",
       "inputModalities": ["text"],
+      "supportsHostedWebSearch": true,
+      "supportsCustomApplyPatch": true,
       "reasoning": {
         "parameter": "reasoning_effort",
         "default": "high",

@@ -249,10 +249,31 @@ class ConfigureWizardTests(unittest.TestCase):
             self.assertEqual(saved["providers"][0]["keys"], original["providers"][0]["keys"])
             self.assertEqual(
                 saved["providers"][1],
-                {**original["providers"][1], "upstreamFormat": "responses"},
+                {
+                    **original["providers"][1],
+                    "upstreamFormat": "responses",
+                    "apiProfile": "generic",
+                    "models": [
+                        {
+                            **original["providers"][1]["models"][0],
+                            "supportsHostedWebSearch": False,
+                            "supportsCustomApplyPatch": False,
+                        }
+                    ],
+                },
             )
             self.assertEqual(saved["providers"][0]["upstreamFormat"], "responses")
-            self.assertEqual(saved["providers"][0]["models"], original["providers"][0]["models"])
+            self.assertEqual(saved["providers"][0]["apiProfile"], "deepseek")
+            self.assertEqual(
+                saved["providers"][0]["models"],
+                [
+                    {
+                        **original["providers"][0]["models"][0],
+                        "supportsHostedWebSearch": False,
+                        "supportsCustomApplyPatch": False,
+                    }
+                ],
+            )
             self.assertEqual(saved["customField"], original["customField"])
             configure_keys.assert_not_called()
 

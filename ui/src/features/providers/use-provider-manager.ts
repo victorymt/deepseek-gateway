@@ -327,7 +327,7 @@ export function useProviderManager({
   }
 
   function addFetchedModel(model: FetchedModel) {
-    setDraft((value) => addFetchedModelToDraft(value, model))
+    setDraft((value) => addFetchedModelToDraft(value, model, modelCapabilities))
   }
 
   function changeDialogOpen(open: boolean) {

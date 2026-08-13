@@ -14,17 +14,24 @@ export type ModelDraft = {
   upstreamModel: string
   inputModalities: InputModality[]
   supportsHostedWebSearch: boolean
+  supportsCustomApplyPatch: boolean
   reasoning?: ReasoningConfig | null
 }
 
-export type FetchedModel = Omit<ModelDraft, "supportsHostedWebSearch"> & {
+export type FetchedModel = Omit<
+  ModelDraft,
+  "supportsHostedWebSearch" | "supportsCustomApplyPatch"
+> & {
   ownedBy: string | null
   capabilitySource: "upstream" | "registry" | "default"
 }
 
 export type ModelCapabilityPreset = Pick<
   ModelDraft,
-  "inputModalities" | "reasoning"
+  | "inputModalities"
+  | "supportsHostedWebSearch"
+  | "supportsCustomApplyPatch"
+  | "reasoning"
 >
 
 const DEFAULT_REASONING_CONFIG: ReasoningConfig = {
@@ -49,6 +56,7 @@ export type ProviderDraft = {
   name: string
   baseUrl: string
   upstreamFormat: "responses" | "chat-completions"
+  apiProfile: "generic" | "deepseek"
   supportsEncryptedAgentMessages: boolean
   enabled: boolean
   models: ModelDraft[]
@@ -118,6 +126,7 @@ export function createEmptyProviderDraft(): ProviderDraft {
     name: "",
     baseUrl: "https://",
     upstreamFormat: "responses",
+    apiProfile: "generic",
     supportsEncryptedAgentMessages: false,
     enabled: true,
     models: [
@@ -127,6 +136,7 @@ export function createEmptyProviderDraft(): ProviderDraft {
         upstreamModel: "",
         inputModalities: ["text"],
         supportsHostedWebSearch: false,
+        supportsCustomApplyPatch: false,
       },
     ],
     keys: [
@@ -153,6 +163,7 @@ export function providerToDraft(provider: Provider): ProviderDraft {
     name: provider.name,
     baseUrl: provider.baseUrl,
     upstreamFormat: provider.upstreamFormat,
+    apiProfile: provider.apiProfile,
     supportsEncryptedAgentMessages:
       provider.supportsEncryptedAgentMessages === true,
     enabled: provider.enabled,
@@ -163,6 +174,7 @@ export function providerToDraft(provider: Provider): ProviderDraft {
         upstreamModel,
         inputModalities,
         supportsHostedWebSearch,
+        supportsCustomApplyPatch,
         reasoning,
       }) => ({
         id,
@@ -170,6 +182,7 @@ export function providerToDraft(provider: Provider): ProviderDraft {
         upstreamModel,
         inputModalities: [...inputModalities],
         supportsHostedWebSearch,
+        supportsCustomApplyPatch,
         ...(reasoning === undefined
           ? {}
           : { reasoning: cloneReasoningConfig(reasoning) }),
@@ -231,6 +244,7 @@ export function providerDraftPayload(
     name: draft.name,
     baseUrl: draft.baseUrl,
     upstreamFormat: draft.upstreamFormat,
+    apiProfile: draft.apiProfile,
     supportsEncryptedAgentMessages: draft.supportsEncryptedAgentMessages,
     enabled: draft.enabled,
     models: draft.models,
@@ -289,7 +303,8 @@ export function providerUpdatePayload(
 
 export function addFetchedModelToDraft(
   draft: ProviderDraft,
-  model: FetchedModel
+  model: FetchedModel,
+  catalog: ModelCapabilityCatalog | null = null
 ): ProviderDraft {
   if (draft.models.some((item) => item.upstreamModel === model.upstreamModel)) {
     return draft
@@ -303,12 +318,15 @@ export function addFetchedModelToDraft(
     id = `${model.id.slice(0, 63 - tail.length)}${tail}`
   }
 
+  const preset = inferModelCapabilityPreset(model.upstreamModel, catalog)
+  const toolDefaults = providerToolDefaults(draft, preset)
   const nextModel: ModelDraft = {
     id,
     name: model.name,
     upstreamModel: model.upstreamModel,
     inputModalities: [...model.inputModalities],
-    supportsHostedWebSearch: false,
+    supportsHostedWebSearch: toolDefaults.supportsHostedWebSearch,
+    supportsCustomApplyPatch: toolDefaults.supportsCustomApplyPatch,
     ...(model.reasoning === undefined
       ? {}
       : { reasoning: cloneReasoningConfig(model.reasoning) }),
@@ -346,7 +364,11 @@ export function inferModelCapabilityPreset(
   catalog: ModelCapabilityCatalog | null
 ): ModelCapabilityPreset {
   if (!upstreamModel.trim() || !catalog) {
-    return { inputModalities: ["text"] }
+    return {
+      inputModalities: ["text"],
+      supportsHostedWebSearch: false,
+      supportsCustomApplyPatch: false,
+    }
   }
   const normalized = normalizeCapabilityModelId(upstreamModel)
   const tail = normalized.split("/").at(-1)
@@ -358,6 +380,8 @@ export function inferModelCapabilityPreset(
     inputModalities: [
       ...(match?.inputModalities ?? catalog.unknownModel.inputModalities),
     ],
+    supportsHostedWebSearch: match?.supportsHostedWebSearch === true,
+    supportsCustomApplyPatch: match?.supportsCustomApplyPatch === true,
     ...(match?.reasoning
       ? { reasoning: cloneReasoningConfig(match.reasoning) }
       : {}),
@@ -367,7 +391,11 @@ export function inferModelCapabilityPreset(
 export function modelDraftForUpstreamModel(
   model: ModelDraft,
   upstreamModel: string,
-  catalog: ModelCapabilityCatalog | null
+  catalog: ModelCapabilityCatalog | null,
+  provider: Pick<ProviderDraft, "apiProfile" | "upstreamFormat"> = {
+    apiProfile: "generic",
+    upstreamFormat: "responses",
+  }
 ): ModelDraft {
   const previousPreset = inferModelCapabilityPreset(
     model.upstreamModel,
@@ -377,11 +405,21 @@ export function modelDraftForUpstreamModel(
   const shouldApplyReasoning =
     model.reasoning === undefined ||
     reasoningConfigsEqual(model.reasoning, previousPreset.reasoning)
+  const previousTools = providerToolDefaults(provider, previousPreset)
+  const nextTools = providerToolDefaults(provider, nextPreset)
 
   return {
     ...model,
     upstreamModel,
     inputModalities: nextPreset.inputModalities,
+    supportsHostedWebSearch:
+      model.supportsHostedWebSearch === previousTools.supportsHostedWebSearch
+        ? nextTools.supportsHostedWebSearch
+        : model.supportsHostedWebSearch,
+    supportsCustomApplyPatch:
+      model.supportsCustomApplyPatch === previousTools.supportsCustomApplyPatch
+        ? nextTools.supportsCustomApplyPatch
+        : model.supportsCustomApplyPatch,
     ...(shouldApplyReasoning
       ? nextPreset.reasoning === undefined
         ? { reasoning: undefined }
@@ -454,7 +492,8 @@ export function reasoningConfigsEqual(
 
 export function setProviderUpstreamFormat(
   draft: ProviderDraft,
-  upstreamFormat: ProviderDraft["upstreamFormat"]
+  upstreamFormat: ProviderDraft["upstreamFormat"],
+  catalog: ModelCapabilityCatalog | null = null
 ): ProviderDraft {
   if (draft.upstreamFormat === upstreamFormat) return draft
   return {
@@ -464,13 +503,54 @@ export function setProviderUpstreamFormat(
       upstreamFormat === "chat-completions"
         ? false
         : draft.supportsEncryptedAgentMessages,
-    models:
-      upstreamFormat === "chat-completions"
-        ? draft.models.map((model) => ({
-            ...model,
-            supportsHostedWebSearch: false,
-          }))
-        : draft.models,
+    models: draft.models.map((model) => {
+      if (upstreamFormat === "chat-completions") {
+        return {
+          ...model,
+          supportsHostedWebSearch: false,
+          supportsCustomApplyPatch: false,
+        }
+      }
+      const defaults = providerToolDefaults(
+        { ...draft, upstreamFormat },
+        inferModelCapabilityPreset(model.upstreamModel, catalog)
+      )
+      return { ...model, ...defaults }
+    }),
+  }
+}
+
+export function setProviderApiProfile(
+  draft: ProviderDraft,
+  apiProfile: ProviderDraft["apiProfile"],
+  catalog: ModelCapabilityCatalog | null = null
+): ProviderDraft {
+  if (draft.apiProfile === apiProfile) return draft
+  return {
+    ...draft,
+    apiProfile,
+    models: draft.models.map((model) => ({
+      ...model,
+      ...providerToolDefaults(
+        { ...draft, apiProfile },
+        inferModelCapabilityPreset(model.upstreamModel, catalog)
+      ),
+    })),
+  }
+}
+
+function providerToolDefaults(
+  provider: Pick<ProviderDraft, "apiProfile" | "upstreamFormat">,
+  preset: Pick<
+    ModelCapabilityPreset,
+    "supportsHostedWebSearch" | "supportsCustomApplyPatch"
+  >
+) {
+  const enabled = provider.apiProfile === "deepseek"
+    && provider.upstreamFormat === "responses"
+  return {
+    supportsHostedWebSearch: enabled && preset.supportsHostedWebSearch,
+    supportsCustomApplyPatch: enabled && preset.supportsCustomApplyPatch,
   }
 }
 

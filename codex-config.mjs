@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  canExposeCustomApplyPatch,
   canExposeHostedWebSearch,
   codexModelAlias,
   normalizeConfig,
@@ -177,6 +178,9 @@ function applyCatalogProfile(
     delete catalogModel.tools;
     if (canExposeHostedWebSearch(provider, model)) {
       catalogModel.web_search_tool_type = template.web_search_tool_type || 'text';
+    }
+    if (canExposeCustomApplyPatch(provider, model)) {
+      catalogModel.apply_patch_tool_type = template.apply_patch_tool_type || 'freeform';
     }
   }
   if (!hasInstructionSource(catalogModel)) {

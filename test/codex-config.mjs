@@ -69,6 +69,34 @@ test('Responses catalog entries opt into the template hosted web search type', (
   assert.equal(model.supports_search_tool, false);
 });
 
+test('official DeepSeek Responses defaults to hosted search and custom apply_patch', () => {
+  const deepseek = config('responses', false, 'deepseek-v4-flash');
+  deepseek.defaultProvider = 'deepseek';
+  deepseek.defaultModel = 'deepseek--chat';
+  Object.assign(deepseek.providers[0], {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com',
+  });
+  delete deepseek.providers[0].models[0].supportsHostedWebSearch;
+
+  const model = buildModelCatalog(deepseek).models[0];
+
+  assert.equal(model.web_search_tool_type, 'text');
+  assert.equal(model.apply_patch_tool_type, 'freeform');
+  assert.equal(model.shell_type, 'shell_command');
+});
+
+test('generic native Responses only exposes custom apply_patch when enabled', () => {
+  const generic = config('responses');
+  generic.providers[0].models[0].supportsCustomApplyPatch = true;
+
+  const model = buildModelCatalog(generic).models[0];
+
+  assert.equal(model.apply_patch_tool_type, 'freeform');
+  assert.equal(model.web_search_tool_type, undefined);
+});
+
 test('model reasoning capabilities override neutral and matched catalog profiles', () => {
   const reasoning = {
     parameter: 'thinking_budget',

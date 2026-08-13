@@ -15,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import type {
   ModelCapabilityCatalog,
   ReasoningParameter,
@@ -124,6 +125,9 @@ export function ProviderModelFields({
   onAddFetchedModel,
   onFetchModels,
 }: ProviderModelFieldsProps) {
+  const showsNativeResponsesOverrides =
+    draft.upstreamFormat === "responses" && draft.apiProfile === "generic"
+
   return (
     <FieldSet>
       <FieldLegend>{t.models}</FieldLegend>
@@ -338,6 +342,91 @@ export function ProviderModelFields({
                 }
               />
             </Field>
+            {showsNativeResponsesOverrides && (
+              <>
+                <Field>
+                  <FieldLabel htmlFor={`context-window-${index}`}>
+                    {t.contextWindow}
+                  </FieldLabel>
+                  <Input
+                    id={`context-window-${index}`}
+                    type="number"
+                    min={1}
+                    max={Number.MAX_SAFE_INTEGER}
+                    step={1}
+                    placeholder="128000"
+                    value={model.contextWindow ?? ""}
+                    onChange={(event) =>
+                      setDraft((value) => ({
+                        ...value,
+                        models: value.models.map((item, itemIndex) =>
+                          itemIndex === index
+                            ? {
+                                ...item,
+                                contextWindow: event.target.value
+                                  ? Number(event.target.value)
+                                  : undefined,
+                              }
+                            : item
+                        ),
+                      }))
+                    }
+                  />
+                  <FieldDescription>
+                    {t.contextWindowDescription}
+                  </FieldDescription>
+                </Field>
+                <Field orientation="horizontal">
+                  <FieldContent className="min-w-0">
+                    <FieldTitle>{t.parallelToolCalls}</FieldTitle>
+                    <FieldDescription>
+                      {t.parallelToolCallsDescription}
+                    </FieldDescription>
+                  </FieldContent>
+                  <Switch
+                    size="sm"
+                    aria-label={t.parallelToolCalls}
+                    checked={model.supportsParallelToolCalls === true}
+                    onCheckedChange={(checked) =>
+                      setDraft((value) => ({
+                        ...value,
+                        models: value.models.map((item, itemIndex) =>
+                          itemIndex === index
+                            ? { ...item, supportsParallelToolCalls: checked }
+                            : item
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor={`base-instructions-${index}`}>
+                    {t.baseInstructions}
+                  </FieldLabel>
+                  <Textarea
+                    id={`base-instructions-${index}`}
+                    maxLength={65536}
+                    rows={4}
+                    value={model.baseInstructions ?? ""}
+                    placeholder={t.baseInstructionsPlaceholder}
+                    onChange={(event) =>
+                      setDraft((value) => ({
+                        ...value,
+                        models: value.models.map((item, itemIndex) =>
+                          itemIndex === index
+                            ? {
+                                ...item,
+                                baseInstructions:
+                                  event.target.value || undefined,
+                              }
+                            : item
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+              </>
+            )}
             <Field
               orientation="horizontal"
               data-disabled={

@@ -30,6 +30,28 @@ const NEUTRAL_BASE_INSTRUCTIONS = [
 
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_PATH = path.join(PROJECT_DIR, 'codex-models.json');
+const NATIVE_RESPONSES_MODEL_TEMPLATE = {
+  shell_type: 'shell_command',
+  base_instructions: NEUTRAL_BASE_INSTRUCTIONS,
+  default_reasoning_level: 'high',
+  supported_reasoning_levels: [
+    { effort: 'none', description: 'Disable Thinking' },
+    { effort: 'high', description: 'Enabled Thinking' },
+  ],
+  supports_reasoning_summaries: true,
+  default_reasoning_summary: 'none',
+  support_verbosity: false,
+  truncation_policy: { mode: 'bytes', limit: 10000 },
+  supports_parallel_tool_calls: false,
+  supports_image_detail_original: false,
+  context_window: 128000,
+  max_context_window: 128000,
+  effective_context_window_percent: 95,
+  experimental_supported_tools: [],
+  input_modalities: ['text', 'image'],
+  supports_search_tool: false,
+};
+
 const NEUTRAL_MODEL_TEMPLATE = {
   shell_type: 'shell_command',
   base_instructions: NEUTRAL_BASE_INSTRUCTIONS,
@@ -152,6 +174,20 @@ function applyCatalogProfile(
   usesNeutralTemplate,
 ) {
   const profile = catalogProfile(provider);
+  const genericNativeResponses = profile === CATALOG_PROFILE.NATIVE_RESPONSES
+    && !usesOfficialDeepSeekCatalog(provider);
+  if (genericNativeResponses) {
+    catalogModel = structuredClone(NATIVE_RESPONSES_MODEL_TEMPLATE);
+    const contextWindow = model.contextWindow ?? 128000;
+    catalogModel.context_window = contextWindow;
+    catalogModel.max_context_window = contextWindow;
+    catalogModel.supports_parallel_tool_calls = model.supportsParallelToolCalls ?? false;
+    catalogModel.base_instructions = model.baseInstructions || NEUTRAL_BASE_INSTRUCTIONS;
+    catalogModel.additional_speed_tiers = [];
+    catalogModel.service_tiers = [];
+    catalogModel.availability_nux = null;
+    catalogModel.upgrade = null;
+  }
   catalogModel.shell_type = 'shell_command';
   if (typeof catalogModel.supports_reasoning_summaries !== 'boolean') {
     catalogModel.supports_reasoning_summaries = false;
@@ -162,9 +198,13 @@ function applyCatalogProfile(
       ...(level.description ? { description: level.description } : {}),
     }));
     catalogModel.default_reasoning_level = model.reasoning.default;
-  } else {
+  } else if (!genericNativeResponses || model.reasoning === null) {
     catalogModel.supported_reasoning_levels = [];
     delete catalogModel.default_reasoning_level;
+    if (model.reasoning === null) {
+      catalogModel.supports_reasoning_summaries = false;
+      delete catalogModel.default_reasoning_summary;
+    }
   }
 
   if (profile === CATALOG_PROFILE.PROXY_CHAT) {
@@ -179,9 +219,9 @@ function applyCatalogProfile(
     catalogModel.apply_patch_tool_type = proxyTemplate.apply_patch_tool_type
       || catalogModel.apply_patch_tool_type
       || 'freeform';
-  } else if (usesNeutralTemplate || !usesOfficialDeepSeekCatalog(provider)) {
+  } else if (genericNativeResponses) {
     delete catalogModel.web_search_tool_type;
-    catalogModel.base_instructions = NEUTRAL_BASE_INSTRUCTIONS;
+    catalogModel.base_instructions = model.baseInstructions || NEUTRAL_BASE_INSTRUCTIONS;
     delete catalogModel.apply_patch_tool_type;
     delete catalogModel.model_messages;
     delete catalogModel.tools;

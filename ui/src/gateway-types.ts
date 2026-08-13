@@ -86,6 +86,9 @@ export type ProviderModel = {
   inputModalities: Array<"text" | "image">
   supportsHostedWebSearch: boolean
   supportsCustomApplyPatch: boolean
+  contextWindow?: number
+  supportsParallelToolCalls?: boolean
+  baseInstructions?: string
   reasoning?: ReasoningConfig | null
   alias: string
 }

@@ -51,13 +51,42 @@ test('Responses catalog entries default hosted web search to disabled', () => {
 
   assert.equal(model.web_search_tool_type, undefined);
   assert.equal(model.supports_search_tool, false);
-  assert.equal(model.context_window, 32768);
+  assert.equal(model.context_window, 128000);
+  assert.equal(model.max_context_window, 128000);
+  assert.equal(model.effective_context_window_percent, 95);
   assert.equal(model.supports_parallel_tool_calls, false);
+  assert.deepEqual(model.truncation_policy, { mode: 'bytes', limit: 10000 });
+  assert.deepEqual(model.supported_reasoning_levels, [
+    { effort: 'none', description: 'Disable Thinking' },
+    { effort: 'high', description: 'Enabled Thinking' },
+  ]);
+  assert.equal(model.default_reasoning_level, 'high');
+  assert.equal(model.supports_reasoning_summaries, true);
+  assert.equal(model.default_reasoning_summary, 'none');
+  assert.deepEqual(model.additional_speed_tiers, []);
+  assert.deepEqual(model.service_tiers, []);
+  assert.equal(model.availability_nux, null);
+  assert.equal(model.upgrade, null);
   assert.equal(model.model_messages, undefined);
   assert.equal(model.shell_type, 'shell_command');
   assert.equal(model.apply_patch_tool_type, undefined);
   assert.ok(model.base_instructions);
-  assert.equal(model.supports_reasoning_summaries, false);
+});
+
+test('generic native Responses applies model-level catalog overrides', () => {
+  const generic = config('responses');
+  Object.assign(generic.providers[0].models[0], {
+    contextWindow: 262144,
+    supportsParallelToolCalls: true,
+    baseInstructions: 'Use the vendor-native coding workflow.',
+  });
+
+  const model = buildModelCatalog(generic).models[0];
+
+  assert.equal(model.context_window, 262144);
+  assert.equal(model.max_context_window, 262144);
+  assert.equal(model.supports_parallel_tool_calls, true);
+  assert.equal(model.base_instructions, 'Use the vendor-native coding workflow.');
 });
 
 test('Responses catalog entries opt into the template hosted web search type', () => {
@@ -79,6 +108,11 @@ test('official DeepSeek Responses defaults to hosted search and custom apply_pat
     baseUrl: 'https://api.deepseek.com',
   });
   delete deepseek.providers[0].models[0].supportsHostedWebSearch;
+  Object.assign(deepseek.providers[0].models[0], {
+    contextWindow: 12345,
+    supportsParallelToolCalls: false,
+    baseInstructions: 'This must not replace the official harness.',
+  });
 
   const model = buildModelCatalog(deepseek).models[0];
 
@@ -86,6 +120,7 @@ test('official DeepSeek Responses defaults to hosted search and custom apply_pat
   assert.equal(model.apply_patch_tool_type, 'freeform');
   assert.equal(model.shell_type, 'shell_command');
   assert.equal(model.context_window, 1048576);
+  assert.notEqual(model.base_instructions, 'This must not replace the official harness.');
   assert.ok(model.base_instructions.length > 10000);
   assert.ok(model.model_messages?.instructions_template);
 });
@@ -97,7 +132,7 @@ test('DeepSeek profile on a relay does not claim the official Responses harness'
   const model = buildModelCatalog(relay).models[0];
 
   assert.equal(model.model_messages, undefined);
-  assert.equal(model.context_window, 1048576);
+  assert.equal(model.context_window, 128000);
   assert.doesNotMatch(model.base_instructions, /apply_patch/);
 });
 
@@ -139,21 +174,30 @@ test('models with reasoning explicitly disabled clear levels inherited from matc
     ).models[0];
     assert.deepEqual(model.supported_reasoning_levels, []);
     assert.equal(model.default_reasoning_level, undefined);
+    assert.equal(model.supports_reasoning_summaries, false);
+    assert.equal(model.default_reasoning_summary, undefined);
   }
 });
 
 test('known templates keep proxy tools but strip them for generic native Responses', () => {
-  const proxyChat = buildModelCatalog(
-    config('chat-completions', false, 'deepseek-v4-flash'),
-  ).models[0];
+  const proxyConfig = config('chat-completions', false, 'deepseek-v4-flash');
+  Object.assign(proxyConfig.providers[0].models[0], {
+    contextWindow: 12345,
+    supportsParallelToolCalls: false,
+    baseInstructions: 'This must not replace the proxy harness.',
+  });
+  const proxyChat = buildModelCatalog(proxyConfig).models[0];
   const nativeResponses = buildModelCatalog(
     config('responses', false, 'deepseek-v4-flash'),
   ).models[0];
 
   assert.equal(proxyChat.apply_patch_tool_type, 'freeform');
   assert.ok(proxyChat.model_messages?.instructions_template);
+  assert.equal(proxyChat.context_window, 1048576);
+  assert.notEqual(proxyChat.base_instructions, 'This must not replace the proxy harness.');
   assert.equal(nativeResponses.apply_patch_tool_type, undefined);
   assert.equal(nativeResponses.model_messages, undefined);
+  assert.equal(nativeResponses.context_window, 128000);
   assert.ok(nativeResponses.base_instructions);
   assert.doesNotMatch(nativeResponses.base_instructions, /apply_patch/);
   assert.equal(nativeResponses.shell_type, 'shell_command');

@@ -1014,7 +1014,14 @@ test('provider API masks secrets, persists atomically, and applies new aliases l
         upstreamFormat: 'chat-completions',
         supportsPromptCacheKey: true,
         enabled: true,
-        models: [{ id: 'shared', name: 'Shared Gamma', upstreamModel: 'same-upstream-model' }],
+        models: [{
+          id: 'shared',
+          name: 'Shared Gamma',
+          upstreamModel: 'same-upstream-model',
+          contextWindow: 262144,
+          supportsParallelToolCalls: true,
+          baseInstructions: 'Use Gamma coding instructions.',
+        }],
         keys: [{ name: 'gamma-key', key: secret, weight: 2 }],
       }),
     });
@@ -1026,6 +1033,9 @@ test('provider API masks secrets, persists atomically, and applies new aliases l
     assert.match(gamma.keys[0].maskedKey, /^\*\*\*\*/);
     assert.equal(gamma.keys[0].key, undefined);
     assert.equal(gamma.supportsPromptCacheKey, true);
+    assert.equal(gamma.models[0].contextWindow, 262144);
+    assert.equal(gamma.models[0].supportsParallelToolCalls, true);
+    assert.equal(gamma.models[0].baseInstructions, 'Use Gamma coding instructions.');
 
     const routed = await gw.chat({ model: 'gamma--shared' });
     assert.equal(routed.status, 200);
@@ -1034,7 +1044,11 @@ test('provider API masks secrets, persists atomically, and applies new aliases l
 
     const persisted = JSON.parse(fs.readFileSync(gw.configPath, 'utf8'));
     assert.equal(persisted.schemaVersion, 2);
-    assert.equal(persisted.providers.find(provider => provider.id === 'gamma').keys[0].key, secret);
+    const persistedGamma = persisted.providers.find(provider => provider.id === 'gamma');
+    assert.equal(persistedGamma.keys[0].key, secret);
+    assert.equal(persistedGamma.models[0].contextWindow, 262144);
+    assert.equal(persistedGamma.models[0].supportsParallelToolCalls, true);
+    assert.equal(persistedGamma.models[0].baseInstructions, 'Use Gamma coding instructions.');
     assert.equal(fs.statSync(gw.configPath).mode & 0o777, 0o600);
     assert.ok(fs.existsSync(`${gw.configPath}.bak`));
 

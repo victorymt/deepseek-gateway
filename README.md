@@ -426,7 +426,7 @@ Codex MultiAgentV2 通过自定义 Provider 派发子代理时，会把任务放
 
 网关默认只在 `agent_message` 内将该项改写为 `input_text`，并把外层改写成 `message(role=user)`；这既适用于原生 Responses Provider，也适用于 Responses 到 Chat Completions 的本地转换。普通 message 内容和 reasoning item 的 `encrypted_content` 不会被全局改写。只有上游原生支持 OpenAI Responses Multi-agent 加密消息时，才应设置 `supportsEncryptedAgentMessages: true` 关闭兼容解包并原样透传。Chat Completions Provider 不允许开启该能力，Web UI 切换协议时也会自动关闭它。
 
-生成 Codex 模型目录时会按上游格式和 origin 选择工具 profile。`chat-completions` 使用 ProxyChat profile，保留 Codex 的 freeform `apply_patch`，由本地网关转换可支持的工具调用并过滤 hosted web search。官方 `api.deepseek.com` 的 DeepSeek Responses Provider 保留内置官方目录中的完整 `base_instructions`、`model_messages`、上下文、reasoning、Web Search 和 apply_patch 声明；第三方中转与未知模型继续使用保守的通用 Responses profile。
+生成 Codex 模型目录时会按上游格式和 origin 选择工具 profile。`chat-completions` 使用 ProxyChat profile，保留 Codex 的 freeform `apply_patch`，由本地网关转换可支持的工具调用并过滤 hosted web search。官方 `api.deepseek.com` 的 DeepSeek Responses Provider 保留内置官方目录中的完整 `base_instructions`、`model_messages`、上下文、reasoning、Web Search 和 apply_patch 声明；其他 Responses Provider 使用与 CC Switch 一致的通用 NativeResponses profile，默认上下文为 128K、推理等级为 `none/high`、使用 bytes/10000 截断策略并关闭并行工具调用。通用模型可通过 `contextWindow`、`supportsParallelToolCalls` 和 `baseInstructions` 覆盖这些模型级声明。
 
 所有生成条目仍强制 `supports_search_tool: false`，避免 Codex 将 MCP 工具延迟隐藏。模型的 `supportsHostedWebSearch` 和 `supportsCustomApplyPatch` 仍可显式关闭官方模板能力。Codex 配置固定使用 `wire_api = "responses"` 并请求本地网关，上游协议只在 Provider 路由中选择。
 
@@ -481,6 +481,9 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 | `providers[].models[].id` | - | - | - | Codex 路由模型 ID，支持 `.`, `_`, `/`, `:`、`+` 和单连字符；不能包含保留分隔符 `--` |
 | `providers[].models[].inputModalities` | - | - | 按 `model-capabilities.json` 推断 | 模型输入能力，可选 `text`、`image`，且必须包含 `text`；显式配置优先于自动识别 |
 | `providers[].models[].reasoning` | - | - | 按已知模型目录推断 | Codex 思考等级及上游参数映射；对象覆盖目录，`null` 显式关闭目录预设，未知模型不自动启用 |
+| `providers[].models[].contextWindow` | - | - | `128000` | 通用 Responses 模型的 Codex 上下文窗口覆盖，必须是正整数 |
+| `providers[].models[].supportsParallelToolCalls` | - | - | `false` | 通用 Responses 模型是否向 Codex 声明并行工具调用能力 |
+| `providers[].models[].baseInstructions` | - | - | 中性 Codex 指令 | 通用 Responses 模型的基础指令覆盖，最多 65536 个字符 |
 | `providers[].models[].supportsHostedWebSearch` | - | - | 按 API Profile 推断 | 是否向 Codex 暴露 Responses Hosted Web Search；仅允许用于 `responses` Provider |
 | `providers[].models[].supportsCustomApplyPatch` | - | - | 按 API Profile 推断 | 是否向 Codex 暴露 Responses custom `apply_patch`；仅允许用于 `responses` Provider |
 | `providers[].keys[].alwaysTry` | - | - | `false` | 鉴权或上游失败后仍允许新的请求继续调度该 Key；仍尊重 429 冷却和手动停用 |

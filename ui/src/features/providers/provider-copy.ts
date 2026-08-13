@@ -58,6 +58,14 @@ export const providerCopy = {
     upstreamModel: "Upstream model",
     imageInput: "Image input",
     textOnly: "Text only",
+    contextWindow: "Context window",
+    contextWindowDescription:
+      "Leave empty to use the Native Responses default of 128000 tokens.",
+    parallelToolCalls: "Parallel tool calls",
+    parallelToolCallsDescription:
+      "Declare that this Responses model can execute tool calls in parallel.",
+    baseInstructions: "Base instructions",
+    baseInstructionsPlaceholder: "Use the neutral Codex instructions",
     hostedWebSearch: "Hosted Web Search",
     hostedWebSearchDescription:
       "Allow Codex to send the Responses web_search hosted tool.",
@@ -169,6 +177,14 @@ export const providerCopy = {
     upstreamModel: "上游模型",
     imageInput: "图像输入",
     textOnly: "仅文本",
+    contextWindow: "上下文窗口",
+    contextWindowDescription:
+      "留空时使用 Native Responses 默认值 128000 tokens。",
+    parallelToolCalls: "并行工具调用",
+    parallelToolCallsDescription:
+      "声明此 Responses 模型能够并行执行工具调用。",
+    baseInstructions: "基础指令",
+    baseInstructionsPlaceholder: "使用中性的 Codex 基础指令",
     hostedWebSearch: "托管网页搜索",
     hostedWebSearchDescription:
       "允许 Codex 发送 Responses web_search 托管工具。",

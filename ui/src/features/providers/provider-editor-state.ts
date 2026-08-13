@@ -15,6 +15,9 @@ export type ModelDraft = {
   inputModalities: InputModality[]
   supportsHostedWebSearch: boolean
   supportsCustomApplyPatch: boolean
+  contextWindow?: number
+  supportsParallelToolCalls?: boolean
+  baseInstructions?: string
   reasoning?: ReasoningConfig | null
 }
 
@@ -187,6 +190,9 @@ export function providerToDraft(provider: Provider): ProviderDraft {
         inputModalities,
         supportsHostedWebSearch,
         supportsCustomApplyPatch,
+        contextWindow,
+        supportsParallelToolCalls,
+        baseInstructions,
         reasoning,
       }) => ({
         id,
@@ -195,6 +201,11 @@ export function providerToDraft(provider: Provider): ProviderDraft {
         inputModalities: [...inputModalities],
         supportsHostedWebSearch,
         supportsCustomApplyPatch,
+        ...(contextWindow === undefined ? {} : { contextWindow }),
+        ...(supportsParallelToolCalls === undefined
+          ? {}
+          : { supportsParallelToolCalls }),
+        ...(baseInstructions === undefined ? {} : { baseInstructions }),
         ...(reasoning === undefined
           ? {}
           : { reasoning: cloneReasoningConfig(reasoning) }),

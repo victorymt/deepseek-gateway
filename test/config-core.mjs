@@ -212,6 +212,74 @@ test('DeepSeek tool defaults require the profile and explicit false remains an o
   );
 });
 
+test('native Responses model catalog overrides normalize and serialize', () => {
+  const normalized = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      models: [{
+        id: 'chat',
+        upstreamModel: 'chat',
+        contextWindow: 262144,
+        supportsParallelToolCalls: false,
+        baseInstructions: '  Use the upstream coding harness.  ',
+      }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+    }],
+  });
+  const model = normalized.providers[0].models[0];
+  const storedModel = serializableConfig(normalized).providers[0].models[0];
+
+  assert.equal(model.contextWindow, 262144);
+  assert.equal(model.supportsParallelToolCalls, false);
+  assert.equal(model.baseInstructions, 'Use the upstream coding harness.');
+  assert.equal(storedModel.contextWindow, 262144);
+  assert.equal(storedModel.supportsParallelToolCalls, false);
+  assert.equal(storedModel.baseInstructions, 'Use the upstream coding harness.');
+});
+
+test('native Responses model catalog overrides reject invalid values', () => {
+  const configWithModel = model => ({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{
+      id: 'alpha',
+      baseUrl: 'https://alpha.example/v1',
+      models: [{ id: 'chat', upstreamModel: 'chat', ...model }],
+      keys: [{ name: 'one', key: 'sk-one' }],
+    }],
+  });
+
+  assert.throws(
+    () => normalizeConfig(configWithModel({ contextWindow: 0 })),
+    /contextWindow must be an integer between 1/,
+  );
+  assert.throws(
+    () => normalizeConfig(configWithModel({ contextWindow: null })),
+    /contextWindow must be an integer between 1/,
+  );
+  assert.throws(
+    () => normalizeConfig(configWithModel({ contextWindow: 1.5 })),
+    /contextWindow must be an integer between 1/,
+  );
+  assert.throws(
+    () => normalizeConfig(configWithModel({ supportsParallelToolCalls: 'false' })),
+    /supportsParallelToolCalls must be a boolean/,
+  );
+  assert.throws(
+    () => normalizeConfig(configWithModel({ baseInstructions: '   ' })),
+    /baseInstructions must not be empty/,
+  );
+  assert.throws(
+    () => normalizeConfig(configWithModel({ baseInstructions: 'x'.repeat(65537) })),
+    /baseInstructions must be at most 65536 characters/,
+  );
+});
+
 test('encrypted agent message passthrough is explicit and limited to Responses providers', () => {
   const baseProvider = {
     id: 'alpha',

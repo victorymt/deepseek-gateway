@@ -32,6 +32,7 @@ export const DEFAULT_MODELS = [
 const PROVIDER_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const MODEL_ID_RE = /^[a-z0-9](?:[a-z0-9._\/:+-]{0,61}[a-z0-9])?$/;
 const MAX_BALANCE_SCRIPT_BYTES = 64 * 1024;
+const MAX_BASE_INSTRUCTIONS_LENGTH = 64 * 1024;
 export const MAX_PROVIDER_KEYS = 1000;
 
 function isLoopbackHost(value) {
@@ -126,6 +127,32 @@ export function normalizeCustomApplyPatch(value, field = 'supportsCustomApplyPat
     throw new Error(`${field} must be a boolean`);
   }
   return value === true;
+}
+
+export function normalizeContextWindow(value, field = 'contextWindow') {
+  if (value === undefined) return undefined;
+  return normalizeNumber(value, field, {
+    min: 1,
+    max: Number.MAX_SAFE_INTEGER,
+    integer: true,
+  });
+}
+
+export function normalizeParallelToolCalls(value, field = 'supportsParallelToolCalls') {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'boolean') throw new Error(`${field} must be a boolean`);
+  return value;
+}
+
+export function normalizeBaseInstructions(value, field = 'baseInstructions') {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error(`${field} must be a string`);
+  const instructions = value.trim();
+  if (!instructions) throw new Error(`${field} must not be empty`);
+  if (instructions.length > MAX_BASE_INSTRUCTIONS_LENGTH) {
+    throw new Error(`${field} must be at most ${MAX_BASE_INSTRUCTIONS_LENGTH} characters`);
+  }
+  return instructions;
 }
 
 export function normalizeEncryptedAgentMessages(value, field = 'supportsEncryptedAgentMessages') {
@@ -276,6 +303,18 @@ export function normalizeProvider(input, existing = null) {
         : model.supportsCustomApplyPatch,
       `provider ${id} model ${modelId} supportsCustomApplyPatch`,
     );
+    const contextWindow = normalizeContextWindow(
+      model.contextWindow,
+      `provider ${id} model ${modelId} contextWindow`,
+    );
+    const supportsParallelToolCalls = normalizeParallelToolCalls(
+      model.supportsParallelToolCalls,
+      `provider ${id} model ${modelId} supportsParallelToolCalls`,
+    );
+    const baseInstructions = normalizeBaseInstructions(
+      model.baseInstructions,
+      `provider ${id} model ${modelId} baseInstructions`,
+    );
     const reasoning = normalizeReasoningConfig(
       model.reasoning === undefined
         ? inferredCapabilities.reasoning
@@ -310,6 +349,9 @@ export function normalizeProvider(input, existing = null) {
       inputModalities,
       supportsHostedWebSearch,
       supportsCustomApplyPatch,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      ...(supportsParallelToolCalls === undefined ? {} : { supportsParallelToolCalls }),
+      ...(baseInstructions === undefined ? {} : { baseInstructions }),
       ...(reasoning
         ? { reasoning }
         : model.reasoning === null

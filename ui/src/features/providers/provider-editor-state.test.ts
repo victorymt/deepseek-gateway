@@ -37,6 +37,9 @@ const provider: Provider = {
       inputModalities: ["text"],
       supportsHostedWebSearch: true,
       supportsCustomApplyPatch: true,
+      contextWindow: 262144,
+      supportsParallelToolCalls: true,
+      baseInstructions: "Use the DeepSeek coding harness.",
       reasoning: {
         parameter: "reasoning_effort",
         default: "high",
@@ -230,6 +233,11 @@ describe("provider editor state", () => {
     })
     expect(draft.models[0].supportsHostedWebSearch).toBe(true)
     expect(draft.models[0].supportsCustomApplyPatch).toBe(true)
+    expect(draft.models[0].contextWindow).toBe(262144)
+    expect(draft.models[0].supportsParallelToolCalls).toBe(true)
+    expect(draft.models[0].baseInstructions).toBe(
+      "Use the DeepSeek coding harness."
+    )
     expect(draft.models[0].reasoning).toEqual(provider.models[0].reasoning)
     expect(draft.supportsEncryptedAgentMessages).toBe(true)
     expect(draft.supportsPromptCacheKey).toBe(false)
@@ -261,6 +269,11 @@ describe("provider editor state", () => {
     expect(payload.supportsPromptCacheKey).toBe(false)
     expect(payload.apiProfile).toBe("deepseek")
     expect(payload.models![0].supportsCustomApplyPatch).toBe(true)
+    expect(payload.models![0].contextWindow).toBe(262144)
+    expect(payload.models![0].supportsParallelToolCalls).toBe(true)
+    expect(payload.models![0].baseInstructions).toBe(
+      "Use the DeepSeek coding harness."
+    )
     expect(payload.models![0].reasoning).toEqual(provider.models[0].reasoning)
   })
 

@@ -129,6 +129,8 @@ test('gatewayctl stop gracefully terminates a managed gateway and is idempotent'
   const env = {
     ...process.env,
     XDG_RUNTIME_DIR: path.join(directory, 'runtime'),
+    // isolate the spawned gateway's native Codex agent sync from the real ~/.codex
+    CODEX_HOME: path.join(directory, 'codex-home'),
   };
   const token = 'gateway-stop-token-123456';
   fs.writeFileSync(configPath, JSON.stringify(validConfig({

@@ -61,7 +61,13 @@ export async function startGateway(keys, extra = [], env = {}, config = {}, opti
     ...keyArgs,
     '--quiet',
     ...extra,
-  ], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
+  ], {
+    cwd: ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    // Isolate the gateway's native Codex agent sync from the real ~/.codex by
+    // default; callers may still override CODEX_HOME explicitly via `env`.
+    env: { ...process.env, CODEX_HOME: path.join(runDir, 'codex-home'), ...env },
+  });
   options.onChild?.(child);
   let stderr = '';
   child.stderr.on('data', data => { stderr += data; });

@@ -47,7 +47,13 @@ test('reports an occupied listen port without an unhandled error stack', async (
       GATEWAY,
       '--config', configPath,
       '--port', String(port),
-    ], { cwd: ROOT, encoding: 'utf8', timeout: 5000 });
+    ], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      timeout: 5000,
+      // isolate native Codex agent sync from the real ~/.codex
+      env: { ...process.env, CODEX_HOME: path.join(runDir, 'codex-home') },
+    });
 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /address already in use/);

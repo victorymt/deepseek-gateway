@@ -1,4 +1,4 @@
-import { useCallback, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useState, type FormEvent } from "react"
 import { PencilIcon, PlusIcon, Trash2Icon, UsersIcon } from "lucide-react"
 
 import { draftAfterSubmit } from "@/components/operations-draft-state"
@@ -37,7 +37,11 @@ type AgentsData = {
 
 const initialAgentsData: AgentsData = { providerConfig: null, agents: [] }
 
-export default function AgentsPage({ locale, active }: OperationsPageProps) {
+export default function AgentsPage({
+  locale,
+  active,
+  onDirtyChange,
+}: OperationsPageProps) {
   const zh = locale === "zh-CN"
   const [draft, setDraft] = useState<SubagentDraft | null>(null)
   const load = useCallback(async (signal: AbortSignal) => {
@@ -50,6 +54,11 @@ export default function AgentsPage({ locale, active }: OperationsPageProps) {
   const page = useOperationsPage(load, active, initialAgentsData)
   const { providerConfig, agents } = page.data
   useOperationsAutoRefresh(page.refresh, 0, Boolean(draft), active)
+
+  useEffect(() => {
+    onDirtyChange?.(Boolean(draft))
+    return () => onDirtyChange?.(false)
+  }, [draft, onDirtyChange])
 
   const selectedProvider = providerConfig?.providers.find(
     (provider) => provider.id === draft?.providerId

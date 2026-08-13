@@ -36,6 +36,7 @@ type UseProviderManagerOptions = {
   setupMode: boolean
   onConfigured?: () => Promise<void>
   onChanged?: () => Promise<void> | void
+  onDirtyChange?: (dirty: boolean) => void
 }
 
 export type ProviderConnectionResult = {
@@ -87,10 +88,12 @@ export function useProviderManager({
   setupMode,
   onConfigured,
   onChanged,
+  onDirtyChange,
 }: UseProviderManagerOptions) {
   const [config, setConfig] = useState<ProviderConfig | null>(null)
   const [loading, setLoading] = useState(true)
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [discardDialogOpen, setDiscardDialogOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState<ProviderDraft>(createEmptyProviderDraft)
   const [saving, setSaving] = useState(false)
@@ -115,6 +118,12 @@ export function useProviderManager({
   const baselineDraft = useRef<ProviderDraft | null>(null)
   const baselineRevision = useRef<number | null>(null)
   const dialogRequests = useRef(new Map<string, AbortController>())
+
+  useEffect(() => {
+    const dirty = dialogOpen && JSON.stringify(draft) !== initialDraft.current
+    onDirtyChange?.(dirty)
+    return () => onDirtyChange?.(false)
+  }, [dialogOpen, draft, onDirtyChange])
 
   function abortDialogRequests() {
     for (const controller of dialogRequests.current.values()) controller.abort()
@@ -420,7 +429,14 @@ export function useProviderManager({
       return
     }
     const dirty = JSON.stringify(draft) !== initialDraft.current
-    if (dirty && !window.confirm(messages.discardChanges)) return
+    if (dirty) {
+      setDiscardDialogOpen(true)
+      return
+    }
+    closeDialog()
+  }
+
+  function closeDialog() {
     abortDialogRequests()
     dialogSession.current += 1
     setSaving(false)
@@ -428,6 +444,11 @@ export function useProviderManager({
     setTestingBalance(false)
     setDialogOpen(false)
     setDialogError("")
+  }
+
+  function discardDialogChanges() {
+    setDiscardDialogOpen(false)
+    closeDialog()
   }
 
   return {
@@ -438,6 +459,8 @@ export function useProviderManager({
     config,
     connectionResults,
     deleteProvider,
+    discardDialogChanges,
+    discardDialogOpen,
     dialogError,
     dialogOpen,
     draft,
@@ -458,6 +481,7 @@ export function useProviderManager({
     saveProvider,
     saving,
     setDialogOpen: changeDialogOpen,
+    setDiscardDialogOpen,
     setDraft,
     testBalanceQuery,
     testingBalance,

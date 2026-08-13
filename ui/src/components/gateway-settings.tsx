@@ -170,7 +170,13 @@ function draftFromSettings(settings: GatewaySettings): Draft {
   }
 }
 
-export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
+export function GatewaySettingsPanel({
+  locale,
+  onDirtyChange,
+}: {
+  locale: Locale
+  onDirtyChange?: (dirty: boolean) => void
+}) {
   const t = copy[locale]
   const [settings, setSettings] = useState<GatewaySettings | null>(null)
   const [draft, setDraft] = useState<Draft>(emptyDraft)
@@ -182,6 +188,11 @@ export function GatewaySettingsPanel({ locale }: { locale: Locale }) {
   const [dirty, setDirty] = useState(false)
   const activeRequest = useRef<AbortController | null>(null)
   const requestSequence = useRef(0)
+
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+    return () => onDirtyChange?.(false)
+  }, [dirty, onDirtyChange])
 
   const refresh = useCallback(async () => {
     const sequence = ++requestSequence.current

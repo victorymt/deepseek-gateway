@@ -1,4 +1,10 @@
-import { useRef, useState, type ChangeEvent, type DragEvent } from "react"
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+} from "react"
 import { FileUpIcon, UploadIcon } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -25,6 +31,7 @@ import { Textarea } from "@/components/ui/textarea"
 import type { KeyImportResult } from "@/gateway-types"
 import { apiRequest } from "@/lib/api-request"
 
+import { ProviderDiscardDialog } from "../providers/provider-discard-dialog"
 import type { ProviderKeyCopy } from "./types"
 
 type ImportMode = "text" | "file"
@@ -37,6 +44,7 @@ export function ImportKeysDialog({
   open,
   onOpenChange,
   onSuccess,
+  onDirtyChange,
 }: {
   providerId: string
   providerName: string
@@ -44,6 +52,7 @@ export function ImportKeysDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
   onSuccess: (result: KeyImportResult) => Promise<void>
+  onDirtyChange?: (source: string, dirty: boolean) => void
 }) {
   const [mode, setMode] = useState<ImportMode>("text")
   const [keysText, setKeysText] = useState("")
@@ -53,7 +62,17 @@ export function ImportKeysDialog({
   const [alwaysTry, setAlwaysTry] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
+  const [discardOpen, setDiscardOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const dirty =
+    open &&
+    (Boolean(keysText.trim()) || weight !== "1" || !enabled || alwaysTry)
+
+  useEffect(() => {
+    const source = `key-import:${providerId}`
+    onDirtyChange?.(source, dirty)
+    return () => onDirtyChange?.(source, false)
+  }, [dirty, onDirtyChange, providerId])
 
   async function loadFile(file: File) {
     if (!/\.(txt|json)$/i.test(file.name)) {
@@ -131,135 +150,161 @@ export function ImportKeysDialog({
     if (fileInputRef.current) fileInputRef.current.value = ""
   }
 
+  function handleOpenChange(nextOpen: boolean) {
+    if (nextOpen) {
+      onOpenChange(true)
+      return
+    }
+    if (loading) return
+    if (dirty) {
+      setDiscardOpen(true)
+      return
+    }
+    onOpenChange(false)
+  }
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[min(90vh,760px)] overflow-y-auto sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <FileUpIcon />
-            {copy.importKeysTitle}
-          </DialogTitle>
-          <DialogDescription>
-            {copy.importKeysDescription(providerName)}
-          </DialogDescription>
-        </DialogHeader>
+    <>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
+        <DialogContent className="max-h-[min(90vh,760px)] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileUpIcon />
+              {copy.importKeysTitle}
+            </DialogTitle>
+            <DialogDescription>
+              {copy.importKeysDescription(providerName)}
+            </DialogDescription>
+          </DialogHeader>
 
-        {error && (
-          <Alert variant="destructive">
-            <AlertTitle>{copy.importFailed}</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+          {error && (
+            <Alert variant="destructive">
+              <AlertTitle>{copy.importFailed}</AlertTitle>
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
 
-        <Tabs value={mode} onValueChange={handleModeChange}>
-          <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="text">{copy.importText}</TabsTrigger>
-            <TabsTrigger value="file">{copy.importFile}</TabsTrigger>
-          </TabsList>
-          <TabsContent value="text" className="pt-3">
-            <Textarea
-              value={keysText}
-              onChange={(event) => setKeysText(event.target.value)}
-              placeholder={copy.importPlaceholder}
-              className="min-h-56 resize-y font-mono text-xs"
-              aria-label={copy.importText}
-              disabled={loading}
-            />
-          </TabsContent>
-          <TabsContent value="file" className="pt-3">
-            <div
-              className="flex min-h-56 flex-col items-center justify-center gap-3 rounded-lg border border-dashed p-6 text-center"
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={handleFileDrop}
-            >
-              <UploadIcon className="size-8 text-muted-foreground" />
-              <div className="flex flex-col gap-1">
-                <p className="text-sm font-medium">
-                  {fileName || copy.chooseFile}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {copy.importFileHint}
-                </p>
-              </div>
-              <Input
-                ref={fileInputRef}
-                type="file"
-                accept=".txt,.json,text/plain,application/json"
-                className="sr-only"
-                onChange={(event) => void handleFileChange(event)}
+          <Tabs value={mode} onValueChange={handleModeChange}>
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="text">{copy.importText}</TabsTrigger>
+              <TabsTrigger value="file">{copy.importFile}</TabsTrigger>
+            </TabsList>
+            <TabsContent value="text" className="pt-3">
+              <Textarea
+                value={keysText}
+                onChange={(event) => setKeysText(event.target.value)}
+                placeholder={copy.importPlaceholder}
+                className="min-h-56 resize-y font-mono text-xs"
+                aria-label={copy.importText}
                 disabled={loading}
               />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={loading}
+            </TabsContent>
+            <TabsContent value="file" className="pt-3">
+              <div
+                className="flex min-h-56 flex-col items-center justify-center gap-3 rounded-lg border border-dashed p-6 text-center"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={handleFileDrop}
               >
-                <UploadIcon />
-                {copy.chooseFile}
-              </Button>
-            </div>
-          </TabsContent>
-        </Tabs>
+                <UploadIcon className="size-8 text-muted-foreground" />
+                <div className="flex flex-col gap-1">
+                  <p className="text-sm font-medium">
+                    {fileName || copy.chooseFile}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {copy.importFileHint}
+                  </p>
+                </div>
+                <Input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".txt,.json,text/plain,application/json"
+                  className="sr-only"
+                  onChange={(event) => void handleFileChange(event)}
+                  disabled={loading}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={loading}
+                >
+                  <UploadIcon />
+                  {copy.chooseFile}
+                </Button>
+              </div>
+            </TabsContent>
+          </Tabs>
 
-        <div className="grid gap-4 sm:grid-cols-3">
-          <Field>
-            <FieldLabel htmlFor="import-key-weight">{copy.weight}</FieldLabel>
-            <Input
-              id="import-key-weight"
-              type="number"
-              min={0}
-              step="any"
-              value={weight}
-              onChange={(event) => setWeight(event.target.value)}
-              disabled={loading}
-            />
-          </Field>
-          <Field orientation="horizontal" className="sm:col-span-2">
-            <FieldContent>
-              <FieldLabel>{copy.importEnabled}</FieldLabel>
-              <FieldDescription>{copy.keyEnabled}</FieldDescription>
-            </FieldContent>
-            <Switch
-              aria-label={copy.importEnabled}
-              checked={enabled}
-              onCheckedChange={setEnabled}
-              disabled={loading}
-            />
-          </Field>
-          <Field orientation="horizontal" className="sm:col-span-3">
-            <FieldContent>
-              <FieldLabel>{copy.importAlwaysTry}</FieldLabel>
-              <FieldDescription>{copy.alwaysTryDescription}</FieldDescription>
-            </FieldContent>
-            <Switch
-              aria-label={copy.importAlwaysTry}
-              checked={alwaysTry}
-              onCheckedChange={setAlwaysTry}
-              disabled={loading}
-            />
-          </Field>
-        </div>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field>
+              <FieldLabel htmlFor="import-key-weight">{copy.weight}</FieldLabel>
+              <Input
+                id="import-key-weight"
+                type="number"
+                min={0}
+                step="any"
+                value={weight}
+                onChange={(event) => setWeight(event.target.value)}
+                disabled={loading}
+              />
+            </Field>
+            <Field orientation="horizontal" className="sm:col-span-2">
+              <FieldContent>
+                <FieldLabel>{copy.importEnabled}</FieldLabel>
+                <FieldDescription>{copy.keyEnabled}</FieldDescription>
+              </FieldContent>
+              <Switch
+                aria-label={copy.importEnabled}
+                checked={enabled}
+                onCheckedChange={setEnabled}
+                disabled={loading}
+              />
+            </Field>
+            <Field orientation="horizontal" className="sm:col-span-3">
+              <FieldContent>
+                <FieldLabel>{copy.importAlwaysTry}</FieldLabel>
+                <FieldDescription>{copy.alwaysTryDescription}</FieldDescription>
+              </FieldContent>
+              <Switch
+                aria-label={copy.importAlwaysTry}
+                checked={alwaysTry}
+                onCheckedChange={setAlwaysTry}
+                disabled={loading}
+              />
+            </Field>
+          </div>
 
-        <DialogFooter>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-            disabled={loading}
-          >
-            {copy.cancel}
-          </Button>
-          <Button
-            type="button"
-            onClick={() => void handleSubmit()}
-            disabled={!hasInput || !validWeight || loading}
-          >
-            {loading && <Spinner />}
-            {copy.importSubmit}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => handleOpenChange(false)}
+              disabled={loading}
+            >
+              {copy.cancel}
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleSubmit()}
+              disabled={!hasInput || !validWeight || loading}
+            >
+              {loading && <Spinner />}
+              {copy.importSubmit}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <ProviderDiscardDialog
+        open={discardOpen}
+        title={copy.discardChanges}
+        cancel={copy.cancel}
+        discard={copy.discard}
+        onOpenChange={setDiscardOpen}
+        onDiscard={() => {
+          setDiscardOpen(false)
+          onOpenChange(false)
+        }}
+      />
+    </>
   )
 }

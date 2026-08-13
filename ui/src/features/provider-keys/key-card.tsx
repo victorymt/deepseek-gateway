@@ -76,6 +76,7 @@ export function KeyCard({
   cannotDelete,
   onRefresh,
   onFeedback,
+  onDirtyChange,
 }: {
   providerId: string
   keyInfo: GatewayKey
@@ -86,6 +87,7 @@ export function KeyCard({
   cannotDelete: boolean
   onRefresh: () => Promise<void>
   onFeedback: (feedback: KeyFeedback) => void
+  onDirtyChange?: (source: string, dirty: boolean) => void
 }) {
   const switchId = useId()
   const alwaysTryId = useId()
@@ -99,12 +101,12 @@ export function KeyCard({
     toggle,
     updateWeight,
   } = useKeyActions({
-      providerId,
-      keyName: keyInfo.name,
-      copy,
-      onRefresh,
-      onFeedback,
-    })
+    providerId,
+    keyName: keyInfo.name,
+    copy,
+    onRefresh,
+    onFeedback,
+  })
   const metrics = [
     [copy.columns.requests, keyInfo.total],
     [copy.columns.success, keyInfo.success],
@@ -239,6 +241,7 @@ export function KeyCard({
               disabled={pending !== null}
               pending={pending === "weight"}
               onSubmit={updateWeight}
+              onDirtyChange={onDirtyChange}
             />
             <AlertDialog>
               <AlertDialogTrigger

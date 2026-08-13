@@ -107,6 +107,7 @@ export const providerCopy = {
     balanceTested: (value: string) => `Balance query succeeded · ${value}`,
     cancel: "Cancel",
     discardChanges: "Discard unsaved provider changes?",
+    discard: "Discard changes",
     concurrentChange:
       "Provider configuration changed after this editor was opened. Close and reopen the editor before saving.",
     reenterKeysForOrigin:
@@ -181,8 +182,7 @@ export const providerCopy = {
     contextWindowDescription:
       "留空时使用 Native Responses 默认值 128000 tokens。",
     parallelToolCalls: "并行工具调用",
-    parallelToolCallsDescription:
-      "声明此 Responses 模型能够并行执行工具调用。",
+    parallelToolCallsDescription: "声明此 Responses 模型能够并行执行工具调用。",
     baseInstructions: "基础指令",
     baseInstructionsPlaceholder: "使用中性的 Codex 基础指令",
     hostedWebSearch: "托管网页搜索",
@@ -195,8 +195,7 @@ export const providerCopy = {
     customApplyPatchUnavailable:
       "自定义 apply_patch 要求上游使用 Responses 协议。",
     reasoning: "思考强度",
-    reasoningDescription:
-      "向 Codex 声明模型支持的思考级别，并映射到上游参数。",
+    reasoningDescription: "向 Codex 声明模型支持的思考级别，并映射到上游参数。",
     reasoningLevels: "可用级别",
     reasoningParameter: "Chat 参数",
     reasoningValues: "上游取值",
@@ -225,6 +224,7 @@ export const providerCopy = {
     balanceTested: (value: string) => `额度查询成功 · ${value}`,
     cancel: "取消",
     discardChanges: "放弃尚未保存的 Provider 修改？",
+    discard: "放弃更改",
     concurrentChange:
       "打开编辑器后 Provider 配置已发生变化。请关闭并重新打开编辑器后再保存。",
     reenterKeysForOrigin: "更改 Provider 来源前，请重新输入所有现有 API 密钥。",

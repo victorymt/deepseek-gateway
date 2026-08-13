@@ -18,6 +18,7 @@ export type OperationsPageProps = {
   locale: Locale
   health: OperationsHealth
   active: boolean
+  onDirtyChange?: (dirty: boolean) => void
 }
 
 export type IntegrationDraft = {

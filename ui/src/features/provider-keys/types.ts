@@ -7,6 +7,8 @@ export type ProviderKeyCopy = {
   actionFailed: string
   balanceRefreshed: string
   cancel: string
+  discard: string
+  discardChanges: string
   deleteKey: string
   deleteKeyDescription: (name: string) => string
   deleteKeyTitle: string

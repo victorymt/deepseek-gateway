@@ -1,4 +1,4 @@
-import { useCallback, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useState, type FormEvent } from "react"
 import { PencilIcon, PlusIcon, Trash2Icon, WifiIcon } from "lucide-react"
 
 import { draftAfterSubmit } from "@/components/operations-draft-state"
@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import type { Integration } from "@/gateway-types"
-import { apiRequest } from "@/lib/api-request"
+import { ApiRequestError, apiRequest } from "@/lib/api-request"
 
 import { ConfirmAction, OperationsPageShell } from "./page-shell"
 import { useOperationsPage } from "./page-state"
@@ -32,9 +32,16 @@ import type { IntegrationDraft, OperationsPageProps } from "./types"
 export default function IntegrationsPage({
   locale,
   active,
+  onDirtyChange,
 }: OperationsPageProps) {
   const zh = locale === "zh-CN"
   const [draft, setDraft] = useState<IntegrationDraft | null>(null)
+  const [testResults, setTestResults] = useState<
+    Record<
+      string,
+      { ok: boolean; status?: number; latencyMs?: number; message?: string }
+    >
+  >({})
   const load = useCallback(async (signal: AbortSignal) => {
     const result = await apiRequest<{ integrations: Integration[] }>(
       "/api/integrations",
@@ -44,6 +51,11 @@ export default function IntegrationsPage({
   }, [])
   const page = useOperationsPage(load, active, [])
   const integrations = page.data
+
+  useEffect(() => {
+    onDirtyChange?.(Boolean(draft))
+    return () => onDirtyChange?.(false)
+  }, [draft, onDirtyChange])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -59,6 +71,48 @@ export default function IntegrationsPage({
     )
     if (!page.isMounted()) return
     setDraft((current) => draftAfterSubmit(current, submitted, saved))
+  }
+
+  async function testIntegration(id: string) {
+    const result = await page.actionWithResult<{
+      ok: boolean
+      status?: number
+      latencyMs?: number
+      error?: { message?: string }
+    }>(
+      `/api/integrations/${id}/test`,
+      { method: "POST" },
+      zh ? "集成测试完成" : "Integration test complete"
+    )
+    if (result.ok && result.data) {
+      setTestResults((current) => ({
+        ...current,
+        [id]: {
+          ok: result.data!.ok,
+          status: result.data!.status,
+          latencyMs: result.data!.latencyMs,
+          message: result.data!.error?.message,
+        },
+      }))
+      return
+    }
+    if (result.error instanceof ApiRequestError) {
+      const requestError = result.error
+      const payload = requestError.payload as {
+        error?: { message?: string }
+        status?: number
+        latencyMs?: number
+      } | null
+      setTestResults((current) => ({
+        ...current,
+        [id]: {
+          ok: false,
+          status: payload?.status ?? requestError.status,
+          latencyMs: payload?.latencyMs,
+          message: payload?.error?.message || requestError.message,
+        },
+      }))
+    }
   }
 
   return (
@@ -96,7 +150,9 @@ export default function IntegrationsPage({
               <form className="draft-form" onSubmit={submit}>
                 <FieldGroup>
                   <Field>
-                    <FieldLabel htmlFor="integration-name">Name</FieldLabel>
+                    <FieldLabel htmlFor="integration-name">
+                      {zh ? "名称" : "Name"}
+                    </FieldLabel>
                     <Input
                       id="integration-name"
                       required
@@ -107,7 +163,7 @@ export default function IntegrationsPage({
                     />
                   </Field>
                   <Field>
-                    <FieldLabel>Type</FieldLabel>
+                    <FieldLabel>{zh ? "类型" : "Type"}</FieldLabel>
                     <Select
                       value={draft.type}
                       onValueChange={(value) =>
@@ -127,7 +183,9 @@ export default function IntegrationsPage({
                     </Select>
                   </Field>
                   <Field>
-                    <FieldLabel htmlFor="integration-url">Base URL</FieldLabel>
+                    <FieldLabel htmlFor="integration-url">
+                      {zh ? "基础 URL" : "Base URL"}
+                    </FieldLabel>
                     <Input
                       id="integration-url"
                       required
@@ -141,7 +199,7 @@ export default function IntegrationsPage({
                   </Field>
                   <Field orientation="horizontal">
                     <FieldLabel htmlFor="integration-enabled">
-                      Enabled
+                      {zh ? "启用" : "Enabled"}
                     </FieldLabel>
                     <Switch
                       id="integration-enabled"
@@ -211,16 +269,16 @@ export default function IntegrationsPage({
                     variant="outline"
                     size="sm"
                     disabled={Boolean(page.pendingAction)}
-                    onClick={() =>
-                      void page.action(
-                        `/api/integrations/${item.id}/test`,
-                        { method: "POST" },
-                        zh ? "集成已测试" : "Integration tested"
-                      )
-                    }
+                    onClick={() => void testIntegration(item.id)}
                   >
                     <WifiIcon data-icon="inline-start" />
-                    {zh ? "测试" : "Test"}
+                    {page.pendingAction === `/api/integrations/${item.id}/test`
+                      ? zh
+                        ? "测试中..."
+                        : "Testing..."
+                      : zh
+                        ? "测试"
+                        : "Test"}
                   </Button>
                   <Button
                     variant="ghost"
@@ -248,6 +306,13 @@ export default function IntegrationsPage({
                   </ConfirmAction>
                 </span>
               </div>
+              {testResults[item.id] && (
+                <p className="text-xs text-muted-foreground" role="status">
+                  {testResults[item.id].ok
+                    ? `${zh ? "HTTP 状态" : "HTTP"} ${testResults[item.id].status ?? "-"} · ${testResults[item.id].latencyMs ?? "-"} ms`
+                    : `${zh ? "测试失败" : "Test failed"}${testResults[item.id].status ? ` · HTTP ${testResults[item.id].status}` : ""}${testResults[item.id].latencyMs !== undefined ? ` · ${testResults[item.id].latencyMs} ms` : ""}${testResults[item.id].message ? ` · ${testResults[item.id].message}` : ""}`}
+                </p>
+              )}
             </CardContent>
           </Card>
         ))}

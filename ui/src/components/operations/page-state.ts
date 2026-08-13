@@ -14,6 +14,12 @@ function isAbortError(cause: unknown) {
   return cause instanceof Error && cause.name === "AbortError"
 }
 
+export type OperationsActionResult<T> = {
+  ok: boolean
+  data?: T
+  error?: unknown
+}
+
 export function useOperationsPage<T>(
   load: (signal: AbortSignal) => Promise<T>,
   active: boolean,
@@ -90,25 +96,37 @@ export function useOperationsPage<T>(
     requestRef.current = null
   }, [active, refresh])
 
-  const action = useCallback(
-    async (path: string, init?: RequestInit, message = "Saved") => {
+  const actionWithResult = useCallback(
+    async <T>(
+      path: string,
+      init?: RequestInit,
+      message = "Saved"
+    ): Promise<OperationsActionResult<T>> => {
       setPendingAction(path)
       setError("")
       setNotice("")
       try {
-        await apiRequest(path, init)
-        if (!mountedRef.current) return true
+        const result = await apiRequest<T>(path, init)
+        if (!mountedRef.current) return { ok: true, data: result }
         setNotice(message)
         if (activeRef.current) await refresh()
-        return true
+        return { ok: true, data: result }
       } catch (cause) {
         if (mountedRef.current) setError(errorMessage(cause))
-        return false
+        return { ok: false, error: cause }
       } finally {
         if (mountedRef.current) setPendingAction("")
       }
     },
     [refresh]
+  )
+
+  const action = useCallback(
+    async (path: string, init?: RequestInit, message = "Saved") => {
+      const result = await actionWithResult(path, init, message)
+      return result.ok
+    },
+    [actionWithResult]
   )
 
   const isMounted = useCallback(() => mountedRef.current, [])
@@ -121,6 +139,7 @@ export function useOperationsPage<T>(
     pendingAction,
     refresh,
     action,
+    actionWithResult,
     isMounted,
   }
 }

@@ -102,6 +102,67 @@ describe("operations panel state", () => {
     await screen.findByRole("button", { name: "Add integration" })
     expect(screen.queryByLabelText("Name")).not.toBeInTheDocument()
   })
+
+  test("reports integration drafts as dirty until they are cancelled", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) =>
+        Promise.resolve(json(apiPayload(String(input))))
+      )
+    )
+    const onDirtyChange = vi.fn()
+    render(
+      <OperationsPanel
+        locale="en"
+        health={null}
+        kind="integrations"
+        onDirtyChange={onDirtyChange}
+      />
+    )
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add integration" })
+    )
+    await waitFor(() =>
+      expect(onDirtyChange).toHaveBeenCalledWith("integrations", true)
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    await waitFor(() =>
+      expect(onDirtyChange).toHaveBeenCalledWith("integrations", false)
+    )
+  })
+
+  test("shows integration test status and latency", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        if (url === "/api/integrations" && !init?.method) {
+          return Promise.resolve(
+            json({
+              integrations: [
+                {
+                  id: "status-api",
+                  name: "Status API",
+                  type: "openai",
+                  baseUrl: "https://status.example/v1",
+                  enabled: true,
+                },
+              ],
+            })
+          )
+        }
+        if (url === "/api/integrations/status-api/test") {
+          return Promise.resolve(json({ ok: true, status: 204, latencyMs: 37 }))
+        }
+        return Promise.resolve(json(apiPayload(url)))
+      })
+    )
+    render(<OperationsPanel locale="en" health={null} kind="integrations" />)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Test" }))
+    expect(await screen.findByText("HTTP 204 · 37 ms")).toBeInTheDocument()
+  })
 })
 
 type Deferred = {

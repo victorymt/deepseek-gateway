@@ -103,6 +103,7 @@ type OperationsPanelProps = {
   kind: OperationsKind
   locale: Locale
   health: OperationsHealth
+  onDirtyChange?: (source: string, dirty: boolean) => void
 }
 
 export class OperationsPanel extends Component<
@@ -110,6 +111,12 @@ export class OperationsPanel extends Component<
   { visited: Set<OperationsKind> }
 > {
   state = { visited: new Set<OperationsKind>([this.props.kind]) }
+  private readonly dirtyHandlers = Object.fromEntries(
+    operationsKinds.map((pageKind) => [
+      pageKind,
+      (dirty: boolean) => this.props.onDirtyChange?.(pageKind, dirty),
+    ])
+  ) as Record<OperationsKind, (dirty: boolean) => void>
 
   static getDerivedStateFromProps(
     props: OperationsPanelProps,
@@ -137,7 +144,12 @@ export class OperationsPanel extends Component<
             >
               <OperationsPageErrorBoundary locale={locale}>
                 <Suspense fallback={<OperationsPageFallback />}>
-                  <Page locale={locale} health={health} active={active} />
+                  <Page
+                    locale={locale}
+                    health={health}
+                    active={active}
+                    onDirtyChange={this.dirtyHandlers[pageKind]}
+                  />
                 </Suspense>
               </OperationsPageErrorBoundary>
             </div>

@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { providerCopy } from "@/features/providers/provider-copy"
 import { ProviderCard } from "@/features/providers/provider-card"
 import { ProviderEditorDialog } from "@/features/providers/provider-editor-dialog"
+import { ProviderDiscardDialog } from "@/features/providers/provider-discard-dialog"
 import { useProviderManager } from "@/features/providers/use-provider-manager"
 
 export function ProviderManager({
@@ -21,11 +22,13 @@ export function ProviderManager({
   setupMode = false,
   onConfigured,
   onChanged,
+  onDirtyChange,
 }: {
   locale: Locale
   setupMode?: boolean
   onConfigured?: () => Promise<void>
   onChanged?: () => Promise<void> | void
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const t = providerCopy[locale]
   const {
@@ -34,6 +37,8 @@ export function ProviderManager({
     balanceTestNotice,
     config,
     deleteProvider,
+    discardDialogChanges,
+    discardDialogOpen,
     dialogError,
     dialogOpen,
     draft,
@@ -53,6 +58,7 @@ export function ProviderManager({
     saveProvider,
     saving,
     setDialogOpen,
+    setDiscardDialogOpen,
     setDraft,
     testBalanceQuery,
     testingBalance,
@@ -64,6 +70,7 @@ export function ProviderManager({
     setupMode,
     onConfigured,
     onChanged,
+    onDirtyChange,
   })
 
   return (
@@ -153,6 +160,14 @@ export function ProviderManager({
         onOpenChange={setDialogOpen}
         onSubmit={saveProvider}
         onTestBalance={testBalanceQuery}
+      />
+      <ProviderDiscardDialog
+        open={discardDialogOpen}
+        title={t.discardChanges}
+        cancel={t.cancel}
+        discard={t.discard}
+        onOpenChange={setDiscardDialogOpen}
+        onDiscard={discardDialogChanges}
       />
     </section>
   )

@@ -16,11 +16,13 @@ export function ProviderKeySection({
   locale,
   copy,
   onRefresh,
+  onDirtyChange,
 }: {
   provider: ProviderHealth
   locale: Locale
   copy: ProviderKeyCopy
   onRefresh: () => Promise<void>
+  onDirtyChange?: (source: string, dirty: boolean) => void
 }) {
   const [feedback, setFeedback] = useState<KeyFeedback>(null)
   const [importOpen, setImportOpen] = useState(false)
@@ -93,6 +95,7 @@ export function ProviderKeySection({
             }
             onRefresh={onRefresh}
             onFeedback={setFeedback}
+            onDirtyChange={onDirtyChange}
           />
         ))}
       </div>
@@ -103,6 +106,7 @@ export function ProviderKeySection({
           copy={copy}
           open
           onOpenChange={setImportOpen}
+          onDirtyChange={onDirtyChange}
           onSuccess={async (result: KeyImportResult) => {
             setFeedback({
               kind: "success",

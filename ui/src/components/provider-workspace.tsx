@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import {
   ArrowLeftIcon,
   PencilIcon,
@@ -31,6 +31,7 @@ import { ProviderKeySection } from "@/features/provider-keys/provider-key-sectio
 import type { ProviderKeyCopy } from "@/features/provider-keys/types"
 import { providerCopy } from "@/features/providers/provider-copy"
 import { ProviderEditorDialog } from "@/features/providers/provider-editor-dialog"
+import { ProviderDiscardDialog } from "@/features/providers/provider-discard-dialog"
 import { useProviderManager } from "@/features/providers/use-provider-manager"
 import type { Health } from "@/gateway-types"
 import { formatNumber } from "@/lib/format-number"
@@ -51,11 +52,13 @@ export function ProviderWorkspace({
   locale,
   onRefresh,
   keyCopy,
+  onDirtyChange,
 }: {
   health: Health | null
   locale: Locale
   onRefresh: () => Promise<void>
   keyCopy: ProviderKeyCopy
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const t = providerCopy[locale]
   const [query, setQuery] = useState("")
@@ -63,6 +66,23 @@ export function ProviderWorkspace({
   const [detailTab, setDetailTab] = useState<DetailTab>("overview")
   const [detailVisible, setDetailVisible] = useState(false)
   const [selectedId, setSelectedId] = useState(health?.defaultProvider || "")
+  const [dirtySources, setDirtySources] = useState<Record<string, boolean>>({})
+  const reportWorkspaceDirty = useCallback((source: string, dirty: boolean) => {
+    setDirtySources((current) => {
+      if (current[source] === dirty) return current
+      return { ...current, [source]: dirty }
+    })
+  }, [])
+  const reportEditorDirty = useCallback(
+    (dirty: boolean) => reportWorkspaceDirty("provider-editor", dirty),
+    [reportWorkspaceDirty]
+  )
+
+  useEffect(() => {
+    onDirtyChange?.(Object.values(dirtySources).some(Boolean))
+    return () => onDirtyChange?.(false)
+  }, [dirtySources, onDirtyChange])
+
   const manager = useProviderManager({
     locale,
     messages: t,
@@ -71,6 +91,7 @@ export function ProviderWorkspace({
       notifyConfigChanged()
       await onRefresh()
     },
+    onDirtyChange: reportEditorDirty,
   })
 
   const providers = manager.config?.providers
@@ -124,12 +145,16 @@ export function ProviderWorkspace({
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder={locale === "zh-CN" ? "搜索 Provider..." : "Search providers..."}
+              placeholder={
+                locale === "zh-CN" ? "搜索 Provider..." : "Search providers..."
+              }
             />
           </label>
           <button
             className={`filter-button ${enabledOnly ? "active" : ""}`}
-            aria-label={locale === "zh-CN" ? "仅显示已启用" : "Show enabled only"}
+            aria-label={
+              locale === "zh-CN" ? "仅显示已启用" : "Show enabled only"
+            }
             aria-pressed={enabledOnly}
             onClick={() => setEnabledOnly((value) => !value)}
           >
@@ -164,11 +189,19 @@ export function ProviderWorkspace({
                   <span className="provider-list-copy">
                     <strong>{provider.name}</strong>
                     <small>
-                      {provider.models.length} {locale === "zh-CN" ? "个模型" : provider.models.length === 1 ? "model" : "models"}
+                      {provider.models.length}{" "}
+                      {locale === "zh-CN"
+                        ? "个模型"
+                        : provider.models.length === 1
+                          ? "model"
+                          : "models"}
                     </small>
                   </span>
                   {provider.id === manager.config?.defaultProvider && (
-                    <StarIcon className="provider-star" aria-label={t.default} />
+                    <StarIcon
+                      className="provider-star"
+                      aria-label={t.default}
+                    />
                   )}
                   <span
                     className={`status-dot ${result?.state === "available" ? "online" : result?.state === "failed" ? "failed" : "offline"}`}
@@ -182,16 +215,22 @@ export function ProviderWorkspace({
         </div>
       </div>
 
-      <div className={`provider-detail-pane ${detailVisible ? "mobile-visible" : ""}`}>
+      <div
+        className={`provider-detail-pane ${detailVisible ? "mobile-visible" : ""}`}
+      >
         <div className="detail-topbar">
           <button
             className="back-button"
-            aria-label={locale === "zh-CN" ? "返回 Provider 列表" : "Back to providers"}
+            aria-label={
+              locale === "zh-CN" ? "返回 Provider 列表" : "Back to providers"
+            }
             onClick={() => setDetailVisible(false)}
           >
             <ArrowLeftIcon />
           </button>
-          <h2>{locale === "zh-CN" ? "Provider 配置" : "Provider configuration"}</h2>
+          <h2>
+            {locale === "zh-CN" ? "Provider 配置" : "Provider configuration"}
+          </h2>
           <Button className="add-provider-button" onClick={manager.openCreate}>
             <PlusIcon data-icon="inline-start" />
             {t.add}
@@ -216,20 +255,21 @@ export function ProviderWorkspace({
                 <p className="provider-id-line">{selected.id}</p>
               </div>
               <div className="detail-actions">
-                {selected.id !== manager.config?.defaultProvider && selected.enabled && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      void manager.patchProvider(selected.id, {
-                        makeDefault: true,
-                      })
-                    }
-                  >
-                    <StarIcon data-icon="inline-start" />
-                    {t.setDefault}
-                  </Button>
-                )}
+                {selected.id !== manager.config?.defaultProvider &&
+                  selected.enabled && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        void manager.patchProvider(selected.id, {
+                          makeDefault: true,
+                        })
+                      }
+                    >
+                      <StarIcon data-icon="inline-start" />
+                      {t.setDefault}
+                    </Button>
+                  )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -243,7 +283,11 @@ export function ProviderWorkspace({
                   )}
                   {t.test}
                 </Button>
-                <Button variant="outline" size="sm" onClick={() => manager.openEdit(selected)}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => manager.openEdit(selected)}
+                >
                   <PencilIcon data-icon="inline-start" />
                   {t.edit}
                 </Button>
@@ -264,7 +308,9 @@ export function ProviderWorkspace({
                   <AlertDialogContent>
                     <AlertDialogHeader>
                       <AlertDialogTitle>{t.deleteTitle}</AlertDialogTitle>
-                      <AlertDialogDescription>{t.deleteDescription}</AlertDialogDescription>
+                      <AlertDialogDescription>
+                        {t.deleteDescription}
+                      </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
                       <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
@@ -294,13 +340,15 @@ export function ProviderWorkspace({
             </div>
 
             <nav className="detail-tabs">
-              {([
-                ["overview", locale === "zh-CN" ? "概览" : "Overview"],
-                ["models", t.models],
-                ["usage", locale === "zh-CN" ? "用量" : "Usage"],
-                ["keys", locale === "zh-CN" ? "API 密钥" : "API keys"],
-                ["settings", locale === "zh-CN" ? "设置" : "Settings"],
-              ] as Array<[DetailTab, string]>).map(([id, label]) => (
+              {(
+                [
+                  ["overview", locale === "zh-CN" ? "概览" : "Overview"],
+                  ["models", t.models],
+                  ["usage", locale === "zh-CN" ? "用量" : "Usage"],
+                  ["keys", locale === "zh-CN" ? "API 密钥" : "API keys"],
+                  ["settings", locale === "zh-CN" ? "设置" : "Settings"],
+                ] as Array<[DetailTab, string]>
+              ).map(([id, label]) => (
                 <button
                   key={id}
                   className={detailTab === id ? "active" : ""}
@@ -316,29 +364,95 @@ export function ProviderWorkspace({
                 <section className="detail-section">
                   <h4>{locale === "zh-CN" ? "连接" : "Connection"}</h4>
                   <dl>
-                    <div><dt>{locale === "zh-CN" ? "配置" : "Configuration"}</dt><dd>{selected.enabled ? t.enabled : t.disabled}</dd></div>
-                    <div><dt>{locale === "zh-CN" ? "检测结果" : "Test result"}</dt><dd className={connection?.state === "available" ? "success-text" : connection?.state === "failed" ? "error-text" : ""}>{connectionLabel(selected.id)}</dd></div>
-                    {connection?.status !== undefined && <div><dt>HTTP</dt><dd>{connection.status} · {connection.latencyMs} ms</dd></div>}
-                    {connection?.message && <div><dt>{locale === "zh-CN" ? "错误" : "Error"}</dt><dd className="error-text">{connection.message}</dd></div>}
-                    {connection && <div><dt>{locale === "zh-CN" ? "检测时间" : "Tested"}</dt><dd>{new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "medium" }).format(connection.testedAt)}</dd></div>}
-                    <div><dt>Base URL</dt><dd className="mono">{selected.baseUrl}</dd></div>
+                    <div>
+                      <dt>{locale === "zh-CN" ? "配置" : "Configuration"}</dt>
+                      <dd>{selected.enabled ? t.enabled : t.disabled}</dd>
+                    </div>
+                    <div>
+                      <dt>{locale === "zh-CN" ? "检测结果" : "Test result"}</dt>
+                      <dd
+                        className={
+                          connection?.state === "available"
+                            ? "success-text"
+                            : connection?.state === "failed"
+                              ? "error-text"
+                              : ""
+                        }
+                      >
+                        {connectionLabel(selected.id)}
+                      </dd>
+                    </div>
+                    {connection?.status !== undefined && (
+                      <div>
+                        <dt>HTTP</dt>
+                        <dd>
+                          {connection.status} · {connection.latencyMs} ms
+                        </dd>
+                      </div>
+                    )}
+                    {connection?.message && (
+                      <div>
+                        <dt>{locale === "zh-CN" ? "错误" : "Error"}</dt>
+                        <dd className="error-text">{connection.message}</dd>
+                      </div>
+                    )}
+                    {connection && (
+                      <div>
+                        <dt>{locale === "zh-CN" ? "检测时间" : "Tested"}</dt>
+                        <dd>
+                          {new Intl.DateTimeFormat(locale, {
+                            dateStyle: "short",
+                            timeStyle: "medium",
+                          }).format(connection.testedAt)}
+                        </dd>
+                      </div>
+                    )}
+                    <div>
+                      <dt>Base URL</dt>
+                      <dd className="mono">{selected.baseUrl}</dd>
+                    </div>
                   </dl>
                 </section>
                 <section className="detail-section">
                   <h4>{locale === "zh-CN" ? "运行统计" : "Runtime totals"}</h4>
                   <dl>
-                    <div><dt>{locale === "zh-CN" ? "请求" : "Requests"}</dt><dd>{formatNumber(totals.requests, locale)}</dd></div>
-                    <div><dt>{locale === "zh-CN" ? "成功" : "Success"}</dt><dd>{formatNumber(totals.success, locale)}</dd></div>
-                    <div><dt>{locale === "zh-CN" ? "错误" : "Errors"}</dt><dd>{formatNumber(totals.errors, locale)}</dd></div>
-                    <div><dt>Tokens</dt><dd>{formatNumber(totals.tokens, locale)}</dd></div>
+                    <div>
+                      <dt>{locale === "zh-CN" ? "请求" : "Requests"}</dt>
+                      <dd>{formatNumber(totals.requests, locale)}</dd>
+                    </div>
+                    <div>
+                      <dt>{locale === "zh-CN" ? "成功" : "Success"}</dt>
+                      <dd>{formatNumber(totals.success, locale)}</dd>
+                    </div>
+                    <div>
+                      <dt>{locale === "zh-CN" ? "错误" : "Errors"}</dt>
+                      <dd>{formatNumber(totals.errors, locale)}</dd>
+                    </div>
+                    <div>
+                      <dt>Tokens</dt>
+                      <dd>{formatNumber(totals.tokens, locale)}</dd>
+                    </div>
                   </dl>
                 </section>
                 <section className="detail-section speed-section">
-                  <h4>{locale === "zh-CN" ? "可用资源" : "Available resources"}</h4>
+                  <h4>
+                    {locale === "zh-CN" ? "可用资源" : "Available resources"}
+                  </h4>
                   <dl>
-                    <div><dt>{t.models}</dt><dd>{selected.models.length}</dd></div>
-                    <div><dt>API keys</dt><dd>{selected.keys.length}</dd></div>
-                    <div><dt>{locale === "zh-CN" ? "默认模型" : "Default model"}</dt><dd>{manager.config?.defaultModel || "-"}</dd></div>
+                    <div>
+                      <dt>{t.models}</dt>
+                      <dd>{selected.models.length}</dd>
+                    </div>
+                    <div>
+                      <dt>API keys</dt>
+                      <dd>{selected.keys.length}</dd>
+                    </div>
+                    <div>
+                      <dt>
+                        {locale === "zh-CN" ? "默认模型" : "Default model"}
+                      </dt>
+                      <dd>{manager.config?.defaultModel || "-"}</dd>
+                    </div>
                   </dl>
                 </section>
               </div>
@@ -346,11 +460,27 @@ export function ProviderWorkspace({
               <section className="provider-model-list">
                 {selected.models.map((model) => (
                   <div key={model.alias}>
-                    <span><strong>{model.name}</strong><small>{model.alias} → {model.upstreamModel}</small></span>
+                    <span>
+                      <strong>{model.name}</strong>
+                      <small>
+                        {model.alias} → {model.upstreamModel}
+                      </small>
+                    </span>
                     {manager.config?.defaultModel === model.alias ? (
                       <Badge>{t.default}</Badge>
                     ) : (
-                      <Button variant="ghost" size="sm" onClick={() => void manager.patchProvider(selected.id, { makeDefault: true, defaultModel: model.alias })}>{t.setDefaultModel}</Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          void manager.patchProvider(selected.id, {
+                            makeDefault: true,
+                            defaultModel: model.alias,
+                          })
+                        }
+                      >
+                        {t.setDefaultModel}
+                      </Button>
                     )}
                   </div>
                 ))}
@@ -358,7 +488,13 @@ export function ProviderWorkspace({
             ) : detailTab === "keys" ? (
               runtime ? (
                 <div className="provider-keys-tab">
-                  <ProviderKeySection provider={runtime} locale={locale} copy={keyCopy} onRefresh={refreshKeys} />
+                  <ProviderKeySection
+                    provider={runtime}
+                    locale={locale}
+                    copy={keyCopy}
+                    onRefresh={refreshKeys}
+                    onDirtyChange={reportWorkspaceDirty}
+                  />
                 </div>
               ) : (
                 <EmptyRuntime locale={locale} />
@@ -367,18 +503,39 @@ export function ProviderWorkspace({
               <section className="detail-summary-tab">
                 <h4>{locale === "zh-CN" ? "运行时用量" : "Runtime usage"}</h4>
                 <div className="detail-summary-grid">
-                  {Object.entries(totals).map(([label, value]) => <div key={label}><span>{label}</span><strong>{formatNumber(value, locale)}</strong></div>)}
+                  {Object.entries(totals).map(([label, value]) => (
+                    <div key={label}>
+                      <span>{label}</span>
+                      <strong>{formatNumber(value, locale)}</strong>
+                    </div>
+                  ))}
                 </div>
               </section>
             ) : (
               <section className="detail-settings-tab detail-section">
-                <h4>{locale === "zh-CN" ? "Provider 设置" : "Provider settings"}</h4>
+                <h4>
+                  {locale === "zh-CN" ? "Provider 设置" : "Provider settings"}
+                </h4>
                 <dl>
-                  <div><dt>API Profile</dt><dd>{selected.apiProfile}</dd></div>
-                  <div><dt>{t.upstreamFormat}</dt><dd>{selected.upstreamFormat}</dd></div>
-                  <div><dt>{t.balanceQuery}</dt><dd>{selected.balanceQuery?.enabled ? t.enabled : t.disabled}</dd></div>
+                  <div>
+                    <dt>API Profile</dt>
+                    <dd>{selected.apiProfile}</dd>
+                  </div>
+                  <div>
+                    <dt>{t.upstreamFormat}</dt>
+                    <dd>{selected.upstreamFormat}</dd>
+                  </div>
+                  <div>
+                    <dt>{t.balanceQuery}</dt>
+                    <dd>
+                      {selected.balanceQuery?.enabled ? t.enabled : t.disabled}
+                    </dd>
+                  </div>
                 </dl>
-                <Button variant="outline" onClick={() => manager.openEdit(selected)}>
+                <Button
+                  variant="outline"
+                  onClick={() => manager.openEdit(selected)}
+                >
                   <PencilIcon data-icon="inline-start" />
                   {t.edit}
                 </Button>
@@ -389,7 +546,10 @@ export function ProviderWorkspace({
           <div className="empty-provider-detail">
             <div className="flex flex-col items-center gap-4">
               <span>{t.empty}</span>
-              <Button onClick={manager.openCreate}><PlusIcon data-icon="inline-start" />{t.add}</Button>
+              <Button onClick={manager.openCreate}>
+                <PlusIcon data-icon="inline-start" />
+                {t.add}
+              </Button>
             </div>
           </div>
         )}
@@ -417,10 +577,24 @@ export function ProviderWorkspace({
         onSubmit={manager.saveProvider}
         onTestBalance={manager.testBalanceQuery}
       />
+      <ProviderDiscardDialog
+        open={manager.discardDialogOpen}
+        title={t.discardChanges}
+        cancel={t.cancel}
+        discard={t.discard}
+        onOpenChange={manager.setDiscardDialogOpen}
+        onDiscard={manager.discardDialogChanges}
+      />
     </div>
   )
 }
 
 function EmptyRuntime({ locale }: { locale: Locale }) {
-  return <div className="empty-provider-detail">{locale === "zh-CN" ? "等待运行时密钥数据" : "Waiting for runtime key data"}</div>
+  return (
+    <div className="empty-provider-detail">
+      {locale === "zh-CN"
+        ? "等待运行时密钥数据"
+        : "Waiting for runtime key data"}
+    </div>
+  )
 }

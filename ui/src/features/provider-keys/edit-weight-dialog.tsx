@@ -1,4 +1,4 @@
-import { useId, useState, type FormEvent } from "react"
+import { useEffect, useId, useState, type FormEvent } from "react"
 import { PencilIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -19,6 +19,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 
+import { ProviderDiscardDialog } from "../providers/provider-discard-dialog"
 import type { ProviderKeyCopy } from "./types"
 
 export function EditWeightDialog({
@@ -29,6 +30,7 @@ export function EditWeightDialog({
   disabled,
   pending,
   onSubmit,
+  onDirtyChange,
 }: {
   providerId: string
   keyName: string
@@ -37,11 +39,20 @@ export function EditWeightDialog({
   disabled: boolean
   pending: boolean
   onSubmit: (weight: number) => Promise<boolean>
+  onDirtyChange?: (source: string, dirty: boolean) => void
 }) {
   const inputId = useId()
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState(String(weight))
   const [error, setError] = useState("")
+  const [discardOpen, setDiscardOpen] = useState(false)
+  const dirty = open && draft !== String(weight)
+
+  useEffect(() => {
+    const source = `key-weight:${providerId}:${keyName}`
+    onDirtyChange?.(source, dirty)
+    return () => onDirtyChange?.(source, false)
+  }, [dirty, keyName, onDirtyChange, providerId])
 
   function openDialog() {
     setDraft(String(weight))
@@ -60,6 +71,19 @@ export function EditWeightDialog({
     if (await onSubmit(nextWeight)) setOpen(false)
   }
 
+  function handleOpenChange(nextOpen: boolean) {
+    if (nextOpen) {
+      setOpen(true)
+      return
+    }
+    if (pending) return
+    if (dirty) {
+      setDiscardOpen(true)
+      return
+    }
+    setOpen(false)
+  }
+
   return (
     <>
       <Button
@@ -72,7 +96,7 @@ export function EditWeightDialog({
       >
         <PencilIcon />
       </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{copy.editWeight}</DialogTitle>
@@ -104,7 +128,7 @@ export function EditWeightDialog({
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setOpen(false)}
+                onClick={() => handleOpenChange(false)}
               >
                 {copy.cancel}
               </Button>
@@ -116,6 +140,19 @@ export function EditWeightDialog({
           </form>
         </DialogContent>
       </Dialog>
+      <ProviderDiscardDialog
+        open={discardOpen}
+        title={copy.discardChanges}
+        cancel={copy.cancel}
+        discard={copy.discard}
+        onOpenChange={setDiscardOpen}
+        onDiscard={() => {
+          setDiscardOpen(false)
+          setOpen(false)
+          setDraft(String(weight))
+          setError("")
+        }}
+      />
     </>
   )
 }

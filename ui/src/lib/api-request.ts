@@ -1,3 +1,15 @@
+export class ApiRequestError extends Error {
+  status: number
+  payload: unknown
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message)
+    this.name = "ApiRequestError"
+    this.status = status
+    this.payload = payload
+  }
+}
+
 export async function apiRequest<T>(
   url: string,
   init?: RequestInit
@@ -17,13 +29,25 @@ export async function apiRequest<T>(
     try {
       payload = (await response.json()) as typeof payload
     } catch {
-      throw new Error(`HTTP ${response.status}: invalid JSON response`)
+      throw new ApiRequestError(
+        `HTTP ${response.status}: invalid JSON response`,
+        response.status,
+        null
+      )
     }
   } else if (response.ok) {
-    throw new Error(`HTTP ${response.status}: expected JSON response`)
+    throw new ApiRequestError(
+      `HTTP ${response.status}: expected JSON response`,
+      response.status,
+      null
+    )
   }
   if (!response.ok) {
-    throw new Error(payload.error?.message || `HTTP ${response.status}`)
+    throw new ApiRequestError(
+      payload.error?.message || `HTTP ${response.status}`,
+      response.status,
+      payload
+    )
   }
   return payload as T
 }

@@ -24,6 +24,12 @@ import {
 } from "lucide-react"
 
 import { CodexSetup } from "@/components/codex-setup"
+import {
+  isOperationsSection,
+  sectionFromHash,
+  sectionHash,
+  type Section,
+} from "@/app-navigation"
 import { GatewaySettingsPanel } from "@/components/gateway-settings"
 import { useLanguage, type Locale } from "@/components/language-provider"
 import { OperationsPanel } from "@/components/operations-panel"
@@ -45,6 +51,16 @@ import {
   FieldGroup,
   FieldLabel,
 } from "@/components/ui/field"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
@@ -60,6 +76,30 @@ import { formatNumber } from "@/lib/format-number"
 import { notifyConfigChanged, useSetupActions } from "@/lib/setup-actions"
 
 type ConnectionState = "connecting" | "live" | "offline" | "auth"
+const HISTORY_INDEX_KEY = "deepseekGatewayIndex"
+const HISTORY_SCOPE_KEY = "deepseekGatewayScope"
+
+function createHistoryScope() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+
+function historyIndex(state: unknown, scope: string): number | null {
+  if (!state || typeof state !== "object") return null
+  const entry = state as Record<string, unknown>
+  if (entry[HISTORY_SCOPE_KEY] !== scope) return null
+  const value = entry[HISTORY_INDEX_KEY]
+  return typeof value === "number" && Number.isInteger(value) ? value : null
+}
+
+function historyState(index: number, scope: string) {
+  return {
+    ...(window.history.state && typeof window.history.state === "object"
+      ? window.history.state
+      : {}),
+    [HISTORY_INDEX_KEY]: index,
+    [HISTORY_SCOPE_KEY]: scope,
+  }
+}
 
 const translations = {
   en: {
@@ -74,6 +114,8 @@ const translations = {
     login: "Sign in",
     logout: "Sign out",
     invalidToken: "Incorrect token",
+    rateLimited: (seconds: number) =>
+      `Too many attempts. Try again in ${seconds}s.`,
     cannotConnect: "Cannot connect to gateway",
     operations: "OPERATIONS / GATEWAY",
     title: "Codex Provider Gateway",
@@ -136,6 +178,8 @@ const translations = {
     saveWeight: "Save weight",
     weightInvalid: "Weight must be greater than zero.",
     cancel: "Cancel",
+    discard: "Discard changes",
+    discardChanges: "Discard unsaved key changes?",
     deleteKeyTitle: "Delete key?",
     deleteKeyDescription: (name: string) =>
       `The key ${name} will be removed from this provider immediately.`,
@@ -208,6 +252,8 @@ const translations = {
     login: "登录",
     logout: "退出登录",
     invalidToken: "令牌不正确",
+    rateLimited: (seconds: number) =>
+      `登录尝试过多，请在 ${seconds} 秒后重试。`,
     cannotConnect: "无法连接 Gateway",
     operations: "运维 / 网关",
     title: "Codex Provider Gateway",
@@ -268,6 +314,8 @@ const translations = {
     saveWeight: "保存权重",
     weightInvalid: "权重必须大于 0。",
     cancel: "取消",
+    discard: "放弃更改",
+    discardChanges: "放弃尚未保存的密钥修改？",
     deleteKeyTitle: "删除密钥？",
     deleteKeyDescription: (name: string) =>
       `密钥 ${name} 将立即从当前 Provider 中移除。`,
@@ -441,13 +489,17 @@ function LoginView() {
   const { locale } = useLanguage()
   const t = translations[locale]
   const [token, setToken] = useState("")
-  const [error, setError] = useState<"" | "invalidToken" | "cannotConnect">("")
+  const [error, setError] = useState<
+    "" | "invalidToken" | "rateLimited" | "cannotConnect"
+  >("")
+  const [retryAfter, setRetryAfter] = useState(0)
   const [submitting, setSubmitting] = useState(false)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setSubmitting(true)
     setError("")
+    setRetryAfter(0)
 
     try {
       const response = await fetch("/login", {
@@ -456,8 +508,22 @@ function LoginView() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ token }),
       })
+      if (response.status === 429) {
+        const header = response.headers.get("retry-after")
+        const seconds = Number(header)
+        const retryAt = header ? Date.parse(header) : Number.NaN
+        setRetryAfter(
+          Number.isFinite(seconds)
+            ? Math.max(1, Math.ceil(seconds))
+            : Number.isFinite(retryAt)
+              ? Math.max(1, Math.ceil((retryAt - Date.now()) / 1000))
+              : 60
+        )
+        setError("rateLimited")
+        return
+      }
       if (!response.ok) {
-        setError("invalidToken")
+        setError(response.status === 401 ? "invalidToken" : "cannotConnect")
         return
       }
       window.location.assign("/")
@@ -467,6 +533,14 @@ function LoginView() {
       setSubmitting(false)
     }
   }
+
+  useEffect(() => {
+    if (retryAfter <= 0) return
+    const timer = window.setInterval(() => {
+      setRetryAfter((current) => Math.max(0, current - 1))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [retryAfter])
 
   return (
     <main className="flex min-h-svh flex-col bg-background text-foreground">
@@ -506,10 +580,16 @@ function LoginView() {
                     aria-invalid={error ? true : undefined}
                     onChange={(event) => setToken(event.target.value)}
                   />
-                  {error && <FieldError>{t[error]}</FieldError>}
+                  {error && (
+                    <FieldError>
+                      {error === "rateLimited"
+                        ? t.rateLimited(retryAfter)
+                        : t[error]}
+                    </FieldError>
+                  )}
                 </Field>
               </FieldGroup>
-              <Button type="submit" disabled={submitting}>
+              <Button type="submit" disabled={submitting || retryAfter > 0}>
                 {submitting && <Spinner data-icon="inline-start" />}
                 {t.login}
               </Button>
@@ -537,52 +617,786 @@ function Dashboard({
   const { locale, setLocale } = useLanguage()
   const { theme, setTheme } = useTheme()
   const t = translations[locale]
-  const [activeSection, setActiveSection] = useState<"dashboard" | "providers" | "settings" | "codex" | "models" | "agents" | "logs" | "usage" | "storage" | "integrations">("providers")
+  const [activeSection, setActiveSectionState] = useState<Section>(() =>
+    typeof window === "undefined"
+      ? "providers"
+      : sectionFromHash(window.location.hash)
+  )
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [dirtySources, setDirtySources] = useState<Record<string, boolean>>({})
+  const [pendingSection, setPendingSection] = useState<Section | null>(null)
+  const [pendingHistoryIndex, setPendingHistoryIndex] = useState<number | null>(
+    null
+  )
+  const [pendingLocale, setPendingLocale] = useState<Locale | null>(null)
+  const [workspaceGeneration, setWorkspaceGeneration] = useState(0)
+  const [leaveDialogOpen, setLeaveDialogOpen] = useState(false)
+  const [stopDialogOpen, setStopDialogOpen] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [stopRequested, setStopRequested] = useState(false)
+  const [stopMessage, setStopMessage] = useState("")
+  const [stopError, setStopError] = useState("")
+  const historyScopeRef = useRef(createHistoryScope())
+  const historyIndexRef = useRef(0)
+  const restoringHistoryRef = useRef(false)
+  const allowedHistoryNavigationRef = useRef(false)
+  const popstateUrlRef = useRef<string | null>(null)
+  const allowUnloadRef = useRef(false)
+  const hasDirty = Object.values(dirtySources).some(Boolean)
   const setupActions = useSetupActions(!health?.setupRequired)
-  const totals = health?.total ?? { requests: 0, success: 0, errors: 0, ratelimited: 0, tokens: 0 }
+  const totals = health?.total ?? {
+    requests: 0,
+    success: 0,
+    errors: 0,
+    ratelimited: 0,
+    tokens: 0,
+  }
+  const activeRequests =
+    health?.providers.reduce(
+      (total, provider) =>
+        total + provider.keys.reduce((sum, key) => sum + key.inFlight, 0),
+      0
+    ) ?? 0
   const navGroups = [
-    { label: locale === "zh-CN" ? "配置" : "CONFIGURE", items: [
-      { id: "providers" as const, label: t.navigation.providers, icon: ServerCogIcon },
-      { id: "codex" as const, label: locale === "zh-CN" ? "Codex 配置" : "Codex configuration", icon: KeyRoundIcon },
-    ] },
-    { label: locale === "zh-CN" ? "运行状态" : "OPERATIONS", items: [
-      { id: "dashboard" as const, label: t.navigation.dashboard, icon: LayoutDashboardIcon },
-      { id: "usage" as const, label: locale === "zh-CN" ? "用量" : "Usage", icon: ActivityIcon },
-      { id: "logs" as const, label: locale === "zh-CN" ? "日志与调试" : "Logs & debug", icon: TerminalSquareIcon },
-    ] },
-    { label: locale === "zh-CN" ? "高级" : "ADVANCED", items: [
-      { id: "models" as const, label: locale === "zh-CN" ? "模型" : "Models", icon: BoxIcon },
-      { id: "agents" as const, label: locale === "zh-CN" ? "子代理" : "Subagents", icon: BotIcon },
-      { id: "storage" as const, label: locale === "zh-CN" ? "存储" : "Storage", icon: DatabaseIcon },
-      { id: "integrations" as const, label: locale === "zh-CN" ? "集成" : "Integrations", icon: Globe2Icon },
-      { id: "settings" as const, label: t.navigation.settings, icon: Settings2Icon },
-    ] },
+    {
+      label: locale === "zh-CN" ? "配置" : "CONFIGURE",
+      items: [
+        {
+          id: "providers" as const,
+          label: t.navigation.providers,
+          icon: ServerCogIcon,
+        },
+        {
+          id: "codex" as const,
+          label: locale === "zh-CN" ? "Codex 配置" : "Codex configuration",
+          icon: KeyRoundIcon,
+        },
+      ],
+    },
+    {
+      label: locale === "zh-CN" ? "运行状态" : "OPERATIONS",
+      items: [
+        {
+          id: "dashboard" as const,
+          label: t.navigation.dashboard,
+          icon: LayoutDashboardIcon,
+        },
+        {
+          id: "usage" as const,
+          label: locale === "zh-CN" ? "用量" : "Usage",
+          icon: ActivityIcon,
+        },
+        {
+          id: "logs" as const,
+          label: locale === "zh-CN" ? "日志与调试" : "Logs & debug",
+          icon: TerminalSquareIcon,
+        },
+      ],
+    },
+    {
+      label: locale === "zh-CN" ? "高级" : "ADVANCED",
+      items: [
+        {
+          id: "models" as const,
+          label: locale === "zh-CN" ? "模型" : "Models",
+          icon: BoxIcon,
+        },
+        {
+          id: "agents" as const,
+          label: locale === "zh-CN" ? "子代理" : "Subagents",
+          icon: BotIcon,
+        },
+        {
+          id: "storage" as const,
+          label: locale === "zh-CN" ? "存储" : "Storage",
+          icon: DatabaseIcon,
+        },
+        {
+          id: "integrations" as const,
+          label: locale === "zh-CN" ? "集成" : "Integrations",
+          icon: Globe2Icon,
+        },
+        {
+          id: "settings" as const,
+          label: t.navigation.settings,
+          icon: Settings2Icon,
+        },
+      ],
+    },
   ]
+  const commitSection = useCallback((next: Section, replace = false) => {
+    setActiveSectionState(next)
+    const url = sectionHash(next)
+    if (replace) {
+      window.history.replaceState(
+        historyState(historyIndexRef.current, historyScopeRef.current),
+        "",
+        url
+      )
+    } else {
+      historyIndexRef.current += 1
+      window.history.pushState(
+        historyState(historyIndexRef.current, historyScopeRef.current),
+        "",
+        url
+      )
+    }
+    setMobileNavOpen(false)
+  }, [])
+
+  const navigateTo = useCallback(
+    (next: Section) => {
+      if (health?.setupRequired && next !== "providers") return
+      if (next === activeSection) return
+      if (
+        hasDirty &&
+        !(isOperationsSection(activeSection) && isOperationsSection(next))
+      ) {
+        setPendingLocale(null)
+        setPendingSection(next)
+        setPendingHistoryIndex(null)
+        setLeaveDialogOpen(true)
+        return
+      }
+      commitSection(next)
+    },
+    [activeSection, commitSection, hasDirty, health?.setupRequired]
+  )
+
+  const reportDirty = useCallback((source: string, dirty: boolean) => {
+    setDirtySources((current) => {
+      if (current[source] === dirty) return current
+      return { ...current, [source]: dirty }
+    })
+  }, [])
+
+  const reportSettingsDirty = useCallback(
+    (dirty: boolean) => {
+      reportDirty("settings", dirty)
+    },
+    [reportDirty]
+  )
+
+  const reportProvidersDirty = useCallback(
+    (dirty: boolean) => {
+      reportDirty("providers", dirty)
+    },
+    [reportDirty]
+  )
+
+  const reportOperationsDirty = useCallback(
+    (source: string, dirty: boolean) => {
+      reportDirty(`operations:${source}`, dirty)
+    },
+    [reportDirty]
+  )
+
+  useEffect(() => {
+    const handleHash = (event?: Event) => {
+      if (event?.type === "hashchange") {
+        if (popstateUrlRef.current === window.location.href) {
+          popstateUrlRef.current = null
+          return
+        }
+        popstateUrlRef.current = null
+      } else if (event?.type === "popstate") {
+        popstateUrlRef.current = window.location.href
+      }
+      const next = sectionFromHash(window.location.hash)
+      let targetIndex = historyIndex(
+        window.history.state,
+        historyScopeRef.current
+      )
+      if (restoringHistoryRef.current && next === activeSection) {
+        restoringHistoryRef.current = false
+        return
+      }
+      if (allowedHistoryNavigationRef.current) {
+        allowedHistoryNavigationRef.current = false
+        if (targetIndex !== null) historyIndexRef.current = targetIndex
+        setActiveSectionState(next)
+        return
+      }
+      if (health?.setupRequired && next !== "providers") {
+        commitSection("providers", true)
+        return
+      }
+      if (next === activeSection) {
+        if (targetIndex !== null) historyIndexRef.current = targetIndex
+        return
+      }
+      {
+        if (
+          hasDirty &&
+          !(isOperationsSection(activeSection) && isOperationsSection(next))
+        ) {
+          if (targetIndex === null && event?.type === "popstate") {
+            const nextScope = createHistoryScope()
+            historyScopeRef.current = nextScope
+            targetIndex = -1
+            window.history.replaceState(
+              historyState(targetIndex, nextScope),
+              "",
+              window.location.href
+            )
+            historyIndexRef.current = 0
+            window.history.pushState(
+              historyState(0, nextScope),
+              "",
+              sectionHash(activeSection)
+            )
+          } else if (
+            targetIndex === null ||
+            targetIndex === historyIndexRef.current
+          ) {
+            targetIndex = historyIndexRef.current + 1
+            window.history.replaceState(
+              historyState(targetIndex, historyScopeRef.current),
+              "",
+              window.location.href
+            )
+          }
+          if (targetIndex !== -1) {
+            restoringHistoryRef.current = true
+            window.history.go(historyIndexRef.current - targetIndex)
+          }
+          setPendingLocale(null)
+          setPendingSection(next)
+          setPendingHistoryIndex(targetIndex)
+          setLeaveDialogOpen(true)
+          return
+        }
+        if (targetIndex === null && event?.type === "popstate") {
+          historyScopeRef.current = createHistoryScope()
+          historyIndexRef.current = 0
+          targetIndex = 0
+          window.history.replaceState(
+            historyState(targetIndex, historyScopeRef.current),
+            "",
+            window.location.href
+          )
+        } else if (
+          targetIndex === null ||
+          targetIndex === historyIndexRef.current
+        ) {
+          targetIndex = historyIndexRef.current + 1
+          window.history.replaceState(
+            historyState(targetIndex, historyScopeRef.current),
+            "",
+            window.location.href
+          )
+        }
+        historyIndexRef.current = targetIndex
+        setActiveSectionState(next)
+      }
+    }
+    window.addEventListener("hashchange", handleHash)
+    window.addEventListener("popstate", handleHash)
+    window.history.replaceState(
+      historyState(historyIndexRef.current, historyScopeRef.current),
+      "",
+      window.location.hash || sectionHash(activeSection)
+    )
+    const timer = window.setTimeout(handleHash, 0)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener("hashchange", handleHash)
+      window.removeEventListener("popstate", handleHash)
+    }
+  }, [activeSection, commitSection, hasDirty, health?.setupRequired])
+
+  useEffect(() => {
+    if (!stopRequested || connection !== "offline") return
+    const timer = window.setTimeout(() => {
+      setStopping(false)
+      setStopRequested(false)
+      setStopMessage(locale === "zh-CN" ? "Gateway 已停止" : "Gateway stopped")
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [connection, locale, stopRequested])
+
+  useEffect(() => {
+    if (!stopRequested) return
+    const poll = window.setInterval(() => void onRefresh(), 400)
+    const timer = window.setTimeout(() => {
+      setStopping(false)
+      setStopRequested(false)
+      setStopMessage(
+        locale === "zh-CN"
+          ? "已发送停止请求，但尚未确认 Gateway 已离线"
+          : "Stop requested, but Gateway has not been confirmed offline"
+      )
+    }, 8000)
+    return () => {
+      window.clearInterval(poll)
+      window.clearTimeout(timer)
+    }
+  }, [locale, onRefresh, stopRequested])
+
+  useEffect(() => {
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!hasDirty || allowUnloadRef.current) return
+      event.preventDefault()
+      event.returnValue = ""
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload)
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload)
+  }, [hasDirty])
+
+  async function confirmStop() {
+    setStopping(true)
+    setStopMessage("")
+    setStopError("")
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), 8000)
+    try {
+      await apiRequest("/api/runtime/stop", {
+        method: "POST",
+        signal: controller.signal,
+      })
+      setStopDialogOpen(false)
+      setStopRequested(true)
+    } catch (cause) {
+      setStopping(false)
+      setStopError(
+        controller.signal.aborted
+          ? locale === "zh-CN"
+            ? "停止请求超时，请检查 Gateway 状态后重试"
+            : "The stop request timed out. Check the Gateway status and try again."
+          : cause instanceof Error
+            ? cause.message
+            : locale === "zh-CN"
+              ? "停止失败"
+              : "Stop failed"
+      )
+    } finally {
+      window.clearTimeout(timer)
+    }
+  }
+
+  function requestLogout() {
+    if (hasDirty) {
+      setPendingSection(null)
+      setPendingHistoryIndex(null)
+      setPendingLocale(null)
+      setLeaveDialogOpen(true)
+      return
+    }
+    window.location.assign("/logout")
+  }
+
+  function requestLanguageChange() {
+    const next = locale === "zh-CN" ? "en" : "zh-CN"
+    if (hasDirty) {
+      setPendingSection(null)
+      setPendingHistoryIndex(null)
+      setPendingLocale(next)
+      setLeaveDialogOpen(true)
+      return
+    }
+    setLocale(next)
+  }
+
   const renderContent = () => {
-    if (health?.setupRequired) return <ProviderManager locale={locale} setupMode onConfigured={onRefresh} onChanged={notifyConfigChanged} />
-    if (activeSection === "settings") return <section className="workspace-page form-workspace"><GatewaySettingsPanel locale={locale} /></section>
-    if (activeSection === "codex") return <section className="workspace-page"><CodexSetup locale={locale} /></section>
-    if (["models", "agents", "logs", "usage", "storage", "integrations"].includes(activeSection)) return <OperationsPanel kind={activeSection as "models" | "agents" | "logs" | "usage" | "storage" | "integrations"} locale={locale} health={health} />
-    if (activeSection === "dashboard") return <section className="overview-dashboard"><div className="overview-title"><h1>{locale === "zh-CN" ? "仪表盘" : "Dashboard"}</h1><ConnectionBadge state={connection} locale={locale} /></div><div className="overview-metrics">{[
-      [t.metrics.requests, totals.requests], [t.metrics.success, totals.success], [t.metrics.errors, totals.errors], [t.metrics.rateLimited, totals.ratelimited], [t.metrics.tokens, totals.tokens],
-    ].map(([label, value]) => <MetricCard key={String(label)} label={String(label)} value={Number(value)} note={t.metrics.lifetime} badge={t.metrics.total} loading={loading} locale={locale} />)}</div></section>
-    return <ManagedProviderWorkspace health={health} locale={locale} keyCopy={t} onRefresh={onRefresh} />
+    if (health?.setupRequired)
+      return (
+        <ProviderManager
+          locale={locale}
+          setupMode
+          onConfigured={onRefresh}
+          onChanged={notifyConfigChanged}
+          onDirtyChange={reportProvidersDirty}
+        />
+      )
+    if (activeSection === "settings")
+      return (
+        <section className="workspace-page form-workspace">
+          <GatewaySettingsPanel
+            locale={locale}
+            onDirtyChange={reportSettingsDirty}
+          />
+        </section>
+      )
+    if (activeSection === "codex")
+      return (
+        <section className="workspace-page">
+          <CodexSetup locale={locale} />
+        </section>
+      )
+    if (
+      ["models", "agents", "logs", "usage", "storage", "integrations"].includes(
+        activeSection
+      )
+    )
+      return (
+        <OperationsPanel
+          kind={
+            activeSection as
+              | "models"
+              | "agents"
+              | "logs"
+              | "usage"
+              | "storage"
+              | "integrations"
+          }
+          locale={locale}
+          health={health}
+          onDirtyChange={reportOperationsDirty}
+        />
+      )
+    if (activeSection === "dashboard")
+      return (
+        <section className="overview-dashboard">
+          <div className="overview-title">
+            <h1>{locale === "zh-CN" ? "仪表盘" : "Dashboard"}</h1>
+            <ConnectionBadge state={connection} locale={locale} />
+          </div>
+          <div className="overview-metrics">
+            {[
+              [t.metrics.requests, totals.requests],
+              [t.metrics.success, totals.success],
+              [t.metrics.errors, totals.errors],
+              [t.metrics.rateLimited, totals.ratelimited],
+              [t.metrics.tokens, totals.tokens],
+            ].map(([label, value]) => (
+              <MetricCard
+                key={String(label)}
+                label={String(label)}
+                value={Number(value)}
+                note={t.metrics.lifetime}
+                badge={t.metrics.total}
+                loading={loading}
+                locale={locale}
+              />
+            ))}
+          </div>
+        </section>
+      )
+    return (
+      <ManagedProviderWorkspace
+        health={health}
+        locale={locale}
+        keyCopy={t}
+        onRefresh={onRefresh}
+        onDirtyChange={reportProvidersDirty}
+      />
+    )
   }
 
   return (
     <main className="app-shell">
-      <aside className="app-sidebar" aria-label={locale === "zh-CN" ? "应用侧栏" : "Application sidebar"}>
-        <div className="sidebar-brand"><BrandMark /><span>opencodex</span><small>v2.12.0</small><button className="mobile-nav-close" aria-label={locale === "zh-CN" ? "关闭导航" : "Close navigation"} onClick={() => setMobileNavOpen(false)}><XIcon /></button></div>
-        <nav className="sidebar-nav" aria-label={locale === "zh-CN" ? "主导航" : "Main navigation"}>{navGroups.map((group) => <div className="sidebar-group" key={group.label}><p>{group.label}</p>{group.items.map(({ id, label, icon: Icon }) => <button key={id} className={`sidebar-item ${activeSection === id ? "active" : ""}`} aria-label={label} title={label} aria-current={activeSection === id ? "page" : undefined} onClick={() => { setActiveSection(id); setMobileNavOpen(false) }}><Icon aria-hidden="true" /><span>{label}</span></button>)}</div>)}</nav>
-        <div className="sidebar-bottom"><button className="sidebar-item" aria-label={locale === "zh-CN" ? "Switch to English" : "切换到中文"} title={locale === "zh-CN" ? "Switch to English" : "切换到中文"} onClick={() => setLocale(locale === "zh-CN" ? "en" : "zh-CN")}><LanguagesIcon aria-hidden="true" /><span>{locale === "zh-CN" ? "中文" : "English"}</span><ChevronRightIcon className="item-end" aria-hidden="true" /></button><button className="sidebar-item" aria-label={locale === "zh-CN" ? "切换界面主题" : "Change interface theme"} title={locale === "zh-CN" ? "切换界面主题" : "Change interface theme"} onClick={() => setTheme(theme === "system" ? "light" : theme === "light" ? "dark" : "system")}><MonitorIcon aria-hidden="true" /><span>{theme === "system" ? (locale === "zh-CN" ? "跟随系统" : "System theme") : theme === "light" ? (locale === "zh-CN" ? "浅色" : "Light") : (locale === "zh-CN" ? "深色" : "Dark")}</span></button><button className="sidebar-item danger" aria-label={locale === "zh-CN" ? "停止 Gateway" : "Stop gateway"} title={locale === "zh-CN" ? "停止 Gateway" : "Stop gateway"} onClick={() => void apiRequest("/api/runtime/stop", { method: "POST" }).catch(cause => window.alert(cause instanceof Error ? cause.message : "Request failed"))}><PowerIcon aria-hidden="true" /><span>{locale === "zh-CN" ? "停止 Gateway" : "Stop gateway"}</span></button></div>
+      <aside
+        className="app-sidebar"
+        aria-label={locale === "zh-CN" ? "应用侧栏" : "Application sidebar"}
+      >
+        <div className="sidebar-brand">
+          <BrandMark />
+          <span>deepseek-gateway</span>
+          <small>{health?.version || "v2"}</small>
+          <button
+            className="mobile-nav-close"
+            aria-label={locale === "zh-CN" ? "关闭导航" : "Close navigation"}
+            onClick={() => setMobileNavOpen(false)}
+          >
+            <XIcon />
+          </button>
+        </div>
+        <nav
+          className="sidebar-nav"
+          aria-label={locale === "zh-CN" ? "主导航" : "Main navigation"}
+        >
+          {navGroups.map((group) => (
+            <div className="sidebar-group" key={group.label}>
+              <p>{group.label}</p>
+              {group.items.map(({ id, label, icon: Icon }) => {
+                const blocked = Boolean(
+                  health?.setupRequired && id !== "providers"
+                )
+                return (
+                  <button
+                    key={id}
+                    className={`sidebar-item ${activeSection === id ? "active" : ""}`}
+                    aria-label={label}
+                    title={
+                      blocked
+                        ? locale === "zh-CN"
+                          ? "完成首个 Provider 配置后解锁"
+                          : "Configure your first Provider to unlock"
+                        : label
+                    }
+                    aria-current={activeSection === id ? "page" : undefined}
+                    disabled={blocked}
+                    onClick={() => navigateTo(id)}
+                  >
+                    <Icon aria-hidden="true" />
+                    <span>{label}</span>
+                  </button>
+                )
+              })}
+            </div>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <button
+            className="sidebar-item"
+            aria-label={locale === "zh-CN" ? "Switch to English" : "切换到中文"}
+            title={locale === "zh-CN" ? "Switch to English" : "切换到中文"}
+            onClick={requestLanguageChange}
+          >
+            <LanguagesIcon aria-hidden="true" />
+            <span>{locale === "zh-CN" ? "中文" : "English"}</span>
+            <ChevronRightIcon className="item-end" aria-hidden="true" />
+          </button>
+          <button
+            className="sidebar-item"
+            aria-label={
+              locale === "zh-CN" ? "切换界面主题" : "Change interface theme"
+            }
+            title={
+              locale === "zh-CN" ? "切换界面主题" : "Change interface theme"
+            }
+            onClick={() =>
+              setTheme(
+                theme === "system"
+                  ? "light"
+                  : theme === "light"
+                    ? "dark"
+                    : "system"
+              )
+            }
+          >
+            <MonitorIcon aria-hidden="true" />
+            <span>
+              {theme === "system"
+                ? locale === "zh-CN"
+                  ? "跟随系统"
+                  : "System theme"
+                : theme === "light"
+                  ? locale === "zh-CN"
+                    ? "浅色"
+                    : "Light"
+                  : locale === "zh-CN"
+                    ? "深色"
+                    : "Dark"}
+            </span>
+          </button>
+          <button
+            className="sidebar-item danger"
+            aria-label={locale === "zh-CN" ? "停止 Gateway" : "Stop gateway"}
+            title={locale === "zh-CN" ? "停止 Gateway" : "Stop gateway"}
+            disabled={stopping}
+            onClick={() => setStopDialogOpen(true)}
+          >
+            <PowerIcon aria-hidden="true" />
+            <span>
+              {stopping
+                ? locale === "zh-CN"
+                  ? "停止中..."
+                  : "Stopping..."
+                : locale === "zh-CN"
+                  ? "停止 Gateway"
+                  : "Stop gateway"}
+            </span>
+          </button>
+        </div>
       </aside>
-      {mobileNavOpen && <button className="mobile-nav-backdrop" aria-label={locale === "zh-CN" ? "关闭导航" : "Close navigation"} onClick={() => setMobileNavOpen(false)} />}
+      {mobileNavOpen && (
+        <button
+          className="mobile-nav-backdrop"
+          aria-label={locale === "zh-CN" ? "关闭导航" : "Close navigation"}
+          onClick={() => setMobileNavOpen(false)}
+        />
+      )}
       <section className="app-main">
-        <div className="shell-toolbar"><Button className="mobile-nav-trigger" variant="ghost" size="icon" aria-label={locale === "zh-CN" ? "打开导航" : "Open navigation"} onClick={() => setMobileNavOpen(true)}><MenuIcon /></Button><div className="toolbar-status" title={error}><span className={`status-dot ${connection === "live" ? "online" : "offline"}`} />{connection === "live" ? (locale === "zh-CN" ? "网关已连接" : "Gateway connected") : error ? t.alertTitle : (locale === "zh-CN" ? "正在连接" : "Connecting")}</div>{activeSection !== "providers" && <div className="toolbar-actions"><Button variant="outline" size="icon" aria-label={t.logout} title={t.logout} onClick={() => window.location.assign("/logout")}><LogOutIcon /></Button></div>}</div>
-        {(setupActions.restartRequired.length > 0 || setupActions.codexPending) && <div className="pending-actions" role="status"><TriangleAlertIcon aria-hidden="true" /><div><strong>{locale === "zh-CN" ? "配置尚需操作" : "Configuration needs action"}</strong>{setupActions.restartRequired.length > 0 && <span>{locale === "zh-CN" ? `重启 Gateway 以应用：${setupActions.restartRequired.join("、")}` : `Restart Gateway to apply: ${setupActions.restartRequired.join(", ")}`}</span>}{setupActions.codexPending && <span>{locale === "zh-CN" ? "重新执行 ./gatewayctl codex，然后重启 Codex" : "Run ./gatewayctl codex again, then restart Codex"}</span>}</div><div className="pending-action-buttons">{setupActions.restartRequired.length > 0 && <Button variant="outline" size="sm" onClick={() => setActiveSection("settings")}>{locale === "zh-CN" ? "查看设置" : "View settings"}</Button>}{setupActions.codexPending && <Button size="sm" onClick={() => setActiveSection("codex")}>{locale === "zh-CN" ? "打开 Codex 配置" : "Open Codex configuration"}</Button>}</div></div>}
-        {renderContent()}
+        <div className="shell-toolbar">
+          <Button
+            className="mobile-nav-trigger"
+            variant="ghost"
+            size="icon"
+            aria-label={locale === "zh-CN" ? "打开导航" : "Open navigation"}
+            onClick={() => setMobileNavOpen(true)}
+          >
+            <MenuIcon />
+          </Button>
+          <div className="toolbar-status" title={error}>
+            <span
+              className={`status-dot ${connection === "live" ? "online" : "offline"}`}
+            />
+            {connection === "live"
+              ? locale === "zh-CN"
+                ? "网关已连接"
+                : "Gateway connected"
+              : error
+                ? t.alertTitle
+                : locale === "zh-CN"
+                  ? "正在连接"
+                  : "Connecting"}
+          </div>
+          <div className="toolbar-actions">
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label={t.logout}
+              title={t.logout}
+              onClick={requestLogout}
+            >
+              <LogOutIcon />
+            </Button>
+          </div>
+        </div>
+        {(setupActions.restartRequired.length > 0 ||
+          setupActions.codexPending) && (
+          <div className="pending-actions" role="status">
+            <TriangleAlertIcon aria-hidden="true" />
+            <div>
+              <strong>
+                {locale === "zh-CN"
+                  ? "配置尚需操作"
+                  : "Configuration needs action"}
+              </strong>
+              {setupActions.restartRequired.length > 0 && (
+                <span>
+                  {locale === "zh-CN"
+                    ? `重启 Gateway 以应用：${setupActions.restartRequired.join("、")}`
+                    : `Restart Gateway to apply: ${setupActions.restartRequired.join(", ")}`}
+                </span>
+              )}
+              {setupActions.codexPending && (
+                <span>
+                  {locale === "zh-CN"
+                    ? "重新执行 ./gatewayctl codex，然后重启 Codex"
+                    : "Run ./gatewayctl codex again, then restart Codex"}
+                </span>
+              )}
+            </div>
+            <div className="pending-action-buttons">
+              {setupActions.restartRequired.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => navigateTo("settings")}
+                >
+                  {locale === "zh-CN" ? "查看设置" : "View settings"}
+                </Button>
+              )}
+              {setupActions.codexPending && (
+                <Button size="sm" onClick={() => navigateTo("codex")}>
+                  {locale === "zh-CN"
+                    ? "打开 Codex 配置"
+                    : "Open Codex configuration"}
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+        <div key={workspaceGeneration}>{renderContent()}</div>
+        {stopMessage && (
+          <div className="px-4 pb-4" role="status">
+            <div className="rounded-lg border px-3 py-2 text-sm">
+              {stopMessage}
+            </div>
+          </div>
+        )}
       </section>
+      <AlertDialog
+        open={leaveDialogOpen}
+        onOpenChange={(open) => {
+          setLeaveDialogOpen(open)
+          if (open) return
+          setPendingSection(null)
+          setPendingHistoryIndex(null)
+          setPendingLocale(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {locale === "zh-CN"
+                ? "放弃未保存更改？"
+                : "Discard unsaved changes?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {locale === "zh-CN"
+                ? "当前页面有未保存的输入，离开后这些内容将丢失。"
+                : "This page has unsaved input that will be lost if you leave."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>
+              {locale === "zh-CN" ? "继续编辑" : "Keep editing"}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                setLeaveDialogOpen(false)
+                setDirtySources({})
+                setWorkspaceGeneration((current) => current + 1)
+                if (pendingHistoryIndex !== null) {
+                  allowedHistoryNavigationRef.current = true
+                  window.history.go(
+                    pendingHistoryIndex - historyIndexRef.current
+                  )
+                } else if (pendingSection) commitSection(pendingSection)
+                else if (pendingLocale) setLocale(pendingLocale)
+                else {
+                  allowUnloadRef.current = true
+                  window.location.assign("/logout")
+                }
+                setPendingSection(null)
+                setPendingHistoryIndex(null)
+                setPendingLocale(null)
+              }}
+            >
+              {locale === "zh-CN" ? "放弃并离开" : "Discard and leave"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={stopDialogOpen}
+        onOpenChange={(open) => {
+          if (stopping) return
+          setStopDialogOpen(open)
+          if (!open) setStopError("")
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {locale === "zh-CN" ? "停止 Gateway？" : "Stop Gateway?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {locale === "zh-CN"
+                ? `停止后当前代理请求会中断，面板也会暂时离线。当前有 ${activeRequests} 个请求正在处理。${hasDirty ? "未保存的更改也会丢失。" : ""}`
+                : `Stopping will interrupt active proxy requests and take the console offline. ${activeRequests} request(s) are currently in flight.${hasDirty ? " Unsaved changes will also be lost." : ""}`}
+            </AlertDialogDescription>
+            {stopError && (
+              <p className="text-sm text-destructive" role="alert">
+                {stopError}
+              </p>
+            )}
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={stopping}>
+              {locale === "zh-CN" ? "取消" : "Cancel"}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={stopping}
+              onClick={() => void confirmStop()}
+            >
+              {stopping && <Spinner data-icon="inline-start" />}
+              {stopping
+                ? locale === "zh-CN"
+                  ? "停止中..."
+                  : "Stopping..."
+                : locale === "zh-CN"
+                  ? "停止 Gateway"
+                  : "Stop Gateway"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   )
 }
@@ -614,7 +1428,11 @@ export function App() {
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
-      if (!(response.headers.get("content-type") || "").includes("application/json")) {
+      if (
+        !(response.headers.get("content-type") || "").includes(
+          "application/json"
+        )
+      ) {
         throw new Error("Gateway health returned a non-JSON response")
       }
       const nextHealth = (await response.json()) as Health
@@ -624,7 +1442,8 @@ export function App() {
       setError("")
       setLoading(false)
     } catch (cause) {
-      if (controller.signal.aborted || sequence !== requestSequence.current) return
+      if (controller.signal.aborted || sequence !== requestSequence.current)
+        return
       setConnection("offline")
       setLoading(false)
       setError(cause instanceof Error ? cause.message : "Unknown error")

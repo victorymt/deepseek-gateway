@@ -11,7 +11,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ThemeProvider defaultTheme="dark" storageKey="deepseek-gateway-theme">
       <LanguageProvider
-        defaultLocale="en"
+        defaultLocale="zh-CN"
         storageKey="deepseek-gateway-language"
       >
         <TooltipProvider>

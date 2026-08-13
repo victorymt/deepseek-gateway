@@ -74,6 +74,7 @@ import type { Health } from "@/gateway-types"
 import { apiRequest } from "@/lib/api-request"
 import { formatNumber } from "@/lib/format-number"
 import { notifyConfigChanged, useSetupActions } from "@/lib/setup-actions"
+import { ToastProvider } from "@/components/toast"
 
 type ConnectionState = "connecting" | "live" | "offline" | "auth"
 const HISTORY_INDEX_KEY = "deepseekGatewayIndex"
@@ -1482,13 +1483,15 @@ export function App() {
   }
 
   return (
-    <Dashboard
-      health={health}
-      connection={connection}
-      loading={loading}
-      error={error}
-      onRefresh={refresh}
-    />
+    <ToastProvider>
+      <Dashboard
+        health={health}
+        connection={connection}
+        loading={loading}
+        error={error}
+        onRefresh={refresh}
+      />
+    </ToastProvider>
   )
 }
 

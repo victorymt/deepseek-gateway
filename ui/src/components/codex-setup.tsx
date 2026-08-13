@@ -28,6 +28,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import type { CodexArtifacts } from "@/gateway-types"
 import { apiRequest } from "@/lib/api-request"
+import { useToast } from "@/components/toast"
 import {
   appliedCodexRevision,
   markCodexRevisionApplied,
@@ -104,10 +105,10 @@ function downloadText(filename: string, content: string, type: string) {
 
 export function CodexSetup({ locale }: { locale: Locale }) {
   const t = copy[locale]
+  const { showToast } = useToast()
   const [artifacts, setArtifacts] = useState<CodexArtifacts | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
-  const [notice, setNotice] = useState("")
   const [appliedRevision, setAppliedRevision] = useState(appliedCodexRevision)
 
   const refresh = useCallback(async () => {
@@ -131,10 +132,8 @@ export function CodexSetup({ locale }: { locale: Locale }) {
     try {
       await navigator.clipboard.writeText(value)
       setError("")
-      setNotice(t.copied)
-      window.setTimeout(() => setNotice(""), 1600)
+      showToast(t.copied, "success")
     } catch {
-      setNotice("")
       setError(t.copyFailed)
     }
   }
@@ -143,8 +142,7 @@ export function CodexSetup({ locale }: { locale: Locale }) {
     if (!artifacts) return
     markCodexRevisionApplied(artifacts.revision)
     setAppliedRevision(artifacts.revision)
-    setNotice(t.applied)
-    window.setTimeout(() => setNotice(""), 1600)
+    showToast(t.applied, "success")
   }
 
   const environmentLine =
@@ -173,12 +171,6 @@ export function CodexSetup({ locale }: { locale: Locale }) {
         <Alert variant="destructive">
           <AlertTitle>{t.failed}</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-      {notice && (
-        <Alert>
-          <CheckIcon />
-          <AlertTitle>{notice}</AlertTitle>
         </Alert>
       )}
 

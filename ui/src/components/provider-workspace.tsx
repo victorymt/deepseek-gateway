@@ -408,7 +408,7 @@ export function ProviderWorkspace({
                       </div>
                     )}
                     <div>
-                      <dt>Base URL</dt>
+                      <dt>{t.baseUrl}</dt>
                       <dd className="mono">{selected.baseUrl}</dd>
                     </div>
                   </dl>
@@ -429,7 +429,7 @@ export function ProviderWorkspace({
                       <dd>{formatNumber(totals.errors, locale)}</dd>
                     </div>
                     <div>
-                      <dt>Tokens</dt>
+                      <dt>{t.tokens}</dt>
                       <dd>{formatNumber(totals.tokens, locale)}</dd>
                     </div>
                   </dl>
@@ -444,7 +444,7 @@ export function ProviderWorkspace({
                       <dd>{selected.models.length}</dd>
                     </div>
                     <div>
-                      <dt>API keys</dt>
+                      <dt>{t.apiKeys}</dt>
                       <dd>{selected.keys.length}</dd>
                     </div>
                     <div>
@@ -518,7 +518,7 @@ export function ProviderWorkspace({
                 </h4>
                 <dl>
                   <div>
-                    <dt>API Profile</dt>
+                    <dt>{t.apiProfile}</dt>
                     <dd>{selected.apiProfile}</dd>
                   </div>
                   <div>

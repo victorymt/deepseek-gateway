@@ -35,6 +35,10 @@ export default function ModelsPage({
         model: model.alias,
         name: model.name,
         upstream: model.upstreamModel,
+        inputModalities: model.inputModalities || [],
+        reasoning: model.reasoning,
+        supportsHostedWebSearch: model.supportsHostedWebSearch === true,
+        supportsCustomApplyPatch: model.supportsCustomApplyPatch === true,
         requests:
           health?.providers.find((item) => item.id === provider.id)?.total
             .requests || 0,
@@ -43,6 +47,7 @@ export default function ModelsPage({
             .tokens || 0,
       }))
     ) || []
+  const zh = locale === "zh-CN"
 
   return (
     <OperationsPageShell
@@ -68,8 +73,39 @@ export default function ModelsPage({
                 {item.requests.toLocaleString(locale)} requests ·{" "}
                 {item.tokens.toLocaleString(locale)} tokens
               </p>
+              <div className="operation-row wrap">
+                <Badge variant="outline">
+                  {item.inputModalities.includes("image")
+                    ? zh
+                      ? "图像输入"
+                      : "Image input"
+                    : zh
+                      ? "仅文本"
+                      : "Text only"}
+                </Badge>
+                {item.reasoning && item.reasoning.levels?.length > 0 && (
+                  <Badge variant="outline">
+                    {zh ? "思考" : "Reasoning"} · {item.reasoning.levels.length}{" "}
+                    {zh ? "级" : "levels"}
+                  </Badge>
+                )}
+                {item.supportsHostedWebSearch && (
+                  <Badge variant="outline">
+                    {zh ? "托管搜索" : "Web search"}
+                  </Badge>
+                )}
+                {item.supportsCustomApplyPatch && (
+                  <Badge variant="outline">apply_patch</Badge>
+                )}
+              </div>
               <Badge variant="outline">
-                {item.model === health?.defaultModel ? "Default" : "Available"}
+                {item.model === health?.defaultModel
+                  ? zh
+                    ? "默认"
+                    : "Default"
+                  : zh
+                    ? "可用"
+                    : "Available"}
               </Badge>
             </CardContent>
           </Card>
@@ -77,7 +113,7 @@ export default function ModelsPage({
       </div>
       {!page.loading && !models.length && (
         <p className="empty-copy">
-          {locale === "zh-CN" ? "暂无模型" : "No models configured"}
+          {zh ? "暂无模型" : "No models configured"}
         </p>
       )}
     </OperationsPageShell>

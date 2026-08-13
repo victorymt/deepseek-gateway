@@ -35,6 +35,8 @@ export const providerCopy = {
     providerIdHint: "Lowercase letters, numbers, and hyphens.",
     name: "Display name",
     baseUrl: "Base URL",
+    tokens: "Tokens",
+    apiKeys: "API keys",
     upstreamFormat: "Upstream API format",
     apiProfile: "API profile",
     apiProfileDescription:
@@ -156,6 +158,8 @@ export const providerCopy = {
     providerIdHint: "仅使用小写字母、数字和连字符。",
     name: "显示名称",
     baseUrl: "Base URL",
+    tokens: "Token",
+    apiKeys: "API 密钥",
     upstreamFormat: "上游 API 格式",
     apiProfile: "API Profile",
     apiProfileDescription: "选择 Provider 专用的 Responses 能力和默认值。",

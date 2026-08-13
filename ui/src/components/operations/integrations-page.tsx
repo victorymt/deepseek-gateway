@@ -237,7 +237,15 @@ export default function IntegrationsPage({
             <CardHeader>
               <div className="operation-row">
                 <CardTitle>{item.name}</CardTitle>
-                <Badge>{item.enabled ? "Enabled" : "Disabled"}</Badge>
+                <Badge>
+                  {item.enabled
+                    ? zh
+                      ? "已启用"
+                      : "Enabled"
+                    : zh
+                      ? "已停用"
+                      : "Disabled"}
+                </Badge>
               </div>
               <CardDescription>
                 {item.type} · {item.baseUrl}

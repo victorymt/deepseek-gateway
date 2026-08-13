@@ -299,7 +299,7 @@ export default function AgentsPage({
                         }}
                       >
                         <SelectTrigger id="subagent-provider">
-                          <SelectValue placeholder="Provider" />
+                          <SelectValue placeholder={zh ? "选择 Provider" : "Provider"} />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectGroup>
@@ -328,7 +328,7 @@ export default function AgentsPage({
                           id="subagent-model"
                           disabled={!selectedProvider?.models.length}
                         >
-                          <SelectValue placeholder="Model" />
+                          <SelectValue placeholder={zh ? "选择模型" : "Model"} />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectGroup>

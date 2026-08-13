@@ -290,29 +290,29 @@ export default function LogsPage({ locale, active }: OperationsPageProps) {
             </AlertDialogHeader>
             <dl className="log-detail-grid">
               <div>
-                <dt>Timestamp</dt>
+                <dt>{zh ? "时间" : "Timestamp"}</dt>
                 <dd>
                   {new Date(selectedLog.timestamp).toLocaleString(locale)}
                 </dd>
               </div>
               <div>
-                <dt>Route</dt>
+                <dt>{zh ? "路由" : "Route"}</dt>
                 <dd>
                   {selectedLog.method} {selectedLog.route}
                 </dd>
               </div>
               <div>
-                <dt>Status</dt>
+                <dt>{zh ? "状态" : "Status"}</dt>
                 <dd>{selectedLog.status ?? "-"}</dd>
               </div>
               <div>
-                <dt>Provider / model</dt>
+                <dt>{zh ? "Provider / 模型" : "Provider / model"}</dt>
                 <dd>
                   {selectedLog.provider || "-"} / {selectedLog.model || "-"}
                 </dd>
               </div>
               <div>
-                <dt>Latency</dt>
+                <dt>{zh ? "耗时" : "Latency"}</dt>
                 <dd>{selectedLog.latencyMs ?? "-"} ms</dd>
               </div>
             </dl>

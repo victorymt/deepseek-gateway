@@ -7,11 +7,15 @@ Codex / API client
         |
         |  http://127.0.0.1:8787
         v
-gateway.mjs  -- 根据请求 model 解析 Provider.model（兼容 provider--model）
+gateway.mjs  -- HTTP 入口与组件装配
         |
-        +-- DeepSeek KeyPool  -- Deepseek.v4-flash
-        +-- OpenRouter KeyPool -- Openrouter.claude-sonnet
-        +-- Responses / Chat Completions 兼容 Provider
+        +-- gateway-config.mjs   -- 配置读取、规范化与校验
+        +-- provider-runtime.mjs -- ProviderRegistry、KeyPool 与运行时状态
+        |       +-- DeepSeek KeyPool  -- Deepseek.v4-flash
+        |       +-- OpenRouter KeyPool -- Openrouter.claude-sonnet
+        |       +-- Responses / Chat Completions 兼容 Provider
+        +-- upstream-relay.mjs   -- 上游请求转换、重试与流式转发
+        +-- management/          -- 面板 API 与按资源拆分的运维路由
 ```
 
 ## 运行要求
@@ -21,6 +25,13 @@ gateway.mjs  -- 根据请求 model 解析 Provider.model（兼容 provider--mode
 - Codex CLI，仅在需要接入 Codex 时使用
 
 网关使用 `quickjs-emscripten` 隔离执行额度查询脚本；React/shadcn 状态面板的依赖仍隔离在 `ui/` 目录中。`gatewayctl init` 和 `gatewayctl start` 会在 lockfile 更新或依赖缺失时自动运行 `npm ci --omit=dev`。直接运行 `node gateway.mjs` 前需先执行一次 `npm ci --omit=dev`。
+
+## 代码结构
+
+- `gateway.mjs` 只负责 HTTP 服务、依赖装配和生命周期；`gateway-config.mjs`、`provider-runtime.mjs`、`upstream-relay.mjs` 分别封装配置内核、Provider/Key 运行时和上游转发内核。
+- `management/operations-routes.mjs` 是运维 API 分发入口，日志与用量、存储与备份、集成、子代理分别位于 `operations-telemetry-routes.mjs`、`operations-storage-routes.mjs`、`operations-integration-routes.mjs`、`operations-subagent-routes.mjs`。
+- `ui/src/components/operations/` 包含模型、子代理、日志与调试、用量、存储、集成六个按需加载的页面；共享的请求取消、竞态保护和自动刷新逻辑位于 `page-state.ts`。
+- `test/helpers/gateway-harness.mjs` 提供进程级 Gateway 测试夹具；核心模块使用直接契约测试，端到端 smoke 场景按启动、转发、流式、Provider 生命周期、认证与管理五个领域拆分。
 
 ## 快速开始
 
@@ -110,7 +121,7 @@ JSON 可以使用字符串数组，也可以为单个 Key 覆盖名称、权重�
 - “Provider 管理”：添加、编辑、测试或删除 Provider，维护模型别名和独立密钥池，并设置默认 Provider 或默认模型。
 - “Gateway 设置”：管理监听参数、运行策略和访问令牌。`host` 和 `port` 修改后需要重启，其余未被命令行或环境变量覆盖的设置会热生效。
 - “Codex 配置”：预览并下载 Codex Provider 配置和模型目录生成物。
-- “模型 / 子代理 / 日志与调试 / 用量 / 存储 / 集成”：查看模型统计，管理 Codex 原生 agent 配置和 HTTP 集成，查询运行日志、30 天用量及配置备份。日志支持后端 cursor 分页、级别/Provider/模型/状态码/关键字筛选和详情查看；用量页提供 Recharts 趋势图及 Provider/模型汇总。日志和用量可手动刷新或按 5/15/30 秒自动刷新，打开编辑草稿或日志详情时会暂停自动刷新。请求失败时编辑草稿会保留，可直接重试。
+- “模型 / 子代理 / 日志与调试 / 用量 / 存储 / 集成”：查看模型统计，管理 Codex 原生 agent 配置和 HTTP 集成，查询运行日志、30 天用量及配置备份。日志支持后端 cursor 分页、级别/Provider/模型/状态码/关键字筛选和详情查看；用量页提供 Recharts 趋势图及 Provider/模型汇总。六个页面按需加载，在 Operations 内切换时已访问页面会保持挂载，因此草稿、筛选条件、分页和刷新周期不会丢失；离开 Operations 后这些页面状态会重置。非活动页面会取消读取请求并停止自动刷新，重新激活时立即刷新；单个页面加载失败只影响该页面，可直接重新加载恢复。打开编辑草稿或日志详情时也会暂停自动刷新，请求失败时草稿会保留，可直接重试。
 
 ### 运维数据与备份
 
@@ -584,9 +595,9 @@ npm run typecheck
 npm run build
 ```
 
-根目录 `npm test` 使用固定的 Node TAP、pytest 和 Vitest 命令，并隔离调用者追加的 runner 参数；需要直接向 Vitest 传参时使用 `npm --prefix ui test -- <vitest 参数>`。
+根目录 `npm test` 使用固定的 Node TAP、pytest 和 Vitest 命令，并隔离调用者追加的 runner 参数；其中 `scripts/run-node-tests.sh` 为每个 Node 测试文件启动独立进程，避免全局状态在文件之间泄漏。需要直接向 Vitest 传参时使用 `npm --prefix ui test -- <vitest 参数>`。
 
-测试使用内置 mock 上游，不消耗真实 API Key。UI 单元测试覆盖 Provider 草稿转换、脱敏提交载荷、模型去重、Hosted Web Search 协议切换、reasoning 能力保留和额度格式化。Key 后缀可触发不同 mock 行为：
+测试使用内置 mock 上游，不消耗真实 API Key。五个 smoke 文件共保留 71 个端到端场景；配置内核、`ProviderRuntime`、`UpstreamRelay` 和 Gateway 测试夹具另有直接契约测试。UI 单元测试除 Provider 草稿转换、脱敏提交载荷、模型去重、Hosted Web Search 协议切换、reasoning 能力保留和额度格式化外，还覆盖 Operations 页面状态保持与重置、请求取消与竞态处理，以及按页面隔离的加载错误边界。Key 后缀可触发不同 mock 行为：
 
 | 后缀 | 行为 |
 | --- | --- |

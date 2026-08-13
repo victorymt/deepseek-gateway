@@ -59,6 +59,35 @@ function acquireLock(file) {
   }
 }
 
+// Read the on-disk state for the read-modify-write merge inside writeAtomic.
+// Unlike the startup path (which quarantines with `quarantine: true`), a
+// corrupt file here used to be treated as `{}` and then overwritten, silently
+// dropping all external data (other instances' usage/logs). Quarantine the
+// corrupt file first so it can be recovered instead of lost.
+function safeReadForMerge(file) {
+  let content;
+  try {
+    content = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.error(`ERROR: Cannot read gateway operations JSON: ${error.message}`);
+    }
+    return {};
+  }
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    try {
+      const corrupt = `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      fs.renameSync(file, corrupt);
+      console.error(`ERROR: Invalid gateway operations JSON moved to ${corrupt} before merge; existing data is preserved for recovery`);
+    } catch {
+      console.error(`ERROR: Cannot quarantine invalid gateway operations JSON: ${error.message}`);
+    }
+    return {};
+  }
+}
+
 function writeAtomic(file, buildValue) {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -68,7 +97,7 @@ function writeAtomic(file, buildValue) {
   let value;
   try {
     value = typeof buildValue === 'function'
-      ? buildValue(safeRead(file, {}, { quarantine: false }))
+      ? buildValue(safeReadForMerge(file))
       : buildValue;
     fs.writeFileSync(temp, `${JSON.stringify({ schemaVersion: STORAGE_SCHEMA_VERSION, ...value }, null, 2)}\n`, { mode: 0o600 });
     fs.chmodSync(temp, 0o600);
@@ -155,8 +184,14 @@ function mergeState(local, external, baseline) {
     usage[date] = mergeTotals(local.usage[date], externalUsage[date], baseline.usage[date]);
   }
   return {
+    // Audit entries are never removed by a log clear or by the retention
+    // window; only the 5000-entry cap applies. Everything else is still
+    // dropped past `logsClearedAt` and the retention cutoff.
     logs: [...logs.values()]
-      .filter(item => Number(item.timestamp) > logsClearedAt && Number(item.timestamp) >= Date.now() - LOG_RETENTION_DAYS * DAY_MS)
+      .filter(item => (
+        item.level === 'audit'
+        || (Number(item.timestamp) > logsClearedAt && Number(item.timestamp) >= Date.now() - LOG_RETENTION_DAYS * DAY_MS)
+      ))
       .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
       .slice(-5000),
     usage,
@@ -250,7 +285,9 @@ export function createOperationsStore(configPath) {
 
   function prune() {
     const cutoff = Date.now() - LOG_RETENTION_DAYS * DAY_MS;
-    state.logs = state.logs.filter(item => Number(item.timestamp) >= cutoff).slice(-5000);
+    state.logs = state.logs
+      .filter(item => item.level === 'audit' || Number(item.timestamp) >= cutoff)
+      .slice(-5000);
     const usageCutoff = Date.now() - USAGE_RETENTION_DAYS * DAY_MS;
     for (const key of Object.keys(state.usage)) {
       if (Date.parse(`${key}T00:00:00Z`) < usageCutoff) delete state.usage[key];
@@ -337,7 +374,11 @@ export function createOperationsStore(configPath) {
   function listLogsPage(query = {}) {
     const get = key => typeof query.get === 'function' ? query.get(key) : query[key];
     const rawLimit = get('limit');
-    if (rawLimit !== undefined && rawLimit !== null && !/^\d+$/.test(String(rawLimit))) {
+    if (
+      rawLimit !== undefined
+      && rawLimit !== null
+      && (!/^\d+$/.test(String(rawLimit)) || Number(rawLimit) < 1)
+    ) {
       throw Object.assign(new Error('logs limit must be a positive integer'), { statusCode: 400 });
     }
     const limit = Math.min(Math.max(Number(rawLimit) || 200, 1), 1000);
@@ -492,5 +533,12 @@ export function createOperationsStore(configPath) {
   }
   function deleteSubagent(id) { state.subagents = state.subagents.filter(item => item.id !== id); state.deleted.subagents[id] = Date.now(); persist(); }
 
-  return { addLog, recordUsage, recordTokens, flush, listLogs, listLogsPage, clearLogs: () => { state.logs = []; state.logsClearedAt = Date.now(); persist(); }, usage, storageInfo, listBackups, createBackup, restoreBackup, listIntegrations, saveIntegration, deleteIntegration, listSubagents, saveSubagent, deleteSubagent };
+  function clearLogs() {
+    // Clearing runtime logs must not erase the security audit trail.
+    state.logs = state.logs.filter(item => item.level === 'audit');
+    state.logsClearedAt = Date.now();
+    persist();
+  }
+
+  return { addLog, recordUsage, recordTokens, flush, listLogs, listLogsPage, clearLogs, usage, storageInfo, listBackups, createBackup, restoreBackup, listIntegrations, saveIntegration, deleteIntegration, listSubagents, saveSubagent, deleteSubagent };
 }

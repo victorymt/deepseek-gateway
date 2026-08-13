@@ -24,7 +24,7 @@ gateway.mjs  -- HTTP 入口与组件装配
 - Python 3.10 或更新版本，用于交互式配置和 Codex 配置合并；推荐 Python 3.11+
 - Codex CLI，仅在需要接入 Codex 时使用
 
-网关使用 `quickjs-emscripten` 隔离执行额度查询脚本；React/shadcn 状态面板的依赖仍隔离在 `ui/` 目录中。`gatewayctl init` 和 `gatewayctl start` 会在 lockfile 更新或依赖缺失时自动运行 `npm ci --omit=dev`。直接运行 `node gateway.mjs` 前需先执行一次 `npm ci --omit=dev`。
+网关使用 `quickjs-emscripten` 隔离执行额度查询脚本；React/shadcn 状态面板的依赖仍隔离在 `ui/` 目录中。`build-ui.sh`（以及 `gatewayctl init` 引导构建、`setup-codex.sh` 的自动构建路径）会在 UI 依赖缺失或 lockfile 更新时自动运行 `npm ci --prefix ui`；网关根依赖需要在首次运行前安装一次 `npm ci --omit=dev`（缺少时会因 `quickjs-emscripten` 导入失败而报错）。直接运行 `node gateway.mjs` 前也需先执行该命令。
 
 ## 代码结构
 
@@ -85,18 +85,18 @@ cd deepseek-gateway
 
 ### 面板操作
 
-“监控面板”按 Provider 分组展示密钥池；每个 Provider 下的 Key 以卡片排列。卡片包含额度、请求数、成功数、错误数、429 次数、处理中请求、累计失败、冷却时间和最后使用时间。配置了额度查询的 Provider 会定时刷新，也可以从单张 Key 卡片立即刷新。
+“监控面板”顶部展示网关累计的请求、成功、错误、429 和 Token 指标卡；按 Provider 分组展示密钥池，每个 Provider 下的 Key 以卡片排列，包含额度、请求数、成功数、错误数、429 次数、处理中请求、累计失败、冷却时间和最后使用时间。配置了额度查询的 Provider 会定时刷新，也可以从单张 Key 卡片立即刷新。
 
-每张 Key 卡片底部提供以下操作：
+每张 Key 卡片提供以下操作（位于“Provider 管理”中对应 Provider 的“API 密钥”区域）：
 
 - 启用或停用 Key。每个 Provider 至少需要保留一个已启用 Key，因此最后一个已启用 Key 的开关不可关闭。
-- 测试 Key。测试会直接使用该 Key 请求上游，并在 Provider 标题右侧显示 HTTP 状态和耗时；已停用的 Key 也可以测试。
+- 测试 Key。测试会直接使用该 Key 请求上游，并显示 HTTP 状态和耗时；已停用的 Key 也可以测试。
 - 修改权重。权重必须大于 `0`，保存后立即参与 `inFlight / weight` 调度，无需重启。
 - 删除 Key。最后一个 Key 或最后一个已启用 Key 不能删除；其他 Key 删除后立即从新请求的调度池移除，不会中断正在处理的请求。
 
-添加单个 Key 时，进入“Provider 管理”，选择对应 Provider 的编辑按钮，在“密钥”区域添加名称、API Key、权重和启用状态后保存。名称在同一个 Provider 内必须唯一；保存成功后新 Key 会立即出现在“监控面板”中。
+添加单个 Key 时，进入“Provider 管理”，选择对应 Provider 的编辑按钮，在“API 密钥”区域添加名称、API Key、权重和启用状态后保存。名称在同一个 Provider 内必须唯一；保存成功后新 Key 会立即出现在“监控面板”中。
 
-批量添加时，在“监控面板”对应 Provider 标题右侧选择“批量导入”。可以直接粘贴文本，也可以读取本地 `.txt` 或 `.json` 文件；文件内容只在浏览器中读取，再通过同一个脱敏管理接口提交。文本支持换行、空格、逗号和分号分隔，也支持显式名称：
+批量添加时，在“Provider 管理”对应 Provider 的“API 密钥”区域选择“批量导入”。可以直接粘贴文本，也可以读取本地 `.txt` 或 `.json` 文件；文件内容只在浏览器中读取，再通过同一个脱敏管理接口提交。文本支持换行、空格、逗号和分号分隔，也支持显式名称：
 
 ```text
 sk-key-1
@@ -526,7 +526,7 @@ node gateway.mjs --config /path/to/keys.json
 ## 面板与鉴权
 
 - 状态面板使用 React、Vite 和 shadcn/ui；生产构建位于 `ui/dist`。
-- `GET /`：状态面板，每 2 秒刷新一次。
+- `GET /`：状态面板，默认约每 7.5 秒刷新一次（后台页签自动暂停）。
 - `GET /health`：JSON 健康状态，适合脚本和监控。
 - `GET /v1/models`：列出当前可调用的 Provider 模型别名；Codex 原生 agent 不作为模型暴露。
 - `GET/POST /api/providers`：读取脱敏配置或添加 Provider。

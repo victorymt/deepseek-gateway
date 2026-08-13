@@ -56,12 +56,12 @@ Codex /v1/responses
   -> 转发 Chat Completions 上游
 ```
 
-关键代码位置：
+关键代码位置（行号以当前 main 为准）：
 
-- [gateway.mjs](../gateway.mjs#L1014)：对 `chat-completions` Provider 启用 Responses 到 Chat Completions 的转换。
-- [chat-completions-adapter.mjs](../chat-completions-adapter.mjs#L59)：解析 Responses 工具。
-- [chat-completions-adapter.mjs](../chat-completions-adapter.mjs#L64)：构造可转换工具上下文并过滤 hosted web search。
-- [codex-config.mjs](../codex-config.mjs#L82)：从 catalog 模板复制模型能力字段。
+- [upstream-relay.mjs](../upstream-relay.mjs#L275)：`chat-completions` Provider 对 Responses 请求启用本地转换（`shouldAdapt`）。
+- [chat-completions-adapter.mjs](../chat-completions-adapter.mjs#L67)：`createToolContext()` 解析 Responses 工具并标记可转换类型。
+- [chat-completions-adapter.mjs](../chat-completions-adapter.mjs#L386)：`chatToolChoice()` 构造可转换工具上下文并过滤 hosted web search，无其他可转换工具时同步删除 `tool_choice` / `parallel_tool_calls`。
+- [codex-config.mjs](../codex-config.mjs#L211)：从 catalog 模板生成模型能力字段，并为未启用 Hosted Web Search 的模型删除 `web_search_tool_type`。
 - [codex-models.json](../codex-models.json#L9)：模板包含 `web_search_tool_type: "text"`。
 
 ## 根因分析

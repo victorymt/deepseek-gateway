@@ -10,9 +10,12 @@ export function createOperationsStorageRoutes({ readJsonBody, restoreConfig, wri
       if (req.method === 'POST') {
         const body = await readJsonBody(req);
         if (body.action === 'backup') {
-          writeJson(res, 201, current.createBackup());
+          const backup = current.createBackup();
+          current.addLog({ level: 'audit', message: 'config backup created', method: req.method, route: pathname, status: 201 });
+          writeJson(res, 201, backup);
         } else if (body.action === 'restore') {
           const result = current.restoreBackup(String(body.id || ''));
+          current.addLog({ level: 'audit', message: `config restored from backup ${result.restored}`, method: req.method, route: pathname, status: 200 });
           restoreConfig(cfg, registry, result.config);
           writeJson(res, 200, { restored: result.restored });
         } else {
@@ -29,6 +32,7 @@ export function createOperationsStorageRoutes({ readJsonBody, restoreConfig, wri
       }
       const fs = await import('node:fs');
       fs.unlinkSync(backup.path);
+      current.addLog({ level: 'audit', message: `config backup deleted ${id}`, method: req.method, route: pathname, status: 200 });
       writeJson(res, 200, { deleted: id });
       return true;
     }

@@ -99,6 +99,64 @@ test('operations store migrates legacy JSON and quarantines malformed files', ()
   }
 });
 
+test('operations store quarantines a file corrupted while running instead of overwriting it', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-operations-'));
+  const configPath = path.join(directory, 'keys.json');
+  const operationsPath = path.join(directory, 'gateway-operations.json');
+  fs.writeFileSync(configPath, '{}');
+  try {
+    const store = createOperationsStore(configPath);
+    store.addLog({ message: 'first' });
+    store.flush();
+    // Simulate another writer leaving the file corrupt while this store runs.
+    fs.writeFileSync(operationsPath, '{broken');
+    store.addLog({ message: 'second' });
+    store.flush();
+    const corrupt = fs.readdirSync(directory)
+      .filter(name => name.startsWith('gateway-operations.json.corrupt-'));
+    assert.equal(corrupt.length, 1);
+    assert.equal(fs.readFileSync(path.join(directory, corrupt[0]), 'utf8'), '{broken');
+    // In-memory state survives and the store keeps working.
+    assert.deepEqual(store.listLogs().map(item => item.message), ['second', 'first']);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('clearLogs preserves the audit trail', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-operations-'));
+  const configPath = path.join(directory, 'keys.json');
+  fs.writeFileSync(configPath, '{}');
+  try {
+    const store = createOperationsStore(configPath);
+    store.addLog({ level: 'audit', message: 'admin login succeeded', method: 'POST', route: '/login', status: 302 });
+    store.addLog({ message: 'ordinary request log' });
+    store.clearLogs();
+    const remaining = store.listLogs();
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].level, 'audit');
+    assert.equal(remaining[0].message, 'admin login succeeded');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('logs pagination rejects a zero limit', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-operations-'));
+  const configPath = path.join(directory, 'keys.json');
+  fs.writeFileSync(configPath, '{}');
+  try {
+    const store = createOperationsStore(configPath);
+    store.addLog({ message: 'one' });
+    assert.throws(
+      () => store.listLogsPage(new URLSearchParams('limit=0')),
+      error => error.statusCode === 400 && /positive integer/.test(error.message),
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('operations store merges writes from concurrent instances', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-operations-'));
   const configPath = path.join(directory, 'keys.json');

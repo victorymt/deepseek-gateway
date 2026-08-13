@@ -20,6 +20,7 @@ export function createOperationsRoutes(services) {
     if (!current) return false;
     const { req, res, pathname } = context;
     if (pathname === '/api/runtime/stop' && req.method === 'POST') {
+      current.addLog({ level: 'audit', message: 'runtime stop requested', method: req.method, route: pathname, status: 202 });
       writeJson(res, 202, { stopping: true });
       setTimeout(() => stopGateway(), 250);
       return true;

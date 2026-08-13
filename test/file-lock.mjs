@@ -94,3 +94,41 @@ test('withFileLock steals a stale lock and leaves no residue', () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('withFileLock takes over a lock whose owner process is dead even with a fresh mtime', () => {
+  const { directory, lock } = lockFixture();
+  try {
+    // pid 99999999 does not exist; the mtime is fresh to prove the takeover
+    // relies on owner liveness, not on the mtime heuristic.
+    fs.writeFileSync(lock, '99999999.1234567890.deadbeef\n');
+    let ran = false;
+    withFileLock(lock, () => { ran = true; }, { timeoutMs: 1000, label: 'test' });
+    assert.equal(ran, true);
+    assert.equal(fs.existsSync(lock), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('withFileLock never steals a lock held by a live owner', () => {
+  const { directory, lock } = lockFixture();
+  try {
+    const token = `${process.pid}.${Date.now()}.deadbeef`;
+    fs.writeFileSync(lock, `${token}\n`);
+    makeStale(lock); // stale mtime must not matter while the owner is alive
+    let ran = false;
+    assert.throws(
+      () => withFileLock(lock, () => { ran = true; }, {
+        timeoutMs: 60,
+        staleMs: 1000,
+        waitMs: 1,
+        label: 'test',
+      }),
+      error => error.statusCode === 503 && /cannot acquire test lock/.test(error.message),
+    );
+    assert.equal(ran, false);
+    assert.equal(fs.readFileSync(lock, 'utf8').trim(), token);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -5,11 +5,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 /**
- * Lock files carry a unique token so takeover and release can be
- * identity-checked. A plain "stat then unlink" stale takeover is unsafe: the
- * lock may be replaced by another process between the two calls, and the
- * takeover would delete a fresh lock. Instead the occupant is atomically
- * renamed aside and its token verified before anything is discarded.
+ * Lock files carry a unique token (`<pid>.<startedAt>.<nonce>`) so takeover
+ * and release can be identity-checked.
+ *
+ * Stale takeover is inherently racy on plain POSIX files: there is no atomic
+ * "remove only if token matches" operation, so a takeover that renames the
+ * occupant aside can race a third process that creates a new lock in the
+ * brief gap. We minimize that window to the practical floor:
+ *
+ * - staleness is decided by the OWNER PID (fact, via kill(pid, 0)) instead of
+ *   mtime heuristics, and the token is read BEFORE the staleness decision, so
+ *   a lock replaced between our checks is never mistaken for the stale one;
+ * - the moved occupant is verified against the token we observed, and on
+ *   mismatch the fresh lock is restored instead of discarded;
+ * - release only unlinks when the file still carries our token.
+ *
+ * The remaining theoretical window (three processes racing within the rename
+ * gap, causing a brief double entry) is documented in takeStaleLock below.
  */
 function readLockToken(file) {
   try {
@@ -17,6 +29,29 @@ function readLockToken(file) {
   } catch (error) {
     if (error?.code === 'ENOENT') return null;
     throw error;
+  }
+}
+
+function lockOwnerPid(token) {
+  const match = /^(\d+)\./.exec(String(token || ''));
+  return match ? Number(match[1]) : NaN;
+}
+
+/**
+ * @returns true when the lock owner process is alive, false when it is
+ * confirmed dead (ESRCH), or null when the token carries no usable pid
+ * (legacy/empty lock files).
+ */
+function ownerAlive(token) {
+  const pid = lockOwnerPid(token);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    if (error?.code === 'EPERM') return true;
+    return null;
   }
 }
 
@@ -28,9 +63,10 @@ function readLockToken(file) {
  * - token matches: the stale lock is discarded and the takeover succeeded
  *   (the caller then creates its own lock).
  * - token mismatch: the lock was replaced by another process between our
- *   stale check and the rename; the fresh lock is restored to `file` (unless
- *   yet another process created a lock there first, in which case the moved
- *   one is discarded) and the takeover is abandoned.
+ *   staleness check and the rename; the fresh lock is restored to `file`
+ *   (unless yet another process created a lock there first — in that
+ *   sub-millisecond window the moved lock is discarded and both new owners
+ *   may briefly overlap, which plain-fs takeover cannot fully prevent).
  *
  * Returns `{ taken: boolean, reason: 'taken' | 'gone' | 'replaced' }`.
  */
@@ -67,9 +103,10 @@ function releaseLock(file, token) {
  * - Creates `<file>` with `O_EXCL` (0600), writes a unique token into it and
  *   holds the descriptor for the duration of `operation()`, then releases it
  *   in `finally` (only unlinking if the file still carries our token).
- * - A lock whose mtime is older than `staleMs` is considered abandoned and is
- *   taken over through the verified rename protocol; otherwise the caller
- *   waits up to `timeoutMs`.
+ * - A lock whose owner process is dead is taken over immediately (verified
+ *   rename protocol); a lock with an unparseable legacy token is taken over
+ *   once its mtime is older than `staleMs`; a lock held by a live process is
+ *   waited on up to `timeoutMs`.
  * - Throws a 503 error on timeout so callers can surface a clear message
  *   instead of silently proceeding without mutual exclusion.
  */
@@ -96,22 +133,21 @@ export function withFileLock(file, operation, {
           { statusCode: 503 },
         );
       }
-      let stale = false;
-      try {
-        stale = Date.now() - fs.statSync(file).mtimeMs > staleMs;
-      } catch (statError) {
-        if (statError?.code === 'ENOENT') continue; // lock vanished; retry creation
-        throw statError;
-      }
-      if (stale) {
-        const observed = readLockToken(file);
-        const quarantine = `${file}.stale-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
-        const result = takeStaleLock(file, quarantine, observed);
-        if (result.reason === 'replaced') continue; // fresh lock restored; keep waiting
-        // 'taken' or 'gone': the path is free again — retry creation.
+      // Read the occupant's identity BEFORE judging staleness: a lock that is
+      // replaced between our checks must never be taken over as "stale".
+      const observed = readLockToken(file);
+      if (observed === null) continue; // lock vanished; retry creation
+      const alive = ownerAlive(observed);
+      const staleByMtime = Date.now() - fs.statSync(file).mtimeMs > staleMs;
+      if (alive === true || (alive === null && !staleByMtime)) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
         continue;
       }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
+      // Owner confirmed dead (alive === false) or legacy lock older than
+      // staleMs: attempt the verified takeover.
+      const quarantine = `${file}.stale-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+      takeStaleLock(file, quarantine, observed);
+      continue; // 'taken'/'gone': path free, retry creation; 'replaced': restored, keep waiting
     }
   }
   try {

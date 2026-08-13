@@ -86,6 +86,38 @@ test('KeyPool half-open probes revive invalid keys after the probe interval', ()
   assert.equal(pool.state(key), 'healthy');
 });
 
+test('KeyPool releases the probe reservation on 429 and request-level 4xx', () => {
+  const config = settings();
+  const pool = new KeyPool(config.providers[0].keys, config, 'alpha');
+  pool.keys[1].enabled = false; // single-key pool
+  const key = pool.keys[0];
+  // 429 probe: reservation released and the probe window restarts.
+  pool.recordResult(key, { status: 401 });
+  key.invalidatedAt = Date.now() - 61 * 1000;
+  assert.equal(pool.pickKey()?.name, 'first');
+  pool.recordResult(key, { status: 429, retryAfterSec: 2 });
+  assert.equal(key.invalidProbeInFlight, false);
+  assert.ok(key.invalidatedAt > Date.now() - 1000);
+  assert.equal(pool.pickKey(), null);
+  // 403 probe: reservation released, key stays invalid, window restarts.
+  key.invalidatedAt = Date.now() - 61 * 1000;
+  key.throttleUntil = 0;
+  assert.equal(pool.pickKey()?.name, 'first');
+  pool.recordResult(key, { status: 403 });
+  assert.equal(key.invalidProbeInFlight, false);
+  assert.equal(key.invalid, true);
+  assert.ok(key.invalidatedAt > Date.now() - 1000);
+  assert.equal(pool.pickKey(), null);
+  // A later successful probe still revives the key.
+  key.invalidatedAt = Date.now() - 61 * 1000;
+  key.throttleUntil = 0;
+  const probe = pool.pickKey();
+  assert.equal(probe?.name, 'first');
+  pool.recordResult(probe, { status: 200 });
+  assert.equal(key.invalid, false);
+  assert.equal(pool.pickKey()?.name, 'first');
+});
+
 test('KeyPool limits half-open probes to one concurrent request', () => {
   const config = settings();
   const pool = new KeyPool(config.providers[0].keys, config, 'alpha');

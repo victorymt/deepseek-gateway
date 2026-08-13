@@ -153,11 +153,14 @@ export class KeyPool {
     key.inFlight = Math.max(0, key.inFlight - 1);
     this.total.requests++;
     key.lastUsed = Date.now();
+    // A picked invalid key may have been a half-open probe; release its
+    // reservation up front so no completion path can leave it stuck.
+    const wasInvalidProbe = key.invalid && key.invalidProbeInFlight;
+    key.invalidProbeInFlight = false;
     if (r.clientAbort) {
       key.errors++;
       this.total.errors++;
       key.lastError = 'client aborted';
-      key.invalidProbeInFlight = false;
       return;
     }
     if (r.networkError) {
@@ -176,13 +179,16 @@ export class KeyPool {
       key.failureCount = 0;
       key.failureWindowStart = 0;
       key.invalidatedAt = 0;
-      key.invalidProbeInFlight = false;
       key.throttleUntil = 0;
       key.lastError = '';
       return;
     }
     key.errors++;
     this.total.errors++;
+    // Any probe that did not succeed restarts the probe window, so 429,
+    // request-level 4xx, 5xx and 401/402 all wait a full interval before the
+    // next probe instead of hammering the invalid key.
+    if (wasInvalidProbe && !key.alwaysTry) key.invalidatedAt = Date.now();
     if (s === 429) {
       key.ratelimited++;
       this.total.ratelimited++;
@@ -203,6 +209,8 @@ export class KeyPool {
     } else if (s >= 500) {
       this.recordFailure(key, `http ${s}`);
     }
+    // Other request-level 4xx (400/403/404/...): no credential-health signal,
+    // the key stays invalid and the window above governs the next probe.
   }
 
   recordTokens(totalTokens, model = '') {

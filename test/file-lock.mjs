@@ -1,133 +1,157 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
-import { takeStaleLock, withFileLock } from '../file-lock.mjs';
+import { withFileLock } from '../file-lock.mjs';
+
+const worker = fileURLToPath(new URL('./fixtures/file-lock-worker.mjs', import.meta.url));
 
 function lockFixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-lock-'));
-  const lock = path.join(directory, 'lock');
-  const quarantine = path.join(directory, 'quarantine');
-  return { directory, lock, quarantine };
+  return {
+    directory,
+    lock: path.join(directory, 'lock'),
+    counter: path.join(directory, 'counter'),
+  };
 }
 
-function makeStale(file) {
-  const old = new Date(Date.now() - 60 * 1000);
-  fs.utimesSync(file, old, old);
+function startWorker(args) {
+  return spawn(process.execPath, [worker, ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }
 
-test('stale lock takeover restores a concurrently replaced lock', () => {
-  const { directory, lock, quarantine } = lockFixture();
-  try {
-    // The takeover observed a stale token, but by the time it renames the
-    // occupant aside, another process has replaced it with a fresh lock.
-    fs.writeFileSync(lock, 'fresh-token\n');
-    const result = takeStaleLock(lock, quarantine, 'stale-token');
-    assert.equal(result.taken, false);
-    assert.equal(result.reason, 'replaced');
-    // The fresh lock survives at the canonical path; nothing was deleted.
-    assert.equal(fs.readFileSync(lock, 'utf8').trim(), 'fresh-token');
-    assert.equal(fs.existsSync(quarantine), false);
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
+function waitForLine(child, expected) {
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+      if (stdout.split(/\r?\n/).includes(expected)) resolve();
+    });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('exit', code => {
+      if (!stdout.split(/\r?\n/).includes(expected)) {
+        reject(new Error(`worker exited ${code}: ${stderr || stdout}`));
+      }
+    });
+  });
+}
 
-test('stale lock takeover discards a confirmed-stale lock', () => {
-  const { directory, lock, quarantine } = lockFixture();
-  try {
-    fs.writeFileSync(lock, 'stale-token\n');
-    const result = takeStaleLock(lock, quarantine, 'stale-token');
-    assert.equal(result.taken, true);
-    assert.equal(fs.existsSync(lock), false);
-    assert.equal(fs.existsSync(quarantine), false);
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
+function waitForExit(child) {
+  return new Promise((resolve, reject) => {
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('exit', code => {
+      if (code === 0) resolve();
+      else reject(new Error(`worker exited ${code}: ${stderr}`));
+    });
+  });
+}
 
-test('stale lock takeover reports a lock that vanished concurrently', () => {
-  const { directory, lock, quarantine } = lockFixture();
-  try {
-    const result = takeStaleLock(lock, quarantine, 'stale-token');
-    assert.equal(result.taken, false);
-    assert.equal(result.reason, 'gone');
-    assert.equal(fs.existsSync(lock), false);
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test('withFileLock never deletes a lock it does not own', () => {
+test('withFileLock times out while another process holds the lock', async () => {
   const { directory, lock } = lockFixture();
+  const child = startWorker(['hold', lock, '250']);
   try {
-    fs.writeFileSync(lock, 'foreign-token\n');
-    let ran = false;
+    await waitForLine(child, 'locked');
     assert.throws(
-      () => withFileLock(lock, () => { ran = true; }, {
-        timeoutMs: 60,
-        staleMs: 30000,
-        waitMs: 1,
-        label: 'test',
-      }),
-      error => error.statusCode === 503 && /cannot acquire test lock/.test(error.message),
+      () => withFileLock(lock, () => {}, { timeoutMs: 25, label: 'test' }),
+      error => error.statusCode === 503 && /timed out/.test(error.message),
     );
-    assert.equal(ran, false);
-    assert.equal(fs.readFileSync(lock, 'utf8').trim(), 'foreign-token');
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test('withFileLock steals a stale lock and leaves no residue', () => {
-  const { directory, lock } = lockFixture();
-  try {
-    fs.writeFileSync(lock, 'old-stale-owner\n');
-    makeStale(lock);
+    await waitForExit(child);
     let ran = false;
     withFileLock(lock, () => { ran = true; }, { timeoutMs: 1000, label: 'test' });
     assert.equal(ran, true);
-    assert.equal(fs.existsSync(lock), false);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGKILL');
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('withFileLock is mutually exclusive across concurrent processes', async () => {
+  const { directory, lock, counter } = lockFixture();
+  fs.writeFileSync(counter, '0\n');
+  try {
+    const children = Array.from({ length: 12 }, () => (
+      startWorker(['increment', lock, counter])
+    ));
+    await Promise.all(children.map(waitForExit));
+    assert.equal(Number(fs.readFileSync(counter, 'utf8')), children.length);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test('withFileLock takes over a lock whose owner process is dead even with a fresh mtime', () => {
+test('kernel releases the lock when its owning process exits', async () => {
   const { directory, lock } = lockFixture();
+  const child = startWorker(['hold', lock, '30000']);
   try {
-    // pid 99999999 does not exist; the mtime is fresh to prove the takeover
-    // relies on owner liveness, not on the mtime heuristic.
-    fs.writeFileSync(lock, '99999999.1234567890.deadbeef\n');
+    await waitForLine(child, 'locked');
+    child.kill('SIGKILL');
+    await new Promise(resolve => child.once('exit', resolve));
     let ran = false;
     withFileLock(lock, () => { ran = true; }, { timeoutMs: 1000, label: 'test' });
     assert.equal(ran, true);
-    assert.equal(fs.existsSync(lock), false);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGKILL');
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('withFileLock closes a partially acquired descriptor on setup failure', () => {
+  const { directory, lock } = lockFixture();
+  const original = fs.fchmodSync;
+  try {
+    fs.fchmodSync = () => { throw Object.assign(new Error('simulated failure'), { code: 'EIO' }); };
+    assert.throws(
+      () => withFileLock(lock, () => {}, { label: 'test' }),
+      error => error.statusCode === 503 && /simulated failure/.test(error.message),
+    );
+    fs.fchmodSync = original;
+    let ran = false;
+    withFileLock(lock, () => { ran = true; }, { timeoutMs: 1000, label: 'test' });
+    assert.equal(ran, true);
+  } finally {
+    fs.fchmodSync = original;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('withFileLock preserves operation errors and releases the lock', () => {
+  const { directory, lock } = lockFixture();
+  const expected = new Error('operation failed');
+  try {
+    assert.throws(
+      () => withFileLock(lock, () => { throw expected; }, { label: 'test' }),
+      error => error === expected,
+    );
+    let ran = false;
+    withFileLock(lock, () => { ran = true; }, { timeoutMs: 1000, label: 'test' });
+    assert.equal(ran, true);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test('withFileLock never steals a lock held by a live owner', () => {
+test('withFileLock rejects symlink lock paths', () => {
   const { directory, lock } = lockFixture();
+  const target = path.join(directory, 'target');
   try {
-    const token = `${process.pid}.${Date.now()}.deadbeef`;
-    fs.writeFileSync(lock, `${token}\n`);
-    makeStale(lock); // stale mtime must not matter while the owner is alive
-    let ran = false;
+    fs.writeFileSync(target, 'do not lock through this path\n');
+    fs.symlinkSync(target, lock);
     assert.throws(
-      () => withFileLock(lock, () => { ran = true; }, {
-        timeoutMs: 60,
-        staleMs: 1000,
-        waitMs: 1,
-        label: 'test',
-      }),
+      () => withFileLock(lock, () => {}, { label: 'test' }),
       error => error.statusCode === 503 && /cannot acquire test lock/.test(error.message),
     );
-    assert.equal(ran, false);
-    assert.equal(fs.readFileSync(lock, 'utf8').trim(), token);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

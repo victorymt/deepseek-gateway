@@ -13,9 +13,7 @@ const USAGE_RETENTION_DAYS = 30;
 const BACKUP_LIMIT = 5;
 const PERSIST_DELAY_MS = 200;
 const STORAGE_SCHEMA_VERSION = 2;
-const LOCK_WAIT_MS = 5;
 const LOCK_TIMEOUT_MS = 2000;
-const LOCK_STALE_MS = 30000;
 
 function safeRead(file, fallback, { quarantine = true } = {}) {
   let content;
@@ -91,8 +89,6 @@ function writeAtomic(file, buildValue) {
     }
   }, {
     timeoutMs: LOCK_TIMEOUT_MS,
-    staleMs: LOCK_STALE_MS,
-    waitMs: LOCK_WAIT_MS,
     label: 'operations storage',
   });
 }

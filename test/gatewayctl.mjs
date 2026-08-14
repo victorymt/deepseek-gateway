@@ -257,6 +257,7 @@ test('gatewayctl validates config and doctor accepts an offline gateway', () => 
       encoding: 'utf8',
     });
     assert.equal(doctor.status, 0, doctor.stderr);
+    assert.match(doctor.stdout, /flock/);
     assert.match(doctor.stdout, /doctor 完成/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

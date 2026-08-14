@@ -415,18 +415,15 @@ test('reconcile stamps the manifest owner and allows cleanup for the same config
   }
 });
 
-test('reconcile leaves no lock file behind and steals stale locks', () => {
+test('reconcile reuses a stable private advisory lock file', () => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-agents-lock-'));
   const projector = createCodexAgentProjector({ codexHome });
   const lockPath = `${projector.manifestPath}.lock`;
   try {
     projector.reconcile(config, [agent()]);
-    assert.equal(fs.existsSync(lockPath), false);
-    fs.writeFileSync(lockPath, 'stale');
-    const old = new Date(Date.now() - 60 * 1000);
-    fs.utimesSync(lockPath, old, old);
+    assert.equal(fs.statSync(lockPath).mode & 0o777, 0o600);
     projector.reconcile(config, [agent({ description: 'updated scope' })]);
-    assert.equal(fs.existsSync(lockPath), false);
+    assert.equal(fs.existsSync(lockPath), true);
     assert.match(
       fs.readFileSync(path.join(codexHome, 'agents', 'reviewer.toml'), 'utf8'),
       /updated scope/,

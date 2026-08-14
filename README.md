@@ -20,7 +20,7 @@ gateway.mjs  -- HTTP 入口与组件装配
 
 ## 运行要求
 
-- Node.js 22.15 或更新版本，以及 npm；Codex 会发送 zstd 压缩请求，网关使用 Node.js 原生 zstd API 解压
+- Linux、util-linux `flock`、Node.js 22.15 或更新版本，以及 npm；Codex 会发送 zstd 压缩请求，网关使用 Node.js 原生 zstd API 解压
 - Python 3.10 或更新版本，用于交互式配置和 Codex 配置合并；推荐 Python 3.11+
 - Codex CLI，仅在需要接入 Codex 时使用
 

@@ -14,6 +14,7 @@ import {
   readGatewayRuntime,
   releaseGatewayRuntime,
 } from './gateway-runtime.mjs';
+import { withFileLock } from './file-lock.mjs';
 import { assertSupportedNodeVersion } from './node-version.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -295,6 +296,18 @@ async function doctor(args) {
   assertConfigOnlyArgs(args);
   const configPath = configOption(args);
   console.log(`OK: Node.js ${process.version}`);
+  const lockCheckDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsgw-doctor-lock-'));
+  try {
+    withFileLock(path.join(lockCheckDir, 'lock'), () => {}, {
+      timeoutMs: 1000,
+      label: 'doctor',
+    });
+  } catch (error) {
+    throw new Error(`util-linux flock check failed: ${error.message}`);
+  } finally {
+    fs.rmSync(lockCheckDir, { recursive: true, force: true });
+  }
+  console.log('OK: util-linux flock');
 
   const config = readConfig(configPath);
   if (config.setupPending) {

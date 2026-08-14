@@ -236,6 +236,7 @@ cp keys.example.json keys.json
       "apiProfile": "deepseek",
       "supportsEncryptedAgentMessages": false,
       "supportsPromptCacheKey": false,
+      "keyRouting": "balanced",
       "enabled": true,
       "balanceQuery": {
         "enabled": true,
@@ -460,7 +461,9 @@ Codex MultiAgentV2 通过自定义 Provider 派发子代理时，会把任务放
 | `403` | 作为当前请求的权限错误直接返回；不切换 Key，也不污染 Key 健康状态 |
 | 全部 Key 冷却、失效或余额不可用 | 返回 `502 no keys available`，不再强行调度不可用 Key |
 
-正常情况下，调度器先排除停用、冷却、失效以及余额明确不可用（`isAvailable: false`）的 Key，再选择 `inFlight / weight` 最小的 Key，平分时使用轮询游标；`alwaysTry` Key 不受失效和余额排除影响。`inFlight` 会保持到响应体完整结束，因此长时间 SSE 请求也参与并发均衡。每个 Provider 至少需要保留一个 `enabled: true` 的 Key。
+正常情况下，调度器先排除停用、冷却、失效以及余额明确不可用（`isAvailable: false`）的 Key。默认 `keyRouting: "balanced"` 会选择 `inFlight / weight` 最小的 Key，平分时使用轮询游标；`inFlight` 会保持到响应体完整结束，因此长时间 SSE 请求也参与并发均衡。
+
+Provider 显式设置 `keyRouting: "prompt-cache-affinity"` 后，带非空字符串 `prompt_cache_key` 的请求会通过加权 Rendezvous Hash 稳定映射到同一个 Key。映射按 Key 权重分布，Key 改名不会改变结果；停用、冷却、失效或余额不可用时选择确定性的下一候选，首选恢复健康后立即回粘。粘性值只在内存中以 SHA-256 摘要参与调度，不会写入配置或日志。没有有效 `prompt_cache_key` 的请求仍使用默认均衡策略，粘性请求也不会推进均衡策略的轮询游标。`alwaysTry` Key 不受失效和余额排除影响，每个 Provider 至少需要保留一个 `enabled: true` 的 Key。
 
 Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会将它自动移出调度池。失败 Key 仍会从当前请求的后续重试中排除，避免同一请求重复调用；新的请求可以再次选择它。`429` 是例外：无论是否启用 `alwaysTry`，网关都会尊重 `Retry-After` 或 `cooldownMs`。因此只有一个 `alwaysTry` Key 时，普通失败后的每个新请求仍会调用该 Key，限流冷却期间则返回 `502 no keys available`。Web UI 会将这种状态显示为“异常但继续尝试”。
 
@@ -491,6 +494,7 @@ Key 设置 `"alwaysTry": true` 后，鉴权错误、网络错误或 `5xx` 不会
 | `providers[].apiProfile` | - | - | `generic` | Provider API 能力模板，可选 `generic` 或 `deepseek`；旧版官方 DeepSeek 配置会自动迁移 |
 | `providers[].supportsEncryptedAgentMessages` | - | - | `false` | 是否让原生 Responses 上游直接处理 Multi-agent `agent_message`；仅允许用于 `responses` Provider。默认关闭时，网关会兼容解包 Codex 自定义 Provider 发出的子代理任务 |
 | `providers[].supportsPromptCacheKey` | - | - | `false` | 是否向 Chat Completions 上游转发 Responses `prompt_cache_key`；仅允许用于 `chat-completions` Provider，并应在确认上游支持后开启 |
+| `providers[].keyRouting` | - | - | `balanced` | Key 调度策略，可选 `balanced` 或 `prompt-cache-affinity`；后者仅对带非空字符串 `prompt_cache_key` 的请求启用强粘性 |
 | `providers[].models[].id` | - | - | - | Codex 路由模型 ID，支持 `.`, `_`, `/`, `:`、`+` 和单连字符；不能包含保留分隔符 `--` |
 | `providers[].models[].inputModalities` | - | - | 按 `model-capabilities.json` 推断 | 模型输入能力，可选 `text`、`image`，且必须包含 `text`；显式配置优先于自动识别 |
 | `providers[].models[].reasoning` | - | - | 按已知模型目录推断 | Codex 思考等级及上游参数映射；对象覆盖目录，`null` 显式关闭目录预设，未知模型不自动启用 |
@@ -599,7 +603,7 @@ npm run build
 
 根目录 `npm test` 使用固定的 Node TAP、pytest 和 Vitest 命令，并隔离调用者追加的 runner 参数；其中 `scripts/run-node-tests.sh` 为每个 Node 测试文件启动独立进程，避免全局状态在文件之间泄漏。需要直接向 Vitest 传参时使用 `npm --prefix ui test -- <vitest 参数>`。
 
-测试使用内置 mock 上游，不消耗真实 API Key。五个 smoke 文件共保留 71 个端到端场景；配置内核、`ProviderRuntime`、`UpstreamRelay` 和 Gateway 测试夹具另有直接契约测试。UI 单元测试除 Provider 草稿转换、脱敏提交载荷、模型去重、Hosted Web Search 协议切换、reasoning 能力保留和额度格式化外，还覆盖 Operations 页面状态保持与重置、请求取消与竞态处理，以及按页面隔离的加载错误边界。Key 后缀可触发不同 mock 行为：
+测试使用内置 mock 上游，不消耗真实 API Key。五个 smoke 文件共保留 72 个端到端场景；配置内核、`ProviderRuntime`、`UpstreamRelay` 和 Gateway 测试夹具另有直接契约测试。UI 单元测试除 Provider 草稿转换、脱敏提交载荷、模型去重、Hosted Web Search 协议切换、reasoning 能力保留和额度格式化外，还覆盖 Operations 页面状态保持与重置、请求取消与竞态处理，以及按页面隔离的加载错误边界。Key 后缀可触发不同 mock 行为：
 
 | 后缀 | 行为 |
 | --- | --- |
@@ -611,4 +615,4 @@ npm run build
 | `-drip` | 分段流式响应 |
 | `-abort` | 流式传输中断 |
 
-测试覆盖轮询与并发调度、Provider 别名隔离、独立冷却、运行时增量 Key、批量解析与原子导入、重复 secret 拒绝、上游模型发现与 ID 归一化、Responses 与 Chat Completions 双向转换、工具调用和分片 SSE 终止事件、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、运维 JSON 迁移/损坏恢复/并发写入、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、CSRF、会话失效、审计、请求体上限、`gatewayctl` 托管启动和安全停止、交互式配置及备份恢复。
+测试覆盖轮询、并发与 Prompt Cache 粘性调度、Provider 别名隔离、独立冷却、运行时增量 Key、批量解析与原子导入、重复 secret 拒绝、上游模型发现与 ID 归一化、Responses 与 Chat Completions 双向转换、工具调用和分片 SSE 终止事件、切换上游时的请求排空、QuickJS 额度脚本隔离与请求限制、自动和手动额度刷新、429 切换、401/402 永久剔除、5xx 累计失败黑名单、SSE 透传、流式生命周期、Provider 与 Settings API 脱敏、热更新和原子持久化、运维 JSON 迁移/损坏恢复/并发写入、Web-first 引导、Codex 动态目录、token/Cookie 权限隔离、CSRF、会话失效、审计、请求体上限、`gatewayctl` 托管启动和安全停止、交互式配置及备份恢复。

@@ -29,6 +29,38 @@ test('round-robin distributes across keys', async () => {
   }
 });
 
+test('prompt cache affinity keeps keyed requests sticky without perturbing round-robin', async () => {
+  const config = multiProviderConfig({ maxRetries: 0 });
+  config.providers[0].keyRouting = 'prompt-cache-affinity';
+  config.providers[0].keys = [
+    { name: 'alice', key: 'sk-a-ok', weight: 1 },
+    { name: 'bob', key: 'sk-b-ok', weight: 1 },
+  ];
+  const gw = await startGateway('', [], {}, config, { keysArg: false });
+  try {
+    const stickyNames = [];
+    for (let i = 0; i < 4; i++) {
+      const response = await gw.responses({
+        model: 'alpha--shared',
+        prompt_cache_key: 'stable-project-session',
+      });
+      assert.equal(response.status, 200, response.text);
+      stickyNames.push(JSON.parse(response.text).gateway_key_name);
+    }
+    assert.deepEqual(stickyNames, Array(4).fill(stickyNames[0]));
+
+    const unkeyed = [];
+    for (let i = 0; i < 2; i++) {
+      const response = await gw.responses({ model: 'alpha--shared' });
+      assert.equal(response.status, 200, response.text);
+      unkeyed.push(JSON.parse(response.text).gateway_key_name);
+    }
+    assert.deepEqual(unkeyed, ['alice', 'bob']);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test('429 fails over to the next key and cools the throttled one', async () => {
   const gw = await startGateway('alice=sk-a-429,bob=sk-b-ok');
   try {

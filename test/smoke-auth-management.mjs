@@ -119,6 +119,7 @@ test('provider API masks secrets, persists atomically, and applies new aliases l
         baseUrl: 'https://gamma.example/v1',
         upstreamFormat: 'chat-completions',
         supportsPromptCacheKey: true,
+        keyRouting: 'prompt-cache-affinity',
         enabled: true,
         models: [{
           id: 'shared',
@@ -139,6 +140,7 @@ test('provider API masks secrets, persists atomically, and applies new aliases l
     assert.match(gamma.keys[0].maskedKey, /^\*\*\*\*/);
     assert.equal(gamma.keys[0].key, undefined);
     assert.equal(gamma.supportsPromptCacheKey, true);
+    assert.equal(gamma.keyRouting, 'prompt-cache-affinity');
     assert.equal(gamma.models[0].contextWindow, 262144);
     assert.equal(gamma.models[0].supportsParallelToolCalls, true);
     assert.equal(gamma.models[0].baseInstructions, 'Use Gamma coding instructions.');
@@ -152,6 +154,7 @@ test('provider API masks secrets, persists atomically, and applies new aliases l
     assert.equal(persisted.schemaVersion, 2);
     const persistedGamma = persisted.providers.find(provider => provider.id === 'gamma');
     assert.equal(persistedGamma.keys[0].key, secret);
+    assert.equal(persistedGamma.keyRouting, 'prompt-cache-affinity');
     assert.equal(persistedGamma.models[0].contextWindow, 262144);
     assert.equal(persistedGamma.models[0].supportsParallelToolCalls, true);
     assert.equal(persistedGamma.models[0].baseInstructions, 'Use Gamma coding instructions.');

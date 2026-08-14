@@ -216,6 +216,32 @@ export function ProviderEditorDialog({
                     <SelectContent><SelectGroup><SelectItem value="responses">{t.responsesFormat}</SelectItem><SelectItem value="chat-completions">{t.chatCompletionsFormat}</SelectItem></SelectGroup></SelectContent>
                   </Select>
                 </Field>
+                <Field>
+                  <FieldLabel htmlFor="provider-key-routing">{t.keyRouting}</FieldLabel>
+                  <Select
+                    items={[
+                      { value: "balanced", label: t.balancedKeyRouting },
+                      { value: "prompt-cache-affinity", label: t.promptCacheAffinityRouting },
+                    ]}
+                    value={draft.keyRouting}
+                    onValueChange={(value) =>
+                      setDraft((current) => ({
+                        ...current,
+                        keyRouting: value === "prompt-cache-affinity"
+                          ? "prompt-cache-affinity"
+                          : "balanced",
+                      }))
+                    }
+                  >
+                    <SelectTrigger id="provider-key-routing" className="w-full"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="balanced">{t.balancedKeyRouting}</SelectItem>
+                        <SelectItem value="prompt-cache-affinity">{t.promptCacheAffinityRouting}</SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </Field>
                 <Field orientation="horizontal" data-disabled={draft.upstreamFormat === "chat-completions" || undefined}>
                   <FieldContent><FieldTitle>{t.encryptedAgentMessages}</FieldTitle><FieldDescription>{draft.upstreamFormat === "chat-completions" ? t.encryptedAgentMessagesUnavailable : t.encryptedAgentMessagesDescription}</FieldDescription></FieldContent>
                   <Switch aria-label={t.encryptedAgentMessages} checked={draft.supportsEncryptedAgentMessages} disabled={draft.upstreamFormat === "chat-completions"} onCheckedChange={(checked) => setDraft((value) => ({ ...value, supportsEncryptedAgentMessages: checked }))} />

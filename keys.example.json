@@ -21,6 +21,7 @@
       "apiProfile": "deepseek",
       "supportsEncryptedAgentMessages": false,
       "supportsPromptCacheKey": false,
+      "keyRouting": "balanced",
       "enabled": true,
       "balanceQuery": {
         "enabled": true,

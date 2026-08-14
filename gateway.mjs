@@ -188,6 +188,7 @@ function publicProvider(provider) {
     apiProfile: provider.apiProfile,
     supportsEncryptedAgentMessages: provider.supportsEncryptedAgentMessages === true,
     supportsPromptCacheKey: provider.supportsPromptCacheKey === true,
+    keyRouting: provider.keyRouting,
     enabled: provider.enabled,
     models: provider.models.map(model => ({
       ...model,
@@ -517,16 +518,21 @@ async function testKeyConnection(runtime, key) {
 }
 
 async function testProviderConnection(runtime) {
-  const key = runtime.pool.pickKey()
+  const selection = runtime.pool.pickKey();
+  const key = selection?.key
     || runtime.pool.keys.find(item => item.enabled)
     || runtime.pool.keys[0];
   if (!key) throw Object.assign(new Error('provider has no available key'), { statusCode: 409 });
   try {
     return await testKeyConnection(runtime, key);
   } finally {
-    // pickKey reserves half-open probes; this path never calls recordResult,
-    // so release the reservation explicitly.
-    if (key.invalid && !key.alwaysTry) key.invalidProbeInFlight = false;
+    // This path does not record routing health. Release only the reservation
+    // acquired by this call, and wait a full interval before another probe.
+    runtime.pool.releaseProbeReservation(
+      key,
+      selection?.probeReservation,
+      { restartWindow: true },
+    );
   }
 }
 

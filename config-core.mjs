@@ -13,6 +13,7 @@ export { CHAT_REASONING_PARAMETERS, normalizeReasoningConfig } from './reasoning
 export const DEFAULT_UPSTREAM = 'https://api.deepseek.com';
 export const UPSTREAM_FORMATS = ['responses', 'chat-completions'];
 export const API_PROFILES = ['generic', 'deepseek'];
+export const KEY_ROUTING_STRATEGIES = ['balanced', 'prompt-cache-affinity'];
 export const MODEL_INPUT_MODALITIES = ['text', 'image'];
 export const DEFAULT_MODELS = [
   {
@@ -98,6 +99,14 @@ export function normalizeApiProfile(value, field = 'apiProfile') {
     throw new Error(`${field} must be one of: ${API_PROFILES.join(', ')}`);
   }
   return profile;
+}
+
+export function normalizeKeyRouting(value, field = 'keyRouting') {
+  const strategy = String(value || 'balanced').trim().toLowerCase();
+  if (!KEY_ROUTING_STRATEGIES.includes(strategy)) {
+    throw new Error(`${field} must be one of: ${KEY_ROUTING_STRATEGIES.join(', ')}`);
+  }
+  return strategy;
 }
 
 export function normalizeInputModalities(value, field = 'inputModalities') {
@@ -265,6 +274,10 @@ export function normalizeProvider(input, existing = null) {
       `provider ${id} supportsPromptCacheKey requires chat-completions upstreamFormat`,
     );
   }
+  const keyRouting = normalizeKeyRouting(
+    input.keyRouting === undefined ? existing?.keyRouting : input.keyRouting,
+    `provider ${id} keyRouting`,
+  );
   const enabled = input.enabled === undefined ? (existing?.enabled ?? true) : input.enabled === true;
   const rawModels = input.models ?? existing?.models ?? [];
   const rawKeys = input.keys ?? existing?.keys ?? [];
@@ -394,6 +407,7 @@ export function normalizeProvider(input, existing = null) {
     apiProfile,
     supportsEncryptedAgentMessages,
     supportsPromptCacheKey,
+    keyRouting,
     enabled,
     models,
     keys,
@@ -564,6 +578,7 @@ export function serializableConfig(config) {
     providers: config.providers.map(({
       supportsEncryptedAgentMessages,
       supportsPromptCacheKey,
+      keyRouting,
       ...provider
     }) => ({
       ...provider,
@@ -573,6 +588,7 @@ export function serializableConfig(config) {
       ...(supportsPromptCacheKey
         ? { supportsPromptCacheKey: true }
         : {}),
+      ...(keyRouting === 'prompt-cache-affinity' ? { keyRouting } : {}),
       models: provider.models.map(({
         supportsHostedWebSearch,
         supportsCustomApplyPatch,

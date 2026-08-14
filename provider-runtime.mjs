@@ -1,5 +1,6 @@
 'use strict';
 
+import crypto from 'node:crypto';
 import http from 'node:http';
 import https from 'node:https';
 
@@ -20,6 +21,19 @@ const MAX_RETRY_AFTER_MS = 60 * 60 * 1000;
 // Failure counts accumulate inside this sliding window; a longer gap between
 // failures resets the counter so sporadic hiccups cannot blacklist a key.
 const FAILURE_DECAY_MS = 5 * 60 * 1000;
+const HASH_UNIT_DENOMINATOR = 2 ** 48 + 1;
+
+function affinityScore(providerId, affinityKey, key) {
+  const digest = crypto.createHash('sha256')
+    .update(providerId)
+    .update('\0')
+    .update(affinityKey)
+    .update('\0')
+    .update(key.affinityIdentity)
+    .digest();
+  const unit = (digest.readUIntBE(0, 6) + 1) / HASH_UNIT_DENOMINATOR;
+  return -Math.log(unit) / key.weight;
+}
 
 export class KeyPool {
   constructor(keys, cfg, providerId, operations = null) {
@@ -35,6 +49,7 @@ export class KeyPool {
   createKeyState(key) {
     return {
       ...key,
+      affinityIdentity: keyFingerprint(key.key),
       alwaysTry: key.alwaysTry === true,
       inFlight: 0,
       success: 0,
@@ -45,6 +60,7 @@ export class KeyPool {
       invalid: false,
       invalidatedAt: 0,
       invalidProbeInFlight: false,
+      invalidProbeReservation: null,
       unhealthy: false,
       throttleUntil: 0,
       lastUsed: 0,
@@ -68,6 +84,7 @@ export class KeyPool {
       previousByFingerprint.delete(fingerprint);
       existing.name = key.name;
       existing.key = key.key;
+      existing.affinityIdentity = fingerprint;
       existing.weight = key.weight;
       existing.enabled = key.enabled;
       existing.alwaysTry = key.alwaysTry === true;
@@ -81,7 +98,7 @@ export class KeyPool {
     return { added, removed: previousByFingerprint.size };
   }
 
-  pickKey(exclude = []) {
+  pickKey(exclude = [], affinityKey = null) {
     const now = Date.now();
     const avail = this.keys.filter(k => (
       k.enabled
@@ -95,31 +112,53 @@ export class KeyPool {
     if (!avail.length) return null;
     let best = null;
     let bestScore = Infinity;
-    let bestDist = Infinity;
     const n = this.keys.length;
-    for (let i = 0; i < avail.length; i++) {
-      const k = avail[i];
-      const idx = this.keys.indexOf(k);
-      const score = k.inFlight / (k.weight || 1);
-      const dist = (idx - this.cursor + n) % n;
-      if (score < bestScore || (score === bestScore && dist < bestDist)) {
-        best = k;
-        bestScore = score;
-        bestDist = dist;
+    if (typeof affinityKey === 'string' && affinityKey.length) {
+      for (const key of avail) {
+        const score = affinityScore(this.providerId, affinityKey, key);
+        if (score < bestScore) {
+          best = key;
+          bestScore = score;
+        }
       }
+    } else {
+      let bestDist = Infinity;
+      for (const key of avail) {
+        const idx = this.keys.indexOf(key);
+        const score = key.inFlight / (key.weight || 1);
+        const dist = (idx - this.cursor + n) % n;
+        if (score < bestScore || (score === bestScore && dist < bestDist)) {
+          best = key;
+          bestScore = score;
+          bestDist = dist;
+        }
+      }
+      this.cursor = (this.keys.indexOf(best) + 1) % n;
     }
-    this.cursor = (this.keys.indexOf(best) + 1) % n;
     // Reserve the half-open probe synchronously so concurrent requests cannot
-    // all pick the same invalid key; the flag is cleared by recordResult on
-    // every completion path.
-    if (best.invalid && !best.alwaysTry) best.invalidProbeInFlight = true;
-    return best;
+    // all pick the same invalid key. The selection carries the reservation
+    // token through the request lifecycle so only its owner can release it.
+    let probeReservation = null;
+    if (best.invalid && !best.alwaysTry) {
+      probeReservation = Symbol('invalid-key-probe');
+      best.invalidProbeInFlight = true;
+      best.invalidProbeReservation = probeReservation;
+    }
+    return { key: best, probeReservation };
+  }
+
+  releaseProbeReservation(key, reservation, { restartWindow = false } = {}) {
+    if (reservation === null || reservation === undefined) return false;
+    if (key.invalidProbeReservation !== reservation) return false;
+    key.invalidProbeInFlight = false;
+    key.invalidProbeReservation = null;
+    if (restartWindow && key.invalid && !key.alwaysTry) key.invalidatedAt = Date.now();
+    return true;
   }
 
   markInvalid(key, reason) {
     key.invalid = true;
     key.invalidatedAt = Date.now();
-    key.invalidProbeInFlight = false;
     key.unhealthy = false;
     key.throttleUntil = 0;
     key.lastError = reason;
@@ -133,7 +172,6 @@ export class KeyPool {
     }
     key.failureCount++;
     key.lastError = reason;
-    key.invalidProbeInFlight = false;
     // A failed probe restarts the probe window so the key waits a full
     // interval before being probed again.
     if (key.invalid && !key.alwaysTry) key.invalidatedAt = now;
@@ -149,18 +187,18 @@ export class KeyPool {
     }
   }
 
-  recordResult(key, r) {
+  recordResult(key, r, probeReservation = null) {
     key.inFlight = Math.max(0, key.inFlight - 1);
     this.total.requests++;
     key.lastUsed = Date.now();
     // A picked invalid key may have been a half-open probe; release its
     // reservation up front so no completion path can leave it stuck.
-    const wasInvalidProbe = key.invalid && key.invalidProbeInFlight;
-    key.invalidProbeInFlight = false;
+    const wasInvalidProbe = this.releaseProbeReservation(key, probeReservation);
     if (r.clientAbort) {
       key.errors++;
       this.total.errors++;
       key.lastError = 'client aborted';
+      if (wasInvalidProbe && !key.alwaysTry) key.invalidatedAt = Date.now();
       return;
     }
     if (r.networkError) {

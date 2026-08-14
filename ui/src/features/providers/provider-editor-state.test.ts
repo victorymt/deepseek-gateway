@@ -28,6 +28,7 @@ const provider: Provider = {
   apiProfile: "deepseek",
   supportsEncryptedAgentMessages: true,
   supportsPromptCacheKey: false,
+  keyRouting: "prompt-cache-affinity",
   enabled: true,
   models: [
     {
@@ -241,6 +242,7 @@ describe("provider editor state", () => {
     expect(draft.models[0].reasoning).toEqual(provider.models[0].reasoning)
     expect(draft.supportsEncryptedAgentMessages).toBe(true)
     expect(draft.supportsPromptCacheKey).toBe(false)
+    expect(draft.keyRouting).toBe("prompt-cache-affinity")
 
     draft.models[0].inputModalities.push("image")
     draft.models[0].reasoning!.levels[0].effort = "changed"
@@ -267,6 +269,7 @@ describe("provider editor state", () => {
     expect(keys[0]).not.toHaveProperty("fingerprint")
     expect(payload.supportsEncryptedAgentMessages).toBe(true)
     expect(payload.supportsPromptCacheKey).toBe(false)
+    expect(payload.keyRouting).toBe("prompt-cache-affinity")
     expect(payload.apiProfile).toBe("deepseek")
     expect(payload.models![0].supportsCustomApplyPatch).toBe(true)
     expect(payload.models![0].contextWindow).toBe(262144)

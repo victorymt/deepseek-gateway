@@ -10,6 +10,7 @@ import {
   normalizeBalanceQuery,
   normalizeConfig,
   normalizeInputModalities,
+  normalizeKeyRouting,
   normalizeModelIdentifier,
   normalizeProvider,
   normalizeReasoningConfig,
@@ -138,6 +139,40 @@ test('provider upstream format defaults to Responses and accepts Chat Completion
     }],
   });
   assert.equal(serializableConfig(normalized).providers[0].upstreamFormat, 'chat-completions');
+});
+
+test('provider key routing defaults to balanced and persists affinity explicitly', () => {
+  assert.equal(normalizeKeyRouting(undefined), 'balanced');
+  assert.equal(normalizeKeyRouting('prompt-cache-affinity'), 'prompt-cache-affinity');
+  assert.throws(() => normalizeKeyRouting('sticky'), /must be one of/);
+
+  const baseProvider = {
+    id: 'alpha',
+    baseUrl: 'https://alpha.example/v1',
+    models: [{ id: 'chat', upstreamModel: 'chat' }],
+    keys: [{ name: 'one', key: 'sk-one' }],
+  };
+  const defaults = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [baseProvider],
+  });
+  assert.equal(defaults.providers[0].keyRouting, 'balanced');
+  assert.equal(serializableConfig(defaults).providers[0].keyRouting, undefined);
+
+  const affinity = normalizeConfig({
+    schemaVersion: 2,
+    defaultProvider: 'alpha',
+    defaultModel: 'alpha--chat',
+    providers: [{ ...baseProvider, keyRouting: 'prompt-cache-affinity' }],
+  });
+  assert.equal(affinity.providers[0].keyRouting, 'prompt-cache-affinity');
+  assert.equal(
+    serializableConfig(affinity).providers[0].keyRouting,
+    'prompt-cache-affinity',
+  );
+  assert.equal(normalizeProvider({ name: 'Renamed' }, affinity.providers[0]).keyRouting, 'prompt-cache-affinity');
 });
 
 test('provider API profile validates and legacy official DeepSeek configs are inferred once', () => {

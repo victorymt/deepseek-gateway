@@ -62,6 +62,7 @@ export type ProviderDraft = {
   apiProfile: "generic" | "deepseek"
   supportsEncryptedAgentMessages: boolean
   supportsPromptCacheKey: boolean
+  keyRouting: "balanced" | "prompt-cache-affinity"
   enabled: boolean
   models: ModelDraft[]
   keys: KeyDraft[]
@@ -142,6 +143,7 @@ export function createEmptyProviderDraft(): ProviderDraft {
     apiProfile: "generic",
     supportsEncryptedAgentMessages: false,
     supportsPromptCacheKey: false,
+    keyRouting: "balanced",
     enabled: true,
     models: [
       {
@@ -181,6 +183,7 @@ export function providerToDraft(provider: Provider): ProviderDraft {
     supportsEncryptedAgentMessages:
       provider.supportsEncryptedAgentMessages === true,
     supportsPromptCacheKey: provider.supportsPromptCacheKey === true,
+    keyRouting: provider.keyRouting,
     enabled: provider.enabled,
     models: provider.models.map(
       ({
@@ -270,6 +273,7 @@ export function providerDraftPayload(
     apiProfile: draft.apiProfile,
     supportsEncryptedAgentMessages: draft.supportsEncryptedAgentMessages,
     supportsPromptCacheKey: draft.supportsPromptCacheKey,
+    keyRouting: draft.keyRouting,
     enabled: draft.enabled,
     models: draft.models,
     balanceQuery: draft.balanceQuery,

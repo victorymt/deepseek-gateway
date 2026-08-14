@@ -126,6 +126,7 @@ function dashboardFetch(currentHealth: Health) {
                   apiProfile: "generic",
                   supportsEncryptedAgentMessages: false,
                   supportsPromptCacheKey: false,
+                  keyRouting: "balanced",
                   enabled: true,
                   models: [
                     {

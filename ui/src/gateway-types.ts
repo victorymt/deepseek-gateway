@@ -161,6 +161,7 @@ export type Provider = {
   apiProfile: "generic" | "deepseek"
   supportsEncryptedAgentMessages: boolean
   supportsPromptCacheKey: boolean
+  keyRouting: "balanced" | "prompt-cache-affinity"
   enabled: boolean
   models: ProviderModel[]
   keys: MaskedProviderKey[]

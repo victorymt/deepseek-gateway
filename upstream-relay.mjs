@@ -1,5 +1,6 @@
 'use strict';
 
+import crypto from 'node:crypto';
 import http from 'node:http';
 import https from 'node:https';
 import { PassThrough, Transform } from 'node:stream';
@@ -30,6 +31,14 @@ function retryAfterSec(res) {
   const d = Date.parse(raw);
   return Number.isNaN(d) ? null : Math.max(1, Math.ceil((d - Date.now()) / 1000));
 }
+
+function promptCacheAffinityKey(provider, payload) {
+  if (provider.keyRouting !== 'prompt-cache-affinity') return null;
+  const value = payload?.prompt_cache_key;
+  if (typeof value !== 'string' || !value.length) return null;
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
 export function upstreamRequestUrl(baseUrl, requestUrl) {
   const incoming = new URL(requestUrl || '/', 'http://gateway.local');
   const upstream = new URL(baseUrl);
@@ -381,6 +390,7 @@ export function resolveRequestRoute(registry, body, requestUrl) {
   return {
     runtime,
     body: prepared.body,
+    affinityKey: promptCacheAffinityKey(runtime.provider, parsed),
     clientPath: pathname,
     requestedModel,
     gatewayModel: requestedModel || registry.settings.defaultModel,
@@ -432,34 +442,47 @@ async function requestUpstream(runtime, clientReq, route, signal) {
   const attempted = [];
   let lastErr = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const key = pool.pickKey(attempted);
-    if (!key) {
+    const selection = pool.pickKey(attempted, route.affinityKey);
+    if (!selection) {
       lastErr = new Error('no keys available');
       break;
     }
+    const { key, probeReservation } = selection;
     attempted.push(key.name);
     key.inFlight++;
     try {
       const response = await forwardOnce(runtime, key, clientReq, route, signal);
       const status = response.statusCode;
-      if (status < 400) return { response, key, preRecorded: false, lastErr };
+      if (status < 400) {
+        return { response, key, probeReservation, preRecorded: false, lastErr };
+      }
       const retryAfter = retryAfterSec(response);
-      pool.recordResult(key, { status, retryAfterSec: retryAfter });
+      pool.recordResult(key, { status, retryAfterSec: retryAfter }, probeReservation);
       const retryable = status === 429 || status === 401 || status === 402 || status >= 500;
       if (retryable && attempt < maxRetries) {
         response.resume();
         response.on('error', () => {});
         continue;
       }
-      return { response, key, preRecorded: true, lastErr };
+      return { response, key, probeReservation: null, preRecorded: true, lastErr };
     } catch (error) {
       const aborted = signal?.aborted;
-      pool.recordResult(key, aborted ? { clientAbort: true } : { networkError: true });
+      pool.recordResult(
+        key,
+        aborted ? { clientAbort: true } : { networkError: true },
+        probeReservation,
+      );
       lastErr = error;
       if (aborted || attempt >= maxRetries) break;
     }
   }
-  return { response: null, key: null, preRecorded: true, lastErr };
+  return {
+    response: null,
+    key: null,
+    probeReservation: null,
+    preRecorded: true,
+    lastErr,
+  };
 }
 
 function routeLogContext(route, status, latencyMs) {
@@ -489,10 +512,12 @@ export async function relay(route, clientReq, clientRes, log) {
     released = true;
     runtime.release();
   };
+  let finishResponse = null;
   try {
     const {
       response: res,
       key,
+      probeReservation,
       preRecorded,
       lastErr,
     } = await requestUpstream(runtime, clientReq, route, abortController.signal);
@@ -511,13 +536,31 @@ export async function relay(route, clientReq, clientRes, log) {
       releaseRuntime();
       return;
     }
+    let responseSettled = false;
+    finishResponse = result => {
+      if (responseSettled) return;
+      responseSettled = true;
+      try {
+        if (!preRecorded) pool.recordResult(key, result, probeReservation);
+      } finally {
+        releaseRuntime();
+      }
+    };
     log(
       `${res.statusCode} ${clientReq.method} ${clientReq.url} provider=${provider.id} model=${route.gatewayModel} key=${key.name} ${ms}ms`,
       routeLogContext({ ...route, method: clientReq.method }, res.statusCode, ms),
     );
-    await relayResponse(clientRes, res, key, pool, preRecorded, route, releaseRuntime);
+    await relayResponse(
+      clientRes,
+      res,
+      key,
+      pool,
+      route,
+      finishResponse,
+    );
   } catch (error) {
-    releaseRuntime();
+    if (finishResponse) finishResponse({ networkError: true });
+    else releaseRuntime();
     throw error;
   } finally {
     clientRes.off('close', abortUpstream);
@@ -873,17 +916,14 @@ function createUsageTracker(pool, protocol = '', model = '') {
   return tracker;
 }
 
-async function relayResponse(clientRes, upRes, key, pool, preRecorded, route, releaseRuntime) {
-  let settled = false;
-  const finish = result => {
-    if (settled) return;
-    settled = true;
-    try {
-      if (!preRecorded) pool.recordResult(key, result);
-    } finally {
-      releaseRuntime();
-    }
-  };
+async function relayResponse(
+  clientRes,
+  upRes,
+  key,
+  pool,
+  route,
+  finish,
+) {
   if (route.responseAdapter?.type === 'chat-completions') {
     await relayAdaptedResponse(clientRes, upRes, key, pool, route, finish);
     return;
